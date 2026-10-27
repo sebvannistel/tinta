@@ -17,4 +17,18 @@ int runInstallCopy();
 // Files, so this process should exit.
 bool offerProgramFilesInstall(Settings& settings, const std::string& inputFile);
 
+// Update chip: downloads the fork's latest tinta.exe to %TEMP%\tinta-update
+// and starts it to install itself once this Tinta closes. False when the
+// download fails.
+bool startSelfUpdate();
+
+// "tinta.exe --update-install": waits for the installed Tinta to close,
+// copies itself over it (Windows asks for permission) and reopens it.
+int runUpdateInstall();
+
+// Removes what an install or update left behind: the downloaded update and
+// the copy an install started from (only if identical to the installed
+// exe). Retries in the background while those processes exit.
+void cleanupLeftovers(const std::wstring& requested);
+
 #endif // TINTA_SELF_INSTALL_H
