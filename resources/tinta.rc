@@ -38,7 +38,7 @@ BEGIN
         BLOCK "040904b0"
         BEGIN
             VALUE "CompanyName",      "oipoistar"
-            VALUE "FileDescription",  "Tinta - fast, lightweight Markdown and Mermaid viewer"
+            VALUE "FileDescription",  "Tinta"
             VALUE "FileVersion",      TINTA_VERSION_STRING
             VALUE "InternalName",     "tinta"
             VALUE "LegalCopyright",   "Copyright (c) oipoistar. MIT License."

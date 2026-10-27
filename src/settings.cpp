@@ -534,6 +534,23 @@ bool registerFileAssociation() {
     RegSetValueExW(hKey, nullptr, 0, REG_SZ, (BYTE*)command.c_str(), (DWORD)((command.length() + 1) * sizeof(wchar_t)));
     RegCloseKey(hKey);
 
+    // "Open with" shows this name for the exe, not its file description
+    {
+        std::wstring appKey = L"Software\\Classes\\Applications\\";
+        std::wstring exeName = exePath;
+        size_t slash = exeName.find_last_of(L"\\/");
+        if (slash != std::wstring::npos) exeName.erase(0, slash + 1);
+        appKey += exeName;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, appKey.c_str(), 0, nullptr,
+                            REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey,
+                            nullptr) == ERROR_SUCCESS) {
+            const wchar_t* friendly = L"Tinta";
+            RegSetValueExW(hKey, L"FriendlyAppName", 0, REG_SZ, (BYTE*)friendly,
+                           (DWORD)((wcslen(friendly) + 1) * sizeof(wchar_t)));
+            RegCloseKey(hKey);
+        }
+    }
+
     // Register app capabilities (required for Windows 10/11)
     result = RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Tinta\\Capabilities", 0, nullptr,
                               REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr);

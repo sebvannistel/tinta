@@ -218,6 +218,27 @@ const D2DTheme THEMES[] = {
         hexColor(0x2EE6CF),    // syntaxFunction - cyan
         hexColor(0xF5E663),    // syntaxType - softened yellow
         hexColor(0xC77DFF)     // syntaxControlFlow - violet (no longer keyword)
+    },
+
+    // 11. White - plain black on pure white. Appended so saved theme
+    // indices keep pointing at the same themes.
+    {
+        L"White", L"Segoe UI", nullptr, L"Consolas", false,
+        hexColor(0xFFFFFF),    // background - pure white
+        hexColor(0x000000),    // text - pure black
+        hexColor(0x000000),    // heading - black
+        hexColor(0x0B57D0),    // link - plain blue
+        hexColor(0x000000),    // code - black
+        hexColor(0xF2F2F2),    // codeBackground - light gray, visible on white
+        hexColor(0xBDBDBD),    // blockquoteBorder
+        hexColor(0x0B57D0),    // accent
+        hexColor(0x0000FF),    // syntaxKeyword - blue
+        hexColor(0xA31515),    // syntaxString - dark red
+        hexColor(0x008000),    // syntaxComment - green
+        hexColor(0x098658),    // syntaxNumber - teal green
+        hexColor(0x795E26),    // syntaxFunction - brown
+        hexColor(0x267F99),    // syntaxType - steel blue
+        hexColor(0xAF00DB)     // syntaxControlFlow - purple
     }
 };
 
