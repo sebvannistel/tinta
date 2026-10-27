@@ -215,6 +215,8 @@ struct Settings {
     int windowHeight = 768;
     bool windowMaximized = false;
     bool hasAskedFileAssociation = false;
+    // Personal: the exe path whose Program Files install offer was declined
+    std::string installDeclinedPath;
     bool editorShowPreview = true;
     bool editorWordWrap = false;
     // Edit sessions that showed the new-user hints (#245): the first few

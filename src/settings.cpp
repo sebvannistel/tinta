@@ -42,6 +42,8 @@ void saveSettings(const Settings& settings) {
     file << "windowHeight=" << settings.windowHeight << "\n";
     file << "windowMaximized=" << (settings.windowMaximized ? 1 : 0) << "\n";
     file << "hasAskedFileAssociation=" << (settings.hasAskedFileAssociation ? 1 : 0) << "\n";
+    if (!settings.installDeclinedPath.empty())
+        file << "installDeclinedPath=" << settings.installDeclinedPath << "\n";
     file << "editorShowPreview=" << (settings.editorShowPreview ? 1 : 0) << "\n";
     file << "editorWordWrap=" << (settings.editorWordWrap ? 1 : 0) << "\n";
     file << "editHintsShown=" << settings.editHintsShown << "\n";
@@ -371,6 +373,8 @@ Settings loadSettings() {
             settings.windowMaximized = (value == "1");
         } else if (key == "hasAskedFileAssociation") {
             settings.hasAskedFileAssociation = (value == "1");
+        } else if (key == "installDeclinedPath") {
+            settings.installDeclinedPath = value;
         } else if (key == "editorShowPreview") {
             settings.editorShowPreview = (value == "1");
         } else if (key == "editorWordWrap") {
@@ -498,10 +502,11 @@ static bool hasRegisteredFileAssociation(std::wstring_view extension) {
         wcscmp(value, L"Tinta.MarkdownFile") == 0;
 }
 
-bool registerFileAssociation() {
-    // Get the path to the current executable
+bool registerFileAssociation(const wchar_t* exePathOverride) {
+    // The current executable unless another one (an install target) is named
     wchar_t exePath[MAX_PATH];
-    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    if (exePathOverride) wcsncpy_s(exePath, exePathOverride, _TRUNCATE);
+    else GetModuleFileNameW(nullptr, exePath, MAX_PATH);
 
     HKEY hKey;
     LONG result;
