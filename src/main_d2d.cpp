@@ -1131,7 +1131,7 @@ static void updateCheckWorker(HWND hwnd) {
                                            INTERNET_DEFAULT_HTTPS_PORT, 0);
         if (connect) {
             HINTERNET request = WinHttpOpenRequest(
-                connect, L"GET", L"/repos/oipoistar/tinta/releases/latest",
+                connect, L"GET", L"/repos/sebvannistel/tinta/releases/latest",
                 nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
                 WINHTTP_FLAG_SECURE);
             if (request) {
@@ -1972,6 +1972,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     std::wstring exportPdfPath;   // debug: write the PDF export and exit
     int posX = 0, posY = 0;       // --pos: spawn position (tab drag-out)
     bool hasPos = false;
+    std::wstring cleanupPath;     // personal: an install's leftover copy
 
     int argc;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -1987,6 +1988,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
             // Elevated half of the Program Files install offer
             LocalFree(argv);
             return runInstallCopy();
+        } else if (arg == L"--update-install") {
+            // A downloaded update installing itself over this Tinta
+            LocalFree(argv);
+            return runUpdateInstall();
+        } else if (arg == L"--cleanup" && i + 1 < argc) {
+            cleanupPath = argv[++i];
         } else if (arg == L"--cascade") {
             cascadeWindow = true;
         } else if (arg == L"--tabbed") {
@@ -2078,6 +2085,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         offerProgramFilesInstall(savedSettings, inputFile)) {
         return 0;
     }
+    cleanupLeftovers(cleanupPath);
 
     // Ask about file association on first run
     askAndRegisterFileAssociation(savedSettings);

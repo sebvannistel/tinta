@@ -1,0 +1,83 @@
+# Personal build: once a day, merge the owner's latest code into this fork's
+# master (in the runner only, nothing is pushed), build and test it, and
+# publish tinta.exe as a release whenever the owner's version number moves
+# on. A merge conflict or a failing test publishes nothing; GitHub emails
+# the failed run. The installed Tinta updates itself from these releases.
+name: Personal build
+
+on:
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout this fork
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+
+      # Scheduled runs pause after 60 days without repository activity;
+      # re-enabling the workflow resets that clock
+      - name: Keep the schedule alive
+        shell: bash
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/personal-build.yml/enable" || true
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Merge the owner's latest code
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898747+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/oipoistar/tinta.git
+          git fetch upstream master
+          git merge --no-edit upstream/master
+
+      - name: Decide whether a release is due
+        id: version
+        shell: bash
+        run: |
+          version=$(sed -n 's/^project(tinta VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          tag="v${version}-personal"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            echo "due=false" >> "$GITHUB_OUTPUT"
+            echo "$tag is already released; nothing to do."
+          else
+            echo "due=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Configure
+        if: steps.version.outputs.due == 'true'
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        if: steps.version.outputs.due == 'true'
+        run: cmake --build build --config Release
+
+      - name: Test
+        if: steps.version.outputs.due == 'true'
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Release
+        if: steps.version.outputs.due == 'true'
+        shell: bash
+        run: |
+          upstream=$(git rev-parse --short upstream/master)
+          gh release create "${{ steps.version.outputs.tag }}" build/Release/tinta.exe \
+            --target "${{ github.sha }}" \
+            --title "Tinta ${{ steps.version.outputs.version }} (personal)" \
+            --notes "Tinta ${{ steps.version.outputs.version }} with the personal changes from this fork's master, merged with the owner's code at ${upstream}. Run tinta.exe and answer Yes to install it into Program Files."
+        env:
+          GH_TOKEN: ${{ github.token }}

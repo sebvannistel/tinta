@@ -3,6 +3,7 @@
 #include "editor.h"
 #include "i18n.h"
 #include "utils.h"
+#include "self_install.h"
 
 #include <shellapi.h>
 #include <algorithm>
@@ -172,9 +173,15 @@ void parkChip(App& app, App::SignalChip&& chip) {
 bool runSignalAction(App& app, HWND hwnd, int action) {
     switch (action) {
         case SIGA_OPEN_RELEASE:
-            ShellExecuteW(nullptr, L"open",
-                          L"https://github.com/oipoistar/tinta/releases/latest",
-                          nullptr, nullptr, SW_SHOWNORMAL);
+            // Personal: download the fork's build, which installs itself
+            // once this Tinta closes; the release page if that fails
+            if (startSelfUpdate()) {
+                PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            } else {
+                ShellExecuteW(nullptr, L"open",
+                              L"https://github.com/sebvannistel/tinta/releases/latest",
+                              nullptr, nullptr, SW_SHOWNORMAL);
+            }
             app.updateDismissed = true;
             return true;
         case SIGA_RESTORE_DRAFTS:
