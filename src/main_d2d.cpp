@@ -3,6 +3,7 @@
 // Much faster startup than OpenGL
 
 #include "app.h"
+#include "self_install.h"
 
 #include <windowsx.h>
 #include <shellapi.h>
@@ -1982,6 +1983,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
             app.showStats = true;
         } else if (arg == L"/register" || arg == L"--register") {
             forceRegister = true;
+        } else if (arg == L"--install-copy") {
+            // Elevated half of the Program Files install offer
+            LocalFree(argv);
+            return runInstallCopy();
         } else if (arg == L"--cascade") {
             cascadeWindow = true;
         } else if (arg == L"--tabbed") {
@@ -2064,6 +2069,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
                        tr(app, "error.title"), MB_OK | MB_ICONWARNING);
         }
         return 0;  // Exit after registering
+    }
+
+    // Personal: offer to install into Program Files (not for the extra
+    // windows Tinta spawns itself, or the debug render/export runs)
+    if (!quickNote && !cascadeWindow && !hasPos && printPagesDir.empty() &&
+        exportHtmlPath.empty() && exportDocxPath.empty() && exportPdfPath.empty() &&
+        offerProgramFilesInstall(savedSettings, inputFile)) {
+        return 0;
     }
 
     // Ask about file association on first run

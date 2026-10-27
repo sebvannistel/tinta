@@ -42,7 +42,7 @@ std::wstring configFilePathForShell(const std::wstring& path);
 
 // Resolve the selected profile and custom [Keys] bindings.
 void applyKeymap(App& app, const Settings& settings);
-bool registerFileAssociation();
+bool registerFileAssociation(const wchar_t* exePathOverride = nullptr);
 void openDefaultAppsSettings();
 void askAndRegisterFileAssociation(Settings& settings);
 

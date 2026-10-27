@@ -37,6 +37,7 @@ set(SOURCES
     src/main_d2d.cpp
     src/markdown.cpp src/footnotes.cpp
     src/themes.cpp
+    src/self_install.cpp
     src/settings.cpp
     src/keymap.cpp
     src/config_dir.cpp
