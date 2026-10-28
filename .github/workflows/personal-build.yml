@@ -17,6 +17,10 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    # gh would otherwise pick the "upstream" remote added below and aim
+    # its release calls at the owner's repository
+    env:
+      GH_REPO: ${{ github.repository }}
     steps:
       - name: Checkout this fork
         uses: actions/checkout@v4
