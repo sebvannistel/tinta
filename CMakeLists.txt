@@ -456,9 +456,9 @@ if(BUILD_TESTING)
     add_executable(plantuml_tests tests/plantuml_tests.cpp src/plantuml.cpp
         src/settings.cpp src/i18n.cpp src/config_dir.cpp
         src/frontmatter.cpp src/keymap.cpp
-        src/plantuml_queue.cpp)
+        src/plantuml_queue.cpp src/file_icon.cpp)
     target_include_directories(plantuml_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-    target_link_libraries(plantuml_tests PRIVATE shell32)
+    target_link_libraries(plantuml_tests PRIVATE shell32 shlwapi ole32 windowscodecs)
     target_compile_definitions(plantuml_tests PRIVATE UNICODE _UNICODE
         TINTA_FAKE_PLANTUML="$<TARGET_FILE:fake_plantuml>"
         TINTA_PLANTUML_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/src/plantuml.cpp")
