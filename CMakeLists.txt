@@ -38,6 +38,7 @@ set(SOURCES
     src/markdown.cpp src/footnotes.cpp
     src/themes.cpp
     src/self_install.cpp
+    src/file_icon.cpp
     src/settings.cpp
     src/keymap.cpp
     src/config_dir.cpp
@@ -165,6 +166,13 @@ if(BUILD_TESTING)
     add_executable(keymap_tests tests/keymap_tests.cpp src/keymap.cpp)
     target_include_directories(keymap_tests PRIVATE include)
     add_test(NAME keymap COMMAND keymap_tests)
+
+    # Personal: the borrowed Markdown file icon
+    add_executable(file_icon_tests tests/file_icon_tests.cpp src/file_icon.cpp src/config_dir.cpp)
+    target_include_directories(file_icon_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
+    target_compile_definitions(file_icon_tests PRIVATE UNICODE _UNICODE)
+    target_link_libraries(file_icon_tests PRIVATE shell32 shlwapi ole32 windowscodecs)
+    add_test(NAME file_icon COMMAND file_icon_tests)
 
     # Exercise the real input handlers and editor with a message-only test
     # window, including layout-dependent character sequences (#195).
