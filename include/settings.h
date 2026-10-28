@@ -45,5 +45,7 @@ void applyKeymap(App& app, const Settings& settings);
 bool registerFileAssociation(const wchar_t* exePathOverride = nullptr);
 void openDefaultAppsSettings();
 void askAndRegisterFileAssociation(Settings& settings);
+// Personal: offer another Markdown app's file icon (force: ask again)
+void offerBorrowedFileIcon(Settings& settings, bool force);
 
 #endif // TINTA_SETTINGS_H

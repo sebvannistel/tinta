@@ -1988,6 +1988,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     int posX = 0, posY = 0;       // --pos: spawn position (tab drag-out)
     bool hasPos = false;
     std::wstring cleanupPath;     // personal: an install's leftover copy
+    bool chooseFileIcon = false;  // personal: --file-icon
 
     int argc;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -1999,6 +2000,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
             app.showStats = true;
         } else if (arg == L"/register" || arg == L"--register") {
             forceRegister = true;
+        } else if (arg == L"--file-icon") {
+            chooseFileIcon = true;
         } else if (arg == L"--install-copy") {
             // Elevated half of the Program Files install offer
             LocalFree(argv);
@@ -2104,6 +2107,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     // Ask about file association on first run
     askAndRegisterFileAssociation(savedSettings);
+    offerBorrowedFileIcon(savedSettings, chooseFileIcon);
 
     if (lightMode) {
         app.currentThemeIndex = 0;  // Paper (first light theme)

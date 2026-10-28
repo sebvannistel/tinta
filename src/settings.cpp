@@ -1,6 +1,7 @@
 #include "settings.h"
 #include "document.h"
 #include "i18n.h"
+#include "file_icon.h"
 
 #include <windows.h>
 #include <shlobj.h>
@@ -42,6 +43,7 @@ void saveSettings(const Settings& settings) {
     file << "windowHeight=" << settings.windowHeight << "\n";
     file << "windowMaximized=" << (settings.windowMaximized ? 1 : 0) << "\n";
     file << "hasAskedFileAssociation=" << (settings.hasAskedFileAssociation ? 1 : 0) << "\n";
+    file << "hasAskedFileIcon=" << (settings.hasAskedFileIcon ? 1 : 0) << "\n";
     if (!settings.installDeclinedPath.empty())
         file << "installDeclinedPath=" << settings.installDeclinedPath << "\n";
     file << "editorShowPreview=" << (settings.editorShowPreview ? 1 : 0) << "\n";
@@ -373,6 +375,8 @@ Settings loadSettings() {
             settings.windowMaximized = (value == "1");
         } else if (key == "hasAskedFileAssociation") {
             settings.hasAskedFileAssociation = (value == "1");
+        } else if (key == "hasAskedFileIcon") {
+            settings.hasAskedFileIcon = (value == "1");
         } else if (key == "installDeclinedPath") {
             settings.installDeclinedPath = value;
         } else if (key == "editorShowPreview") {
@@ -524,7 +528,8 @@ bool registerFileAssociation(const wchar_t* exePathOverride) {
     result = RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\Tinta.MarkdownFile\\DefaultIcon", 0, nullptr,
                               REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr);
     if (result != ERROR_SUCCESS) return false;
-    std::wstring iconPath = exePath;
+    // Personal: or the icon borrowed from another Markdown app
+    std::wstring iconPath = hasBorrowedFileIcon() ? borrowedFileIconPath() : exePath;
     iconPath += L",0";
     RegSetValueExW(hKey, nullptr, 0, REG_SZ, (BYTE*)iconPath.c_str(), (DWORD)((iconPath.length() + 1) * sizeof(wchar_t)));
     RegCloseKey(hKey);
@@ -672,5 +677,53 @@ void askAndRegisterFileAssociation(Settings& settings) {
     }
 
     settings.hasAskedFileAssociation = true;
+    saveSettings(settings);
+}
+
+// Personal: offer another installed Markdown app's file icon for .md files,
+// once (or again with "tinta.exe --file-icon"). English only, like the
+// fork's other personal prompts.
+void offerBorrowedFileIcon(Settings& settings, bool force) {
+    if (isRunningPackaged() || (!force && settings.hasAskedFileIcon)) return;
+    if (!hasRegisteredFileAssociation(L".md")) {
+        if (force)
+            MessageBoxW(nullptr, L"Register Tinta for Markdown files first (tinta.exe --register).",
+                        L"Markdown file icon", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (force && hasBorrowedFileIcon()) {
+        int back = MessageBoxW(nullptr,
+            L"Markdown files use a borrowed file icon.\n\nGo back to Tinta's own icon?",
+            L"Markdown file icon", MB_YESNOCANCEL | MB_ICONQUESTION);
+        if (back == IDCANCEL) return;
+        if (back == IDYES) {
+            DeleteFileW(borrowedFileIconPath().c_str());
+            registerFileAssociation();
+            return;
+        }
+    }
+    std::vector<BorrowableFileIcon> icons = findBorrowableFileIcons();
+    if (icons.empty()) {
+        if (force)
+            MessageBoxW(nullptr, L"No other Markdown app with a file icon is installed.",
+                        L"Markdown file icon", MB_OK | MB_ICONINFORMATION);
+        return;  // asked again once one is installed
+    }
+    for (const BorrowableFileIcon& icon : icons) {
+        std::wstring body = L"Show " + icon.appName +
+            L"'s file icon for Markdown files instead of Tinta's?\n\n"
+            L"The icon is copied into Tinta's settings folder, so it stays if " +
+            icon.appName + L" is uninstalled. Run tinta.exe --file-icon to change it later.";
+        int choice = MessageBoxW(nullptr, body.c_str(), L"Markdown file icon",
+                                 MB_YESNOCANCEL | MB_ICONQUESTION);
+        if (choice == IDCANCEL) break;
+        if (choice == IDNO) continue;
+        if (copyFileIcon(icon.iconSource, borrowedFileIconPath()) && registerFileAssociation())
+            break;
+        MessageBoxW(nullptr, (L"Could not copy " + icon.appName + L"'s icon.").c_str(),
+                    L"Markdown file icon", MB_OK | MB_ICONWARNING);
+        break;
+    }
+    settings.hasAskedFileIcon = true;
     saveSettings(settings);
 }

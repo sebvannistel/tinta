@@ -214,6 +214,7 @@ struct Settings {
     int windowHeight = 768;
     bool windowMaximized = false;
     bool hasAskedFileAssociation = false;
+    bool hasAskedFileIcon = false;  // personal: borrowed .md icon offer
     // Personal: the exe path whose Program Files install offer was declined
     std::string installDeclinedPath;
     bool editorShowPreview = true;
