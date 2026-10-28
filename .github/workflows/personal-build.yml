@@ -9,6 +9,11 @@ on:
   schedule:
     - cron: '23 5 * * 1'
   workflow_dispatch:
+    inputs:
+      build_only:
+        description: "Build and test even if this version is released, without releasing"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -53,25 +58,36 @@ jobs:
           tag="v${version}-personal"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          if gh release view "$tag" > /dev/null 2>&1; then
+          if [ "${{ inputs.build_only }}" = "true" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "due=false" >> "$GITHUB_OUTPUT"
+            echo "Build only; nothing will be released."
+          elif gh release view "$tag" > /dev/null 2>&1; then
             echo "due=false" >> "$GITHUB_OUTPUT"
             echo "$tag is already released; nothing to do."
           else
+            echo "build=true" >> "$GITHUB_OUTPUT"
             echo "due=true" >> "$GITHUB_OUTPUT"
           fi
         env:
           GH_TOKEN: ${{ github.token }}
 
+      # /MP compiles a target's files on all the runner's cores, and
+      # --parallel builds the targets side by side: one file at a time, the
+      # build took 36 minutes
       - name: Configure
-        if: steps.version.outputs.due == 'true'
+        if: steps.version.outputs.build == 'true'
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+        env:
+          CFLAGS: /MP
+          CXXFLAGS: /MP
 
       - name: Build
-        if: steps.version.outputs.due == 'true'
-        run: cmake --build build --config Release
+        if: steps.version.outputs.build == 'true'
+        run: cmake --build build --config Release --parallel
 
       - name: Test
-        if: steps.version.outputs.due == 'true'
+        if: steps.version.outputs.build == 'true'
         run: ctest --test-dir build -C Release --output-on-failure
 
       - name: Release
