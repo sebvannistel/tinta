@@ -1,4 +1,4 @@
-# Personal build: once a day, merge the owner's latest code into this fork's
+# Personal build: once a week (Mondays), merge the owner's latest code into this fork's
 # master (in the runner only, nothing is pushed), build and test it, and
 # publish tinta.exe as a release whenever the owner's version number moves
 # on. A merge conflict or a failing test publishes nothing; GitHub emails
@@ -7,7 +7,7 @@ name: Personal build
 
 on:
   schedule:
-    - cron: '23 5 * * *'
+    - cron: '23 5 * * 1'
   workflow_dispatch:
 
 permissions:
