@@ -15,6 +15,7 @@
 #include "overlays.h"
 #include "search.h"
 #include "settings.h"
+#include "sidepanels.h"
 #include "tabs.h"
 #include "utils.h"
 
@@ -317,6 +318,12 @@ D2D1_RECT_F searchPanelListRect(const App& app) {
                        card.right - dpi(app, 6.0f),
                        std::max(card.top + dpi(app, 96.0f),
                                 card.bottom - dpi(app, 26.0f)));
+}
+
+D2D1_RECT_F searchPanelCardRect(const App& app) { return cardRect(app); }
+
+float searchPanelContentHeight(const App& app) {
+    return rowsHeight(searchPanelRows(app));
 }
 
 std::vector<SearchPanelRow> searchPanelRows(const App& app) {
@@ -784,21 +791,7 @@ void renderSearchPanel(App& app) {
     app.renderTarget->PopAxisAlignedClip();
 
     // Scrollbar once the list outgrows its room
-    float total = rowsHeight(rows);
-    float height = list.bottom - list.top;
-    if (total > height && height > 0.0f) {
-        float thumb = std::max(dpi(app, 20.0f), height / total * height);
-        float range = std::max(1.0f, maxScroll(app, rows));
-        float thumbY = list.top + app.searchPanelScroll / range * (height - thumb);
-        D2D1_COLOR_F c = text;
-        c.a = 0.25f * anim;
-        app.brush->SetColor(c);
-        app.renderTarget->FillRoundedRectangle(
-            D2D1::RoundedRect(D2D1::RectF(card.right - dpi(app, 6.0f), thumbY,
-                                          card.right - dpi(app, 3.0f), thumbY + thumb),
-                              1.5f, 1.5f),
-            app.brush);
-    }
+    renderPanelScrollbar(app, PanelList::Search, anim);
 
     // Footer: how to step through, and the shortcut
     float footTop = list.bottom;

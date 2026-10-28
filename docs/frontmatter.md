@@ -14,6 +14,12 @@ At narrow widths, the right group stacks below the left group.
 - Booleans: their plain value. Nested objects are identified as structured
   values rather than flattened into misleading scalar fields.
 
+Calendar dates, relative times and counts read in the interface language. A
+calendar date is the language's own short form from Windows (Jan 3, 2026;
+3. Jan 2026; 2026年1月3日), in your regional format when that is in the same
+language, so English reads 3 Jan 2026 with a British region. The YAML values
+themselves never change.
+
 Newly encountered keys follow the **Any new key** rule. Rows already listed keep
 their individual choices. Settings are global and saved in `settings.ini`; the
 field names are encoded in the ordered `frontmatterRule` entries so arbitrary
@@ -55,4 +61,5 @@ headings remain independent of a large title property.
 
 - [Display controls and mixed Markdown](../tests/fixtures/frontmatter-settings.md)
 - [Missing dates on first save](../tests/fixtures/frontmatter-first-save.md)
+- [Dates and counts in each language](../tests/fixtures/frontmatter-dates-localized.md)
 - [A document without frontmatter](../tests/fixtures/frontmatter-no-block.md)

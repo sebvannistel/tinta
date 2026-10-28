@@ -1,0 +1,322 @@
+# Touch gestures (#286)
+
+On a touchscreen a finger dragged across this page scrolls it instead of
+selecting text, and a flick carries the page on after the finger lifts.
+A tap follows a link: [jump to the end](#the-end). A double tap selects a
+word, such as marigold. Hold a finger on lavender until it is selected,
+then slide to rosemary: the words between join the selection, and the
+context menu opens where the finger lifts.
+
+> The Contents (**Tab**), the file browser (**B**) and the search results
+> (**Ctrl+Shift+F**) pan with a finger too. The mouse still selects text,
+> and the scrollbars still drag.
+
+| Bed 1 | Bed 2 | Bed 3 | Bed 4 | Bed 5 | Bed 6 | Bed 7 | Bed 8 | Bed 9 | Bed 10 | Bed 11 | Bed 12 | Bed 13 | Bed 14 | Bed 15 | Bed 16 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `12` cm | `24` cm | `36` cm | **Chard** | `60` cm | `72` cm | `84` cm | **Beans** | `108` cm | `120` cm | `132` cm | **Chard** | `156` cm | `168` cm | `180` cm | **Beans** |
+
+- A list item with *emphasis*
+- Another with `inline code`
+  - and a nested one
+
+```python
+def water(bed):
+    # beds=000,001,002,003,004,005,006,007,008,009,010,011,012,013,014,015,016,017,018,019,020,021,022,023,024,025,026,027,028,029,030,031,032,033,034,035,036,037,038,039,040,041,042,043,044,045,046,047,048,049,050,051,052,053,054,055,056,057,058,059,060,061,062,063,064,065,066,067,068,069
+    return bed.moisture < 0.3
+```
+
+## Section 1: Kale
+
+Section 1 is about *kale*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+## Section 2: Leeks
+
+Section 2 is about *leeks*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+## Section 3: Peas
+
+Section 3 is about *peas*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+## Section 4: Chard
+
+Section 4 is about *chard*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+> A quote about chard.
+
+## Section 5: Onions
+
+Section 5 is about *onions*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+1. Sow
+2. Thin the onions
+3. Harvest
+
+## Section 6: Squash
+
+Section 6 is about *squash*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+## Section 7: Radish
+
+Section 7 is about *radish*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+## Section 8: Beans
+
+Section 8 is about *beans*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+> A quote about beans.
+
+## Section 9: Kale
+
+Section 9 is about *kale*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+## Section 10: Leeks
+
+Section 10 is about *leeks*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+1. Sow
+2. Thin the leeks
+3. Harvest
+
+## Section 11: Peas
+
+Section 11 is about *peas*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+## Section 12: Chard
+
+Section 12 is about *chard*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+> A quote about chard.
+
+## Section 13: Onions
+
+Section 13 is about *onions*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+## Section 14: Squash
+
+Section 14 is about *squash*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+## Section 15: Radish
+
+Section 15 is about *radish*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+1. Sow
+2. Thin the radish
+3. Harvest
+
+## Section 16: Beans
+
+Section 16 is about *beans*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+> A quote about beans.
+
+## Section 17: Kale
+
+Section 17 is about *kale*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+## Section 18: Leeks
+
+Section 18 is about *leeks*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+## Section 19: Peas
+
+Section 19 is about *peas*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+## Section 20: Chard
+
+Section 20 is about *chard*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+> A quote about chard.
+
+1. Sow
+2. Thin the chard
+3. Harvest
+
+## Section 21: Onions
+
+Section 21 is about *onions*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+## Section 22: Squash
+
+Section 22 is about *squash*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+## Section 23: Radish
+
+Section 23 is about *radish*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+## Section 24: Beans
+
+Section 24 is about *beans*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+> A quote about beans.
+
+## Section 25: Kale
+
+Section 25 is about *kale*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+1. Sow
+2. Thin the kale
+3. Harvest
+
+## Section 26: Leeks
+
+Section 26 is about *leeks*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+## Section 27: Peas
+
+Section 27 is about *peas*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+## Section 28: Chard
+
+Section 28 is about *chard*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+> A quote about chard.
+
+## Section 29: Onions
+
+Section 29 is about *onions*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+## Section 30: Squash
+
+Section 30 is about *squash*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+1. Sow
+2. Thin the squash
+3. Harvest
+
+## Section 31: Radish
+
+Section 31 is about *radish*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+## Section 32: Beans
+
+Section 32 is about *beans*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+> A quote about beans.
+
+## Section 33: Kale
+
+Section 33 is about *kale*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+## Section 34: Leeks
+
+Section 34 is about *leeks*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+## Section 35: Peas
+
+Section 35 is about *peas*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+1. Sow
+2. Thin the peas
+3. Harvest
+
+## Section 36: Chard
+
+Section 36 is about *chard*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+> A quote about chard.
+
+## Section 37: Onions
+
+Section 37 is about *onions*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+## Section 38: Squash
+
+Section 38 is about *squash*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+## Section 39: Radish
+
+Section 39 is about *radish*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+## Section 40: Beans
+
+Section 40 is about *beans*, with **bold notes**, `code`
+and a [link back to the top](#touch-gestures-286), in a paragraph that
+wraps across a couple of lines in an ordinary window.
+
+> A quote about beans.
+
+1. Sow
+2. Thin the beans
+3. Harvest
+
+## The end
+
+The last paragraph of the page.

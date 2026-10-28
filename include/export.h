@@ -32,12 +32,15 @@ mermaidext::Built buildFlowchartPrims(App& app, const std::string& sourceUtf8,
                                       float scale);
 
 // Rasterizes a diagram at 2x and puts it on the clipboard as CF_DIB plus
-// a PNG stream, for pasting into slides/chats/documents (export_docx.cpp)
-bool copyDiagramImage(App& app, HWND hwnd, const std::string& sourceUtf8);
+// a PNG stream, for pasting into slides/chats/documents (export_docx.cpp).
+// held is set when the clipboard stayed held by another program.
+bool copyDiagramImage(App& app, HWND hwnd, const std::string& sourceUtf8,
+                      bool* held = nullptr);
 
 // Puts a rendered PlantUML PNG (the queue's cached file) on the clipboard
 // at 2x, composited over the active theme background (export_docx.cpp)
-bool copyPlantumlImageToClipboard(App& app, const std::wstring& pngPath);
+bool copyPlantumlImageToClipboard(App& app, const std::wstring& pngPath,
+                                  bool* held = nullptr);
 
 // Clipboard bitmap -> PNG file (editor image paste; export_docx.cpp)
 bool clipboardImageToPngFile(App& app, HWND hwnd, const std::wstring& path);

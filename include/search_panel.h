@@ -38,6 +38,9 @@ struct SearchPanelRow {
 // The list as drawn, shared by rendering, hit-testing and the tests
 std::vector<SearchPanelRow> searchPanelRows(const App& app);
 D2D1_RECT_F searchPanelListRect(const App& app);
+// The panel's frame, and its rows end to end
+D2D1_RECT_F searchPanelCardRect(const App& app);
+float searchPanelContentHeight(const App& app);
 
 // Pointer input; each returns true when the panel or the bar's results
 // button took it

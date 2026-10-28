@@ -139,3 +139,33 @@ though Tinta behaved correctly:
 
 The suite then passed three runs in a row in about 2.5 s, against 30 s of
 picker timeouts before.
+
+## Translations (#283)
+
+Added on 2026-10-27 from go4399's patch on #283. The setting and its hint
+showed in English in Chinese, Japanese, Korean, German, French and Italian;
+only Russian had them. Four changes to the patch:
+
+- the German, French and Italian lines spell their accented letters as
+  escapes, since the sources build without `/utf-8` (the `i18n` source scan
+  rejects raw text in a wide literal);
+- French uses a straight apostrophe, *jusqu'à*, like every other French
+  string;
+- Italian uses the imperative, *Mantieni i file eliminati in memoria*, like
+  the other Italian settings (*Mostra le notifiche*, *Segui il tema di
+  Windows*);
+- Korean attaches the particle to the name, *Tinta가 종료될 때까지*, like the
+  other Korean strings, and its label spells its spaces as plain spaces.
+
+`i18n` checks that both strings differ from English in all seven built-in
+languages, and checks the Chinese label and the French hint word for word.
+Without the new strings it fails 14 checks: 12 for the six languages and
+the 2 exact ones. `tests/check_russian_translations.py` still reports
+complete Russian coverage, and the full suite passed 47 of 47.
+
+In the real app (Release build, isolated portable copies with `language=`
+set, Ctrl+, posted to the window), Settings → General shows the translated
+label and hint in Chinese, Japanese, Korean, German, French and Italian at
+1100 px, with every accent intact. At 650 px the German and French label
+and hint end in an ellipsis, like the other long German rows; nothing
+overlaps the switch. Screenshots are in `out/verify-283/` (ignored).

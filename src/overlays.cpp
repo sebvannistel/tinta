@@ -304,6 +304,18 @@ float folderItemContentY(const FolderBrowserMetrics& g, int index) {
     return y + (index - g.dirCount) * g.itemHeight;
 }
 
+float folderBrowserContentHeight(const App& app, const FolderBrowserMetrics& g) {
+    return g.namingOffset +
+           (app.folderItems.empty()
+                ? 0.0f
+                : folderItemContentY(g, (int)app.folderItems.size() - 1) + g.itemHeight);
+}
+
+float folderBrowserMaxScroll(const App& app) {
+    FolderBrowserMetrics g = folderBrowserMetrics(app);
+    return std::max(0.0f, folderBrowserContentHeight(app, g) - (g.listBottom - g.listStartY));
+}
+
 // Item index at a client point, sharing renderFolderBrowser's geometry.
 // Clicks must hit-test their own coordinates: the render-time hover index
 // lags one paint behind the mouse, so a fast move-and-click would act on
@@ -669,11 +681,7 @@ void renderFolderBrowser(App& app) {
         float listStartY = g.listStartY;
         float listHeight = g.listBottom - listStartY;
         float namingOffset = g.namingOffset;
-        float totalItemsHeight = namingOffset +
-            (app.folderItems.empty()
-                 ? 0.0f
-                 : folderItemContentY(g, (int)app.folderItems.size() - 1) +
-                       g.itemHeight);
+        float totalItemsHeight = folderBrowserContentHeight(app, g);
 
         // Clamp scroll
         float maxScroll = std::max(0.0f, totalItemsHeight - listHeight);
@@ -836,19 +844,7 @@ void renderFolderBrowser(App& app) {
         }
 
         // Scrollbar if needed
-        if (totalItemsHeight > listHeight) {
-            float sbHeight = listHeight / totalItemsHeight * listHeight;
-            sbHeight = std::max(sbHeight, dpi(app, 20.0f));
-            float sbY = listStartY + (maxScroll > 0 ? (app.folderBrowserScroll / maxScroll * (listHeight - sbHeight)) : 0);
-
-            D2D1_COLOR_F sbColor = app.theme.text;
-            sbColor.a = 0.25f * anim;
-            app.brush->SetColor(sbColor);
-            app.renderTarget->FillRoundedRectangle(
-                D2D1::RoundedRect(D2D1::RectF(g.cardRight - dpi(app, 6.0f), sbY,
-                                              g.cardRight - dpi(app, 3.0f), sbY + sbHeight), 1.5f, 1.5f),
-                app.brush);
-        }
+        renderPanelScrollbar(app, PanelList::Browser, anim);
 
         // Footer: counts on the left, the key hints on the right
         float footTop = g.listBottom;
@@ -906,13 +902,17 @@ float tocHeadingIndent(const App& app, int level) {
     return std::clamp(level - 1, 0, 5) * step;
 }
 
-float tocMaxScroll(const App& app) {
-    const auto rect = tocListRect(app);
+float tocListContentHeight(const App& app) {
     const auto needle = toLower(app.tocFilter);
     size_t count = 0;
     for (const auto& heading : app.headings)
         if (needle.empty() || toLower(heading.text).find(needle) != std::wstring::npos) ++count;
-    return std::max(0.0f, count * dpi(app, 26.0f) - std::max(0.0f, rect.bottom - rect.top));
+    return count * dpi(app, 26.0f);
+}
+
+float tocMaxScroll(const App& app) {
+    const auto rect = tocListRect(app);
+    return std::max(0.0f, tocListContentHeight(app) - std::max(0.0f, rect.bottom - rect.top));
 }
 
 // Click hit-test sharing the renderer's card geometry (#114 pattern:
@@ -1227,19 +1227,7 @@ void renderToc(App& app) {
             app.renderTarget->PopAxisAlignedClip();
 
             // Scrollbar if needed
-            if (totalItemsHeight > listHeight) {
-                float sbHeight = listHeight / totalItemsHeight * listHeight;
-                sbHeight = std::max(sbHeight, dpi(app, 20.0f));
-                float sbY = listStartY + (maxScroll > 0 ? (app.tocScroll / maxScroll * (listHeight - sbHeight)) : 0);
-
-                D2D1_COLOR_F sbColor = app.theme.text;
-                sbColor.a = 0.25f * anim;
-                app.brush->SetColor(sbColor);
-                app.renderTarget->FillRoundedRectangle(
-                    D2D1::RoundedRect(D2D1::RectF(cardRight - dpi(app, 6.0f), sbY,
-                                                  cardRight - dpi(app, 3.0f), sbY + sbHeight), 1.5f, 1.5f),
-                    app.brush);
-            }
+            renderPanelScrollbar(app, PanelList::Contents, anim);
         }
 
         // Footer: the hint plus the active Contents shortcut
@@ -4025,6 +4013,19 @@ void renderThemeEditor(App& app) {
         float fontRowHeight = dpi(app, 26.0f);
         float maxScroll = std::max(0.0f,
             (float)rows * fontRowHeight - (list.bottom - list.top));
+        if (app.themeEditorFontScroll < 0.0f) {
+            // Opening the editor, its base arrows and Text / Headings / Code
+            // centre the chosen face, here where the list's height is known
+            // (#284)
+            int row = 0;
+            for (size_t i = 0; !chosen.empty() && i < app.systemFontFamilies.size(); i++) {
+                if (_wcsicmp(app.systemFontFamilies[i].c_str(), chosen.c_str()) == 0) {
+                    row = (int)i + lead;
+                    break;
+                }
+            }
+            app.themeEditorFontScroll = row * fontRowHeight - (list.bottom - list.top - fontRowHeight) / 2;
+        }
         app.themeEditorFontScroll = std::max(0.0f, std::min(app.themeEditorFontScroll, maxScroll));
         int first = (int)(app.themeEditorFontScroll / fontRowHeight);
         int visible = (int)((list.bottom - list.top) / fontRowHeight) + 2;

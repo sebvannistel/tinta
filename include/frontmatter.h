@@ -43,7 +43,11 @@ const Rule* find(const Settings& settings, const std::string& key);
 bool discover(Settings& settings, const std::vector<Property>& properties);
 bool maintained(const Settings& settings, const std::string& key);
 std::vector<Format> formats(Kind kind);
-std::string formatValue(const Property& property, Format format, const std::string& now);
+// The calendar date a date value names, as written (an offset never moves it)
+bool calendarDate(const std::string& value, int& year, int& month, int& day);
+// Seconds from a date value to now, negative while it lies ahead; false
+// unless both are dates
+bool secondsSince(const std::string& value, const std::string& now, long long& seconds);
 std::string utcNow();
 // Edits only unambiguous scalar values, never reserializes the YAML document.
 std::string stamp(const std::string& source, const Settings& settings,

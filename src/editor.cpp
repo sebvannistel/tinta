@@ -1102,23 +1102,20 @@ static bool editorMoveLines(App& app, bool down) {
 
 // --- Clipboard ---
 
-static void editorCopyToClipboard(HWND hwnd, const std::wstring& text) {
-    if (text.empty()) return;
-    if (!OpenClipboard(hwnd)) return;
-    EmptyClipboard();
-    size_t bytes = (text.size() + 1) * sizeof(wchar_t);
-    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, bytes);
-    if (hMem) {
-        wchar_t* ptr = (wchar_t*)GlobalLock(hMem);
-        memcpy(ptr, text.c_str(), bytes);
-        GlobalUnlock(hMem);
-        SetClipboardData(CF_UNICODETEXT, hMem);
-    }
-    CloseClipboard();
+// Another program can hold the clipboard open for a moment, as Remote
+// Desktop's clipboard sync and clipboard history do after each change: the
+// copy waits for it briefly, and held for longer, copies nothing and says
+// so. Returns whether the text is on the clipboard: Cut deletes only what
+// it copied.
+static bool editorCopyToClipboard(App& app, HWND hwnd, const std::wstring& text) {
+    bool held = false;
+    if (copyToClipboard(hwnd, text, &held)) return true;
+    if (held) signalClipboardBusy(app);
+    return false;
 }
 
 static std::wstring editorGetClipboard(HWND hwnd) {
-    if (!OpenClipboard(hwnd)) return {};
+    if (!openClipboard(hwnd)) return {};
     HANDLE hData = GetClipboardData(CF_UNICODETEXT);
     if (!hData) { CloseClipboard(); return {}; }
     wchar_t* ptr = (wchar_t*)GlobalLock(hData);
@@ -2749,22 +2746,20 @@ void handleEditorKeyDown(App& app, HWND hwnd, WPARAM wParam) {
                 return;
             case 'C':
                 if (!app.editorExtraCarets.empty()) {
-                    editorCopyToClipboard(hwnd, editorCaretSelectionsText(app));
+                    editorCopyToClipboard(app, hwnd, editorCaretSelectionsText(app));
                 } else if (app.editorHasSelection) {
-                    editorCopyToClipboard(hwnd, editorGetSelectedText(app));
+                    editorCopyToClipboard(app, hwnd, editorGetSelectedText(app));
                 }
                 return;
             case 'X':
                 if (!app.editorExtraCarets.empty()) {
                     std::wstring cut = editorCaretSelectionsText(app);
-                    if (cut.empty()) return;
-                    editorCopyToClipboard(hwnd, cut);
+                    if (cut.empty() || !editorCopyToClipboard(app, hwnd, cut)) return;
                     editorEditAtCarets(app, [&](size_t) { editorDeleteSelection(app); });
                     scheduleReparse(app);
                     editorEnsureCursorVisible(app);
                     InvalidateRect(hwnd, nullptr, FALSE);
-                } else if (app.editorHasSelection) {
-                    editorCopyToClipboard(hwnd, editorGetSelectedText(app));
+                } else if (app.editorHasSelection && editorCopyToClipboard(app, hwnd, editorGetSelectedText(app))) {
                     editorDeleteSelection(app);
                     scheduleReparse(app);
                     editorEnsureCursorVisible(app);
@@ -3272,12 +3267,10 @@ void editorInsertSnippetPublic(App& app, HWND hwnd,
 void editorClipboardCut(App& app, HWND hwnd) {
     if (!app.editorExtraCarets.empty()) {
         std::wstring cut = editorCaretSelectionsText(app);
-        if (cut.empty()) return;
-        editorCopyToClipboard(hwnd, cut);
+        if (cut.empty() || !editorCopyToClipboard(app, hwnd, cut)) return;
         editorEditAtCarets(app, [&](size_t) { editorDeleteSelection(app); });
     } else {
-        if (!app.editorHasSelection) return;
-        editorCopyToClipboard(hwnd, editorGetSelectedText(app));
+        if (!app.editorHasSelection || !editorCopyToClipboard(app, hwnd, editorGetSelectedText(app))) return;
         editorDeleteSelection(app);
     }
     rebuildLineStarts(app);
@@ -3288,9 +3281,9 @@ void editorClipboardCut(App& app, HWND hwnd) {
 
 void editorClipboardCopy(App& app, HWND hwnd) {
     if (!app.editorExtraCarets.empty()) {
-        editorCopyToClipboard(hwnd, editorCaretSelectionsText(app));
+        editorCopyToClipboard(app, hwnd, editorCaretSelectionsText(app));
     } else if (app.editorHasSelection) {
-        editorCopyToClipboard(hwnd, editorGetSelectedText(app));
+        editorCopyToClipboard(app, hwnd, editorGetSelectedText(app));
     }
 }
 

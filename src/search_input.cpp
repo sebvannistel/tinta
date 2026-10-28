@@ -106,22 +106,6 @@ void insert(App& app, int field, const std::wstring& value) {
     state.caret = state.anchor = start + value.size();
     changed(app, field);
 }
-bool copySelection(HWND hwnd, const std::wstring& text) {
-    bool opened = false;
-    for (int attempt = 0; attempt < 10 && !(opened = OpenClipboard(hwnd) != FALSE); ++attempt) Sleep(5);
-    if (!opened) return false;
-    HGLOBAL data = GlobalAlloc(GMEM_MOVEABLE, (text.size()+1)*sizeof(wchar_t));
-    void* dest = data ? GlobalLock(data) : nullptr;
-    bool success = false;
-    if (dest) {
-        memcpy(dest, text.c_str(), (text.size()+1)*sizeof(wchar_t));
-        GlobalUnlock(data);
-        if (EmptyClipboard() && SetClipboardData(CF_UNICODETEXT, data)) success = true;
-    }
-    if (!success && data) GlobalFree(data);
-    CloseClipboard();
-    return success;
-}
 size_t hitPosition(App& app, int field, float x) {
     auto& state = app.searchFields[field];
     const auto& text = textFor(app, field);
@@ -218,7 +202,15 @@ bool searchInputKeyDown(App& app, HWND hwnd, WPARAM key) {
     if (ctrl && (key == 'A' || key == 'C' || key == 'X' || key == 'V')) {
         size_t start = std::min(state.caret, state.anchor), end = std::max(state.caret, state.anchor);
         if (key == 'A') { state.anchor = 0; state.caret = text.size(); }
-        if ((key == 'C' || key == 'X') && start != end && copySelection(hwnd, text.substr(start, end-start)) && key == 'X') insert(app, field, L"");
+        if ((key == 'C' || key == 'X') && start != end) {
+            // Cut removes only what reached the clipboard
+            bool held = false;
+            if (copyToClipboard(hwnd, text.substr(start, end-start), &held)) {
+                if (key == 'X') insert(app, field, L"");
+            } else if (held) {
+                signalClipboardBusy(app);
+            }
+        }
         if (key == 'V') {
             auto pasted = clipboardLine(hwnd);
             if (!pasted.empty()) insert(app, field, pasted);

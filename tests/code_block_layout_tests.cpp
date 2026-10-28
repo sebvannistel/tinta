@@ -468,14 +468,22 @@ void testCopyButton() {
                     const float x = right - pad - dpi(app, 36.0f) - app.scrollX + documentViewportX(app);
                     const float y = bounds.top + pad + dpi(app, 13.0f) - app.scrollY;
                     const LPARAM point = MAKELPARAM((int)x, (int)y);
-                    // Remote Desktop's clipboard sync can hold the clipboard
-                    // for a moment after each change; a copy that lost that
-                    // race leaves the sentinel, and the click is repeated
+                    // Programs that follow the clipboard (rdpclip over Remote
+                    // Desktop, WSLg's msrdc, clipboard history) open it to
+                    // read each change in the quarter second after it. A
+                    // click then finds it held and copies nothing, leaving
+                    // the sentinel, so the click is repeated after a pause.
+                    // The sentinel is written once, since each write starts
+                    // the readers over.
+                    for (int i2 = 0; i2 < 100 && !copyToClipboard(app.hwnd, L"sentinel"); ++i2) Sleep(5);
                     std::wstring copied = L"sentinel";
-                    for (int attempt = 0; attempt < 5 && copied == L"sentinel"; ++attempt) {
-                        for (int i2 = 0; i2 < 100 && !copyToClipboard(app.hwnd, L"sentinel"); ++i2) Sleep(5);
+                    int clicks = 0;
+                    for (; clicks < 20 && copied == L"sentinel"; ++clicks) {
+                        if (clicks) Sleep(50);
                         handleMouseMove(app, app.hwnd, point);
-                        check(app.hoveredCodeBlock == (int)i, "the pointer is over the block's copy button");
+                        const bool over = app.hoveredCodeBlock == (int)i;
+                        check(over, "the pointer is over the block's copy button");
+                        if (!over) break;
                         handleMouseDown(app, app.hwnd, MK_LBUTTON, point);
                         handleMouseUp(app, app.hwnd, 0, point);
                         copied = clipboardText(app.hwnd);
@@ -484,8 +492,8 @@ void testCopyButton() {
                           "Copy puts the block's lines on the clipboard, no break after the last: block " +
                               std::to_string(i) + " gave \"" + escaped(copied) + "\" (theme " +
                               std::to_string(theme) + ", scale " + std::to_string(scale) +
-                              ", width " + std::to_string(width) + ", chips " +
-                              std::to_string(app.signalChips.size()) + ")");
+                              ", width " + std::to_string(width) + ", clicks " +
+                              std::to_string(clicks) + ")");
                 }
             }
         }

@@ -113,6 +113,88 @@ int main() {
         check(codeIntact == 1, "inline code untouched");
     }
 
+    // A span the post-pass creates is split again inside, so scripts and
+    // marks nest in each other: ~~struck x^2^~~ kept literal carets before
+    {
+        std::function<std::string(const qmd::ElementPtr&)> shape =
+            [&](const qmd::ElementPtr& node) -> std::string {
+            if (node->type == qmd::ElementType::Text) return "'" + node->text + "'";
+            if (node->type == qmd::ElementType::MathInline) return "$" + node->text + "$";
+            std::string out = qmd::elementTypeToString(node->type) + "(";
+            for (size_t i = 0; i < node->children.size(); i++) {
+                if (i) out += ",";
+                out += shape(node->children[i]);
+            }
+            return out + ")";
+        };
+        auto paragraphShape = [&](const std::string& source) {
+            auto doc = parseDocument(parser, source, "notes.md");
+            if (!doc.success || !doc.root || doc.root->children.empty()) return std::string("<no block>");
+            return shape(doc.root->children[0]);
+        };
+        struct NestCase { const char* source; const char* expected; const char* message; };
+        const NestCase cases[] = {
+            {"~~struck x^2^~~\n",
+             "Paragraph(Strikethrough('struck x',Superscript('2')))",
+             "superscript nests in strikethrough"},
+            {"==mark x^2^ and H~2~O==\n",
+             "Paragraph(Highlight('mark x',Superscript('2'),' and H',Subscript('2'),'O'))",
+             "scripts nest in a highlight"},
+            {"==mark ~~gone~~ kept==\n",
+             "Paragraph(Highlight('mark ',Strikethrough('gone'),' kept'))",
+             "strikethrough nests in a highlight"},
+            {"~~old ==mark== text~~\n",
+             "Paragraph(Strikethrough('old ',Highlight('mark'),' text'))",
+             "highlight nests in strikethrough"},
+            {"x^a~i~^ and H~2^+^~\n",
+             "Paragraph('x',Superscript('a',Subscript('i')),' and H',Subscript('2',Superscript('+')))",
+             "superscript and subscript nest in each other"},
+            {"~~a ~b~ c~~\n",
+             "Paragraph(Strikethrough('a ',Subscript('b'),' c'))",
+             "subscript nests in strikethrough"},
+            // The closing run is shared: the subscript takes its first
+            // tilde and the strikethrough the last two
+            {"~~a ~b~~~ after\n",
+             "Paragraph(Strikethrough('a ',Subscript('b')),' after')",
+             "subscript closing against strikethrough shares the tilde run"},
+            {"~~a~~~ after\n",
+             "Paragraph(Strikethrough('a'),'~ after')",
+             "a spare tilde after strikethrough stays literal"},
+            {"~~x~~~y~\n",
+             "Paragraph(Strikethrough('x'),Subscript('y'))",
+             "a subscript right after strikethrough keeps its own tildes"},
+            // Math stays one opaque node at every level, and nested
+            // delimiters never reach into it
+            {"==see $a^b$ and x^2^==\n",
+             "Paragraph(Highlight('see ',$a^b$,' and x',Superscript('2')))",
+             "math inside a highlight stays opaque beside a nested script"},
+            {"~~old ==$x==y$ mark== end~~\n",
+             "Paragraph(Strikethrough('old ',Highlight($x==y$,' mark'),' end'))",
+             "math delimiters stay literal in a nested highlight"},
+            {"==mark x^2^== `~~x^2^~~`\n",
+             "Paragraph(Highlight('mark x',Superscript('2')),' ',Code('~~x^2^~~'))",
+             "inline code beside a nested span stays literal"},
+            {"**bold ~~struck x^2^~~**\n",
+             "Paragraph(Strong('bold ',Strikethrough('struck x',Superscript('2'))))",
+             "nesting works inside md4c emphasis"},
+            // An inline HTML span (#263) moves whole into the nested span,
+            // and a range tilde (#277) stays text at every level
+            {"~~H<sub>2</sub>O and x^2^~~\n",
+             "Paragraph(Strikethrough('H',Subscript('2'),'O and x',Superscript('2')))",
+             "inline HTML and a script nest in strikethrough"},
+            {"==50~100 mm and H~2~O==\n",
+             "Paragraph(Highlight('50~100 mm and H',Subscript('2'),'O'))",
+             "a range tilde stays literal in a nested highlight"},
+        };
+        for (const auto& c : cases) {
+            std::string actual = paragraphShape(c.source);
+            if (actual != c.expected) {
+                std::cerr << "  got      " << actual << "\n  expected " << c.expected << '\n';
+            }
+            check(actual == c.expected, c.message);
+        }
+    }
+
     // GitHub alerts
     auto alert = parseDocument(parser, "> [!NOTE]\n> Body text here.\n", "notes.md");
     check(alert.success, "alert blockquote parses");

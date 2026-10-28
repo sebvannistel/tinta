@@ -141,13 +141,30 @@ static void addTextRun(App& app, LayoutInfo&& info, const D2D1_POINT_2F& pos,
 }
 
 // Records docText[start, end) as bold, joining a range it continues
-static void markBold(App& app, size_t start, size_t end) {
+static void markRange(std::vector<std::pair<size_t, size_t>>& ranges, size_t start, size_t end) {
     if (start >= end) return;
-    auto& ranges = app.docBoldRanges;
     if (!ranges.empty() && ranges.back().second >= start) {
         ranges.back().second = std::max(ranges.back().second, end);
     } else {
         ranges.push_back({start, end});
+    }
+}
+
+// The styles a copy from the viewer carries (#285): bold, italic, and
+// links that lead somewhere outside the document. Anchors, wiki links and
+// file references would lead nowhere from a mail, so they paste as text.
+static void markStyles(App& app, const InlineStyle& style, bool isLink, const std::string& url,
+                       size_t start, size_t end) {
+    if (style.bold) markRange(app.docBoldRanges, start, end);
+    if (style.italic) markRange(app.docItalicRanges, start, end);
+    if (!isLink || start >= end ||
+        !(url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0 || url.rfind("mailto:", 0) == 0))
+        return;
+    auto& links = app.docLinkRanges;
+    if (!links.empty() && links.back().url == url && links.back().end >= start) {
+        links.back().end = std::max(links.back().end, end);
+    } else {
+        links.push_back({start, end, url});
     }
 }
 
@@ -194,9 +211,13 @@ static void rollbackTo(App& app, const LayoutSnapshot& s) {
     app.textRects.resize(s.textRects);
     app.lineBuckets.resize(s.lineBuckets);
     app.docText.resize(s.docTextLen);
-    auto& bold = app.docBoldRanges;
-    while (!bold.empty() && bold.back().first >= s.docTextLen) bold.pop_back();
-    if (!bold.empty()) bold.back().second = std::min(bold.back().second, s.docTextLen);
+    for (auto* ranges : {&app.docBoldRanges, &app.docItalicRanges}) {
+        while (!ranges->empty() && ranges->back().first >= s.docTextLen) ranges->pop_back();
+        if (!ranges->empty()) ranges->back().second = std::min(ranges->back().second, s.docTextLen);
+    }
+    auto& links = app.docLinkRanges;
+    while (!links.empty() && links.back().start >= s.docTextLen) links.pop_back();
+    if (!links.empty()) links.back().end = std::min(links.back().end, s.docTextLen);
     app.taskRects.resize(s.tasks);
     app.htmlAnchors.resize(s.anchors);  // a trial layout's anchors sit at trial positions
 }
@@ -449,6 +470,13 @@ static float runBaseline(App& app, IDWriteTextLayout* layout, IDWriteTextFormat*
     return baseline >= 0.0f ? baseline : formatBaseline(app, format);
 }
 
+// The ==highlight== an inline element sits in, if any
+static const Element* highlightSpanOf(const Element* elem) {
+    for (; elem; elem = elem->parent)
+        if (elem->type == ElementType::Highlight) return elem;
+    return nullptr;
+}
+
 static void layoutInlineContent(App& app, const std::vector<ElementPtr>& elements,
                                 float startX, float& y, float maxWidth,
                                 IDWriteTextFormat* baseFormat, D2D1_COLOR_F baseColor,
@@ -561,6 +589,42 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
     }
     lineHeight += mathTextOffset + mathBelow;
 
+    // A highlight is drawn in pieces, one per text segment and math box,
+    // each padded 2 px on both sides. Its colour is translucent, so pieces
+    // that meet on a line (==x^2^==, ==a $x$ b==) join rather than overlap
+    // into a darker strip. Pieces of one highlight also bridge the space
+    // between their runs; separate highlights only stop overlapping. Pieces
+    // of equal height merge into one band. Beside a taller math box the text
+    // band ends at the box, which keeps its full height.
+    size_t bgPiece = SIZE_MAX;  // the latest piece, in layoutRects
+    float bgPieceY = 0.0f;
+    const Element* bgPieceSpan = nullptr;
+    bool bgSpanBroken = false;  // a code chip, ruby or image came since
+    auto addHighlight = [&](D2D1_RECT_F rect, D2D1_COLOR_F color, const Element* span) {
+        if (bgPiece < app.layoutRects.size() && bgPieceY == y) {
+            D2D1_RECT_F& prev = app.layoutRects[bgPiece].rect;
+            if ((span && span == bgPieceSpan && !bgSpanBroken) || rect.left < prev.right) {
+                bgPieceSpan = span;
+                bgSpanBroken = false;
+                if (rect.top == prev.top && rect.bottom == prev.bottom) {
+                    prev.right = std::max(prev.right, rect.right);
+                    return;
+                }
+                // A whole-pixel joint leaves no antialiased seam on screen
+                bool taller = rect.top <= prev.top && rect.bottom >= prev.bottom;
+                float joint = std::round(taller ? rect.left : prev.right);
+                prev.right = std::max(prev.left, joint);
+                rect.left = joint;
+                if (rect.right <= rect.left) return;
+            }
+        }
+        bgPiece = app.layoutRects.size();
+        bgPieceY = y;
+        bgPieceSpan = span;
+        bgSpanBroken = false;
+        app.layoutRects.push_back({rect, color});
+    };
+
     for (size_t runIndex = 0; runIndex < runs.size(); runIndex++) {
         const auto& run = runs[runIndex];
         const ElementPtr& elem = run.elem;
@@ -580,6 +644,10 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
         linkUnderInsertion = hasUnderline;
         if (!hasUnderline) underlineEndX = -1.0f;
         D2D1_COLOR_F bgColor = run.style.bgColor;
+        const Element* bgSpan = hasBg ? highlightSpanOf(elem.get()) : nullptr;
+        // These draw no highlight, so the band does not bridge across them
+        if (elem->type == ElementType::Code || elem->type == ElementType::Ruby ||
+            elem->type == ElementType::Image) bgSpanBroken = true;
         float drawYOffset = run.style.drawYOffset + mathTextOffset;
         bool wrappedCode = false;
 
@@ -637,7 +705,7 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                            codeDocStart, text.length(), true);
 
                 app.docText += text;
-                if (run.style.bold) markBold(app, codeDocStart, app.docText.size());
+                markStyles(app, run.style, isLink, linkUrl, codeDocStart, app.docText.size());
                 if (isLink) addLinkSegment(x, x + textWidth, y, linkUrl, color);
                 if (hasUnderline) {
                     addUnderline(run.style, x, x + textWidth, y, y + drawYOffset + baselineOf(textFormat),
@@ -673,10 +741,10 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                 float textBaseline = mathBaselines[runIndex];
                 float boxTop = y + drawYOffset + textBaseline - mathBoxBaseline(box);
                 if (hasBg) {
-                    app.layoutRects.push_back({D2D1::RectF(x - 2,
+                    addHighlight(D2D1::RectF(x - 2,
                         std::min(boxTop, y + mathTextOffset + 1), x + w + 2,
                         std::max(boxTop + mathBoxHeight(box), y + mathTextOffset + normalLineHeight - 1)),
-                        bgColor});
+                        bgColor, bgSpan);
                 }
                 if (hasStrike) {
                     float strikeY = y + mathTextOffset + normalLineHeight * 0.55f;
@@ -902,10 +970,9 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                         codeBox});
                 }
             } else if (hasBg) {
-                app.layoutRects.push_back({
-                    D2D1::RectF(segX - 2, y + mathTextOffset + 1, segX + segWidth + 2,
-                                y + mathTextOffset + normalLineHeight - 1),
-                    bgColor});
+                addHighlight(D2D1::RectF(segX - 2, y + mathTextOffset + 1, segX + segWidth + 2,
+                                         y + mathTextOffset + normalLineHeight - 1),
+                             bgColor, bgSpan);
             }
             if (hasStrike) {
                 float strikeY = y + mathTextOffset + normalLineHeight * 0.55f;
@@ -1028,7 +1095,7 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
         if (measureInfo.layout) measureInfo.layout->Release();
 
         app.docText += text;
-        if (run.style.bold) markBold(app, textDocStart, app.docText.size());
+        markStyles(app, run.style, isLink, linkUrl, textDocStart, app.docText.size());
 
         if (isLink && lastWordEndX > linkLineStartX) {
             addLinkSegment(linkLineStartX, lastWordEndX, linkLineY, linkUrl, color);

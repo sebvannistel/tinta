@@ -321,6 +321,8 @@ bool openDocumentSourceInViewer(App& app, const std::wstring& fullPath,
     app.docText.clear();
     std::wstring().swap(app.docTextLower);
     app.docBoldRanges.clear();
+    app.docItalicRanges.clear();
+    app.docLinkRanges.clear();
     app.searchMatches.clear();
     clearSelection(app);  // offsets belong to the old docText
     app.layoutDirty = true;
@@ -377,9 +379,7 @@ static void closeFolderBrowserInput(App& app) {
 // Single-line clipboard text: newlines and tabs become spaces
 std::wstring clipboardLine(HWND hwnd) {
     // Clipboard listeners can briefly own it just after a copy/cut.
-    bool opened = false;
-    for (int attempt = 0; attempt < 10 && !(opened = OpenClipboard(hwnd) != FALSE); ++attempt) Sleep(5);
-    if (!opened) return {};
+    if (!openClipboard(hwnd)) return {};
     std::wstring text;
     if (HANDLE hData = GetClipboardData(CF_UNICODETEXT)) {
         if (wchar_t* ptr = (wchar_t*)GlobalLock(hData)) {
@@ -606,7 +606,7 @@ static void openThemeEditor(App& app, bool editCurrent) {
     themeEditorAdoptBase(app, app.currentThemeIndex);
     app.themeEditorName = editCurrent ? app.theme.name : tr(app, "theme.editor.default_name");
     app.themeEditorField = 14;  // name focused first
-    app.themeEditorFontScroll = 0.0f;
+    app.themeEditorFontScroll = -1.0f;  // on the chosen face (#284)
     app.themeEditorColorScroll = 0.0f;
     app.themeEditorHeadingsOpen = false;
     app.themeEditorFontRole = 0;
@@ -982,15 +982,10 @@ void handleMouseWheel(App& app, HWND hwnd, WPARAM wParam, LPARAM) {
         float panelWidth = folderBrowserPanelWidth(app);
         float panelX = -panelWidth * (1.0f - app.folderBrowserAnimation);
         if (app.mouseX >= panelX && app.mouseX <= panelX + panelWidth) {
-            // Scroll folder list
-            app.folderBrowserScroll -= delta * dpi(app, 60.0f);
-            float itemHeight = dpi(app, 28.0f);
-            float headerHeight = dpi(app, 48.0f);
-            float listHeight = app.height - headerHeight - dpi(app, 20.0f);
-            float totalItemsHeight = app.folderItems.size() * itemHeight +
-                (app.folderBrowserNaming != 0 ? itemHeight : 0.0f);
-            float maxScroll = std::max(0.0f, totalItemsHeight - listHeight);
-            app.folderBrowserScroll = std::max(0.0f, std::min(app.folderBrowserScroll, maxScroll));
+            // Scroll folder list, as far as the card draws it: older
+            // row sizes stopped short of the last rows in short folders
+            app.folderBrowserScroll = std::clamp(app.folderBrowserScroll - delta * dpi(app, 60.0f),
+                                                 0.0f, folderBrowserMaxScroll(app));
             InvalidateRect(hwnd, nullptr, FALSE);
             return;
         }
@@ -1055,31 +1050,28 @@ static bool moveDocumentScrollbarDrag(App& app, HWND hwnd) {
     // Mouse capture owns this gesture across panels, title bars and window
     // edges. Hover routing must never intercept movement during the drag.
     SetCursor(cursorArrow);
+    // The thumb moves with the pointer along the track as drawn: below the
+    // tab strip, short of the other bar (#287)
     if (app.scrollbarDragging) {
-        const float maxScroll = std::max(0.0f, app.contentHeight - app.height);
-        if (maxScroll > 0 && app.contentHeight > app.height) {
-            const float sbHeight = std::max((float)app.height / app.contentHeight * app.height, 30.0f);
-            const float trackHeight = app.height - sbHeight;
-            if (trackHeight > 0) {
-                const float deltaY = (float)app.mouseY - app.scrollbarDragStartY;
-                app.scrollY = std::clamp(app.scrollbarDragStartScroll + deltaY / trackHeight * maxScroll, 0.0f, maxScroll);
-                app.targetScrollY = app.scrollY;
-                // Beside the editor the preview follows the editor each
-                // frame, so the editor goes where the thumb is taken (#280)
-                if (app.editMode) editorFollowPreview(app);
-            }
+        const ScrollbarGeometry bar = documentScrollbarV(app);
+        const float travel = bar.trackLength - bar.thumbLength;
+        if (bar.maxScroll > 0 && travel > 0) {
+            const float deltaY = (float)app.mouseY - app.scrollbarDragStartY;
+            app.scrollY = std::clamp(app.scrollbarDragStartScroll + deltaY / travel * bar.maxScroll,
+                                     0.0f, bar.maxScroll);
+            app.targetScrollY = app.scrollY;
+            // Beside the editor the preview follows the editor each
+            // frame, so the editor goes where the thumb is taken (#280)
+            if (app.editMode) editorFollowPreview(app);
         }
     } else {
-        const float viewportWidth = documentViewportWidth(app);
-        const float maxScroll = std::max(0.0f, app.contentWidth - viewportWidth);
-        if (maxScroll > 0 && app.contentWidth > viewportWidth) {
-            const float sbWidth = std::max(viewportWidth / app.contentWidth * viewportWidth, 30.0f);
-            const float trackWidth = viewportWidth - sbWidth;
-            if (trackWidth > 0) {
-                const float deltaX = (float)app.mouseX - app.hScrollbarDragStartX;
-                app.scrollX = std::clamp(app.hScrollbarDragStartScroll + deltaX / trackWidth * maxScroll, 0.0f, maxScroll);
-                app.targetScrollX = app.scrollX;
-            }
+        const ScrollbarGeometry bar = documentScrollbarH(app);
+        const float travel = bar.trackLength - bar.thumbLength;
+        if (bar.maxScroll > 0 && travel > 0) {
+            const float deltaX = (float)app.mouseX - app.hScrollbarDragStartX;
+            app.scrollX = std::clamp(app.hScrollbarDragStartScroll + deltaX / travel * bar.maxScroll,
+                                     0.0f, bar.maxScroll);
+            app.targetScrollX = app.scrollX;
         }
     }
     InvalidateRect(hwnd, nullptr, FALSE);
@@ -1152,6 +1144,10 @@ void handleMouseMove(App& app, HWND hwnd, LPARAM lParam) {
     }
 
     if (moveDocumentScrollbarDrag(app, hwnd)) return;
+    if (panelScrollbarMove(app, static_cast<float>(app.mouseY))) {
+        SetCursor(cursorArrow);
+        return;
+    }
 
     bool iconHover = appMenuButtonAt(app, (float)app.mouseX, (float)app.mouseY);
     if (iconHover != app.appMenuHover) {
@@ -1332,6 +1328,15 @@ void handleMouseMove(App& app, HWND hwnd, LPARAM lParam) {
     }
     if (app.showHelp) {
         SetCursor(cursorArrow);
+        return;
+    }
+
+    // A side panel list's scrollbar: an arrow, not a row's hand (#287),
+    // and its thumb lights up
+    if (panelScrollbarAt(app, static_cast<float>(app.mouseX), static_cast<float>(app.mouseY)) !=
+        PanelList::None) {
+        SetCursor(cursorArrow);
+        if (mouseMoved) InvalidateRect(hwnd, nullptr, FALSE);
         return;
     }
 
@@ -1699,9 +1704,13 @@ static void invokeContextMenuAction(App& app, HWND hwnd, int item) {
     switch (item) {
         case CTX_COPY:
             if (app.hasSelection && app.selAnchor != app.selFocus) {
+                bool held = false;
                 if (!copySelectionRange(app, hwnd,
                                         std::min(app.selAnchor, app.selFocus),
-                                        std::max(app.selAnchor, app.selFocus))) break;
+                                        std::max(app.selAnchor, app.selFocus), &held)) {
+                    if (held) signalClipboardBusy(app);
+                    break;
+                }
                 app.hasSelection = false;
                 signalPushKey(app, SIG_INFO, SIGI_COPY, "toast.copied");
             }
@@ -2080,6 +2089,10 @@ void handleMouseDown(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
     // The chooser acts on release; do not place an editor caret under it.
     if (app.showThemeChooser) return;
 
+    // A side panel list's scrollbar drags like the document's (#287)
+    if (panelScrollbarBegin(app, hwnd, static_cast<float>(GET_X_LPARAM(lParam)),
+                            static_cast<float>(GET_Y_LPARAM(lParam)))) return;
+
     // The search bar's results button and the results panel (#246)
     if (searchPanelMouseDown(app, hwnd, static_cast<float>(GET_X_LPARAM(lParam)),
                              static_cast<float>(GET_Y_LPARAM(lParam)))) return;
@@ -2251,18 +2264,10 @@ void handleMouseDown(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
         app.scrollbarDragStartY = (float)app.mouseY;
         app.scrollbarDragStartScroll = app.scrollY;
 
-        // Check if clicking in track (not thumb) - jump to position
-        float maxScroll = std::max(0.0f, app.contentHeight - app.height);
-        float sbHeight = (float)app.height / app.contentHeight * app.height;
-        sbHeight = std::max(sbHeight, 30.0f);
-        float sbY = (maxScroll > 0) ? (app.scrollY / maxScroll * (app.height - sbHeight)) : 0;
-
-        // If clicked outside thumb, jump
-        if (app.mouseY < sbY || app.mouseY > sbY + sbHeight) {
-            float trackHeight = app.height - sbHeight;
-            float clickPos = (float)app.mouseY - sbHeight / 2;
-            clickPos = std::max(0.0f, std::min(clickPos, trackHeight));
-            app.scrollY = (clickPos / trackHeight) * maxScroll;
+        // A click on the track, off the thumb, centres the thumb there
+        const ScrollbarGeometry bar = documentScrollbarV(app);
+        if (app.mouseY < bar.thumbStart || app.mouseY > bar.thumbStart + bar.thumbLength) {
+            app.scrollY = bar.scrollForThumb((float)app.mouseY - bar.thumbLength / 2);
             app.targetScrollY = app.scrollY;
             app.scrollbarDragStartScroll = app.scrollY;
             app.scrollbarDragStartY = (float)app.mouseY;
@@ -2277,23 +2282,10 @@ void handleMouseDown(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
         app.hScrollbarDragStartX = (float)app.mouseX;
         app.hScrollbarDragStartScroll = app.scrollX;
 
-        // Check if clicking in track (not thumb) - jump to position
-        float viewportX = documentViewportX(app);
-        float viewportWidth = documentViewportWidth(app);
-        float localMouseX = app.mouseX - viewportX;
-        float maxScroll = std::max(0.0f, app.contentWidth - viewportWidth);
-        float sbWidth = viewportWidth / app.contentWidth * viewportWidth;
-        sbWidth = std::max(sbWidth, 30.0f);
-        float sbX = (maxScroll > 0)
-            ? (app.scrollX / maxScroll * (viewportWidth - sbWidth))
-            : 0;
-
-        // If clicked outside thumb, jump
-        if (localMouseX < sbX || localMouseX > sbX + sbWidth) {
-            float trackWidth = viewportWidth - sbWidth;
-            float clickPos = localMouseX - sbWidth / 2;
-            clickPos = std::max(0.0f, std::min(clickPos, trackWidth));
-            app.scrollX = (clickPos / trackWidth) * maxScroll;
+        // A click on the track, off the thumb, centres the thumb there
+        const ScrollbarGeometry bar = documentScrollbarH(app);
+        if (app.mouseX < bar.thumbStart || app.mouseX > bar.thumbStart + bar.thumbLength) {
+            app.scrollX = bar.scrollForThumb((float)app.mouseX - bar.thumbLength / 2);
             app.targetScrollX = app.scrollX;
             app.hScrollbarDragStartScroll = app.scrollX;
             app.hScrollbarDragStartX = (float)app.mouseX;
@@ -2832,6 +2824,11 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
         endDocumentScrollbarDrag(app, hwnd, false);
         return;  // releasing over a panel must not activate its controls
     }
+    if (app.panelScrollbarDrag.list != PanelList::None) {
+        panelScrollbarMove(app, static_cast<float>(GET_Y_LPARAM(lParam)));
+        panelScrollbarEnd(app, hwnd, false);
+        return;  // the release must not open a row or close the panel
+    }
     if (app.panelResize.panel != SidePanel::None) {
         sidePanelResizeMove(app, static_cast<float>(GET_X_LPARAM(lParam)));
         sidePanelResizeEnd(app, hwnd, false);
@@ -2950,20 +2947,7 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
             } else if (action >= TE_FONT_TEXT && action <= TE_FONT_CODE) {
                 // Switch the list to another face and scroll to its choice
                 app.themeEditorFontRole = action - TE_FONT_TEXT;
-                const std::wstring& face = app.themeEditorFontRole == 1 ? app.themeEditorHeadingFont
-                                         : app.themeEditorFontRole == 2 ? app.themeEditorCodeFont
-                                         : app.themeEditorFont;
-                int lead = app.themeEditorFontRole == 1 ? 1 : 0;
-                int row = 0;
-                for (size_t i = 0; !face.empty() && i < app.systemFontFamilies.size(); i++) {
-                    if (_wcsicmp(app.systemFontFamilies[i].c_str(), face.c_str()) == 0) {
-                        row = (int)i + lead;
-                        break;
-                    }
-                }
-                float rowH = dpi(app, 26.0f);
-                float listH = app.themeEditorFontListRect.bottom - app.themeEditorFontListRect.top;
-                app.themeEditorFontScroll = std::max(0.0f, row * rowH - (listH - rowH) / 2);
+                app.themeEditorFontScroll = -1.0f;
             } else if (action >= TE_FIELD_BG && action <= TE_FIELD_HIGHLIGHT_TEXT) {
                 app.themeEditorField = action - TE_FIELD_BG;
             } else if (action == TE_FIELD_NAME) {
@@ -2972,6 +2956,7 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
                 int n = themeCount();
                 int base = app.themeEditorBase + (action == TE_BASE_NEXT ? 1 : n - 1);
                 themeEditorAdoptBase(app, base % n);
+                app.themeEditorFontScroll = -1.0f;  // on the base's face
             } else if (action == TE_HEADINGS) {
                 app.themeEditorHeadingsOpen = !app.themeEditorHeadingsOpen;
                 app.themeEditorField = -1;
@@ -3377,15 +3362,18 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
         // Releasing anywhere else on a code block must NOT consume the
         // mouse-up: a drag selection ending on the block would never
         // finalize, stay "selecting", and follow the next mouse move
+        bool held = false;
         if (copyToClipboard(
-                hwnd, codeCopyText(app.codeBlocks[app.hoveredCodeBlock].codeText))) {
+                hwnd, codeCopyText(app.codeBlocks[app.hoveredCodeBlock].codeText), &held)) {
             // The Copied pill keeps its code-block anchor (t13). An empty
-            // block, or a clipboard held by another program, copies
-            // nothing and claims nothing.
+            // block copies nothing and claims nothing; a clipboard held by
+            // another program gets its warning.
             D2D1_RECT_F anchor = app.codeBlocks[app.hoveredCodeBlock].bounds;
             signalPush(app, SIG_SUCCESS, SIGI_CHECK,
                        tr(app, "codeblock.copied"), L"", L"", SIGA_NONE,
                        SIGC_NONE, true, &anchor);
+        } else if (held) {
+            signalClipboardBusy(app);
         }
         app.hoveredCodeBlock = -1;
         app.selecting = false;
@@ -3398,25 +3386,27 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
         // Diagram image button: 2x raster to the clipboard. A rendered
         // PlantUML diagram already has a cached PNG - copy that instead of
         // rebuilding mermaid prims; success shows the same toast as
-        // mermaid, a miss or failure stays silent.
+        // mermaid, a miss or a render failure stays silent, and a clipboard
+        // held by another program gets its warning.
         const App::CodeBlockInfo& block =
             app.codeBlocks[app.hoveredCodeBlock];
+        bool copied = false, held = false;
         if (block.isPlantuml) {
             auto hit = app.plantumlQueue
                            ? app.plantumlQueue->lookup(block.plantumlKey)
                            : nullptr;
-            if (hit && hit->ok &&
-                copyPlantumlImageToClipboard(app, hit->filePath)) {
-                D2D1_RECT_F anchor = block.bounds;
-                signalPush(app, SIG_SUCCESS, SIGI_CHECK,
-                           tr(app, "diagram.copied"), L"", L"", SIGA_NONE,
-                           SIGC_NONE, true, &anchor);
-            }
-        } else if (copyDiagramImage(app, hwnd, toUtf8(block.codeText))) {
+            copied = hit && hit->ok &&
+                     copyPlantumlImageToClipboard(app, hit->filePath, &held);
+        } else {
+            copied = copyDiagramImage(app, hwnd, toUtf8(block.codeText), &held);
+        }
+        if (copied) {
             D2D1_RECT_F anchor = block.bounds;
             signalPush(app, SIG_SUCCESS, SIGI_CHECK,
                        tr(app, "diagram.copied"), L"", L"", SIGA_NONE,
                        SIGC_NONE, true, &anchor);
+        } else if (held) {
+            signalClipboardBusy(app);
         }
         app.hoveredCodeBlock = -1;
         app.selecting = false;
@@ -3427,13 +3417,15 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
         app.selecting = false;
     } else if (tableCopyButtonAt(app, app.mouseX, app.mouseY)) {
         // Table copy button: cells joined by tabs paste into a
-        // spreadsheet as a grid
-        copyToClipboard(hwnd, app.tableRects[app.hoveredTable].tsv);
-        {
+        // spreadsheet as a grid. "Table copied" only when it was.
+        bool held = false;
+        if (copyToClipboard(hwnd, app.tableRects[app.hoveredTable].tsv, &held)) {
             D2D1_RECT_F anchor = app.tableRects[app.hoveredTable].bounds;
             signalPush(app, SIG_SUCCESS, SIGI_CHECK,
                        tr(app, "table.copied"), L"", L"", SIGA_NONE,
                        SIGC_NONE, true, &anchor);
+        } else if (held) {
+            signalClipboardBusy(app);
         }
         app.hoveredTable = -1;
         app.selecting = false;
@@ -3565,6 +3557,10 @@ bool handleKeyDown(App& app, HWND hwnd, WPARAM wParam) {
     }
     if (app.panelResize.panel != SidePanel::None) {
         if (wParam == VK_ESCAPE) sidePanelResizeEnd(app, hwnd, true);
+        return true;
+    }
+    if (app.panelScrollbarDrag.list != PanelList::None) {
+        if (wParam == VK_ESCAPE) panelScrollbarEnd(app, hwnd, true);
         return true;
     }
     float pageSize = app.height * 0.8f;
@@ -3843,9 +3839,13 @@ bool handleKeyDown(App& app, HWND hwnd, WPARAM wParam) {
         if (tableEditKeyDown(app, hwnd, wParam)) return false;
         if (ctrl && wParam == 'C' && app.hasSelection &&
             app.selAnchor != app.selFocus) {
+            bool held = false;
             if (!copySelectionRange(app, hwnd,
                                     std::min(app.selAnchor, app.selFocus),
-                                    std::max(app.selAnchor, app.selFocus))) return false;
+                                    std::max(app.selAnchor, app.selFocus), &held)) {
+                if (held) signalClipboardBusy(app);
+                return false;
+            }
             signalPushKey(app, SIG_INFO, SIGI_COPY, "toast.copied");
             app.hasSelection = false;
             InvalidateRect(hwnd, nullptr, FALSE);
@@ -3953,24 +3953,26 @@ bool handleKeyDown(App& app, HWND hwnd, WPARAM wParam) {
             }
             case 'C': {
                 // Copy - copy selected text or all text if select all was used
-                bool copied = false;
+                bool copied = false, held = false;
                 if (app.hasSelection && app.selAnchor != app.selFocus) {
                     copied = copySelectionRange(
                         app, hwnd, std::min(app.selAnchor, app.selFocus),
-                        std::max(app.selAnchor, app.selFocus));
-                    app.hasSelection = false;
+                        std::max(app.selAnchor, app.selFocus), &held);
+                    // A copy the clipboard refused keeps its selection
+                    if (copied) app.hasSelection = false;
                 } else if (app.root) {
                     // If no selection, copy all
                     std::wstring allText;
                     extractText(app.root, allText);
-                    copyToClipboard(hwnd, allText);
-                    copied = true;
+                    copied = copyToClipboard(hwnd, allText, &held);
                 }
-                // Show "Copied!" notification
+                // "Copied!" only for what reached the clipboard
                 if (copied) {
                     signalPushKey(app, SIG_INFO, SIGI_COPY, "toast.copied");
-                    InvalidateRect(hwnd, nullptr, FALSE);
+                } else if (held) {
+                    signalClipboardBusy(app);
                 }
+                InvalidateRect(hwnd, nullptr, FALSE);
                 break;
             }
             case VK_OEM_COMMA:

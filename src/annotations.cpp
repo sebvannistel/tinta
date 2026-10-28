@@ -362,7 +362,7 @@ void closeEditor(App& app) {
 
 std::wstring fullClipboardText(HWND hwnd) {
     std::wstring out;
-    if (!OpenClipboard(hwnd)) return out;
+    if (!openClipboard(hwnd)) return out;
     if (HANDLE data = GetClipboardData(CF_UNICODETEXT)) {
         if (const wchar_t* text = (const wchar_t*)GlobalLock(data)) {
             out = text;
@@ -1189,6 +1189,7 @@ void annotationsCopyForAgent(App& app, HWND hwnd) {
         out += note;
         out += L"\n";
     }
-    copyToClipboard(hwnd, out);
-    showToast(app, "toast.agent_copied");
+    bool held = false;
+    if (copyToClipboard(hwnd, out, &held)) showToast(app, "toast.agent_copied");
+    else if (held) signalClipboardBusy(app);
 }

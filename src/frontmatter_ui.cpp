@@ -9,9 +9,11 @@ namespace {
 bool hit(const D2D1_RECT_F& r,float x,float y) {return x>=r.left&&x<r.right&&y>=r.top&&y<r.bottom;}
 D2D1_COLOR_F color(D2D1_COLOR_F c,float alpha) {c.a*=alpha;return c;}
 std::wstring label(std::string key) {if(!key.empty()&&key[0]>='a'&&key[0]<='z')key[0]-=32;return toWide(key);}
-const char* formatKey(fm::Format f) {
-    const char* keys[]={"fm.plain","fm.large","fm.absolute","fm.relative","fm.chips","fm.hashtags","fm.comma","fm.count"};
-    return keys[(int)f];
+// The date format is named by a sample date, written as the strip writes it
+std::wstring formatLabel(const App& app,fm::Format f) {
+    if(f==fm::Format::Absolute)return formatDate(dateLocale(app.currentLanguageIndex),2026,1,3);
+    const char* keys[]={"fm.plain","fm.large",nullptr,"fm.relative","fm.chips","fm.hashtags","fm.comma","fm.count"};
+    return tr(app,keys[(int)f]);
 }
 const wchar_t* kindName(const App& app, fm::Kind k) {
     const char* keys[]={"fm.type.text","fm.type.date","fm.type.list","fm.type.boolean","fm.type.object"};return tr(app,keys[(int)k]);
@@ -60,6 +62,25 @@ void observeFrontmatter(App& app,const std::vector<fm::Property>& properties) {
     auto key=frontmatterSeenKey(app);
     if(!app.frontmatterFirstSeen.count(key))app.frontmatterFirstSeen.emplace(key,fm::utcNow());
     if(fm::discover(app.frontmatter,properties))persistFrontmatter(app);
+}
+
+std::wstring frontmatterValue(int language,const fm::Property& p,fm::Format format,const std::string& now) {
+    if(p.kind==fm::Kind::List) {
+        if(format==fm::Format::Count)return trCount(language,"fm.items",(long long)p.items.size());
+        std::wstring out;for(const auto& item:p.items){if(!out.empty())out+=L", ";out+=toWide(item);}return out;
+    }
+    int year=0,month=0,day=0;long long seconds=0;
+    if(p.kind==fm::Kind::Date&&format==fm::Format::Absolute&&fm::calendarDate(p.text,year,month,day))
+        return formatDate(dateLocale(language),year,month,day);
+    if(p.kind==fm::Kind::Date&&format==fm::Format::Relative&&fm::secondsSince(p.text,now,seconds)) {
+        long long absolute=seconds<0?-seconds:seconds;
+        if(absolute<60)return tr(language,"fm.just_now");
+        long long n=absolute<3600?absolute/60:absolute<86400?absolute/3600:absolute/86400;
+        const char* key=absolute<3600?(seconds<0?"fm.in.minutes":"fm.ago.minutes"):
+                        absolute<86400?(seconds<0?"fm.in.hours":"fm.ago.hours"):(seconds<0?"fm.in.days":"fm.ago.days");
+        return trCount(language,key,n);
+    }
+    return toWide(p.text);
 }
 
 float layoutFrontmatterStrip(App& app,const std::vector<fm::Property>& properties,
@@ -130,7 +151,7 @@ float layoutFrontmatterStrip(App& app,const std::vector<fm::Property>& propertie
                     add(L"+"+std::to_wstring(p.items.size()-count),true,false,app.theme.accent,hidden);
                 }
             } else {
-                auto value=toWide(fm::formatValue(p,format,now));
+                auto value=frontmatterValue(app.currentLanguageIndex,p,format,now);
                 if(r->label)value=label(p.key)+L": "+value;
                 add(value,false,large,color(large?app.theme.heading:app.theme.text,large?1.f:.75f));
             }
@@ -210,9 +231,10 @@ void renderFrontmatterSettings(App& app,const D2D1_RECT_F& area) {
         size_t before=app.settingsHits.size();
         button(app,{sideX,ry+7*s,sideX+25*s,ry+30*s},tr(app,"fm.left_short"),id+2,!r.right,details);
         button(app,{sideX+25*s,ry+7*s,sideX+50*s,ry+30*s},tr(app,"fm.right_short"),id+3,r.right,details);
-        button(app,{labelX+2*s,ry+7*s,labelX+34*s,ry+30*s},tr(app,r.label?"fm.label.on":"fm.label.off"),id+4,r.label,details);
+        // Wide enough for the longer yes/no words (French "Non")
+        button(app,{labelX+2*s,ry+7*s,labelX+40*s,ry+30*s},tr(app,r.label?"fm.label.on":"fm.label.off"),id+4,r.label,details);
         auto opts=fm::formats(r.hint);auto f=std::find(opts.begin(),opts.end(),r.format)==opts.end()?opts.front():r.format;
-        std::wstring desc=tr(app,formatKey(f));
+        std::wstring desc=formatLabel(app,f);
         if(r.hint==fm::Kind::List&&f!=fm::Format::Count&&r.limit)desc+=L" \u00b7 "+std::to_wstring(r.limit);
         button(app,{formatX,ry+6*s,x+w-8*s,ry+31*s},desc+L"  \u2304",id+5,false,details);
         for(size_t n=before;n<app.settingsHits.size();++n) {
@@ -253,7 +275,7 @@ void renderFrontmatterSettings(App& app,const D2D1_RECT_F& area) {
         D2D1_RECT_F menu={x+w-menuW,my,x+w,my+menuH};app.frontmatterMenuRect=menu;
         fill(app,{menu.left-3*s,menu.top-2*s,menu.right+3*s,menu.bottom+4*s},D2D1::ColorF(0,0,0,.15f),7*s);
         fill(app,menu,app.theme.background,6*s);
-        for(size_t i=0;i<opts.size();++i)button(app,{menu.left+5*s,my+6*s+i*29*s,menu.right-5*s,my+31*s+i*29*s},tr(app,formatKey(opts[i])),FM_PICK+(int)opts[i],r.format==opts[i]);
+        for(size_t i=0;i<opts.size();++i)button(app,{menu.left+5*s,my+6*s+i*29*s,menu.right-5*s,my+31*s+i*29*s},formatLabel(app,opts[i]),FM_PICK+(int)opts[i],r.format==opts[i]);
         if(r.hint==fm::Kind::List) {
             float ly=menu.bottom-38*s;
             text(app,tr(app,"fm.up_to"),{menu.left+10*s,ly,menu.right-90*s,ly+28*s},11*s,muted);

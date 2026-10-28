@@ -6,6 +6,7 @@
 #include "input.h"
 #include "render.h"
 #include "settings.h"
+#include "sidepanels.h"
 #include "utils.h"
 
 #include <algorithm>
@@ -19,6 +20,7 @@ int failures = 0;
 void check(bool ok, const std::string& message) {
     if (!ok) { if (failures < 40) std::cerr << "FAIL split scrollbars: " << message << '\n'; ++failures; }
 }
+bool closeTo(float a, float b) { return std::fabs(a - b) < 0.5f; }
 
 // The pointer's shape after the window handles a move there
 HCURSOR cursorAfterMove(App& app, float x, float y) {
@@ -69,15 +71,18 @@ void scenario(App& app, const char* path, int width, bool wrap) {
     handleMouseUp(app, app.hwnd, 0, MAKELPARAM((int)(editorWidth * 0.4f), (int)(thumbY + 200.0f)));
     check(!app.editorScrollbarDragging, "the release ends the drag" + where);
 
-    // The preview's scrollbar, from the top
+    // The preview's scrollbar, from the top. Its track runs below the tab
+    // strip, as drawn (#287)
     app.editorScrollY = 0.0f;
     frame(app);
+    const ScrollbarGeometry bar = documentScrollbarV(app);
     const float maxScroll = std::max(0.0f, app.contentHeight - (float)app.height);
-    const float thumbH = std::max((float)app.height / app.contentHeight * app.height, 30.0f);
-    const float track = (float)app.height - thumbH;
+    const float thumbH = bar.thumbLength;
+    const float track = bar.trackLength - bar.thumbLength;
     const float previewBarX = documentViewportX(app) + documentViewportWidth(app) - dpi(app, 6.0f);
     const float grabY = chromeTopHeight(app) + dpi(app, 12.0f);
-    check(thumbH > grabY, "the preview's thumb reaches below the tab strip" + where);
+    check(closeTo(bar.trackStart, chromeTopHeight(app)) && grabY < bar.thumbStart + thumbH,
+          "the preview's thumb starts below the tab strip" + where);
     check(cursorAfterMove(app, previewBarX, grabY) == arrow, "an arrow over the preview's scrollbar" + where);
     handleMouseDown(app, app.hwnd, MK_LBUTTON, MAKELPARAM((int)previewBarX, (int)grabY));
     check(app.scrollbarDragging, "a press on the preview's scrollbar drags it" + where);
@@ -107,7 +112,7 @@ void scenario(App& app, const char* path, int width, bool wrap) {
     cursorAfterMove(app, previewBarX, clickY);
     handleMouseDown(app, app.hwnd, MK_LBUTTON, MAKELPARAM((int)previewBarX, (int)clickY));
     frame(app);  // the button still held: frames paint before the release
-    const float jumped = std::clamp(clickY - thumbH * 0.5f, 0.0f, track) / track * maxScroll;
+    const float jumped = bar.scrollForThumb(clickY - thumbH * 0.5f);
     check(std::abs(app.scrollY - jumped) <= tolerance && app.editorScrollY > (float)app.height,
           "a click on the preview's track jumps both panes there" + where + ": at " +
               std::to_string((int)app.scrollY) + ", clicked " + std::to_string((int)jumped));

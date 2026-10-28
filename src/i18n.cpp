@@ -4,6 +4,7 @@
 
 #include <windows.h>
 #include <string.h>
+#include <algorithm>
 #include <cstring>
 
 // Language metadata. nativeFont is a hint - the chooser uses it so each
@@ -43,19 +44,19 @@ struct Entry {
 // Note: kept as a plain array (not unordered_map) on purpose. ~80 entries,
 // linear scan is cache-friendly and avoids a static-init ordering fiasco.
 const Entry kEntries[] = {
-    { "fm.type.text", L"text", nullptr, nullptr, nullptr },
-    { "fm.type.date", L"date", nullptr, nullptr, nullptr },
-    { "fm.type.list", L"list", nullptr, nullptr, nullptr },
-    { "fm.type.boolean", L"bool", nullptr, nullptr, nullptr },
-    { "fm.type.object", L"object", nullptr, nullptr, nullptr },
-    { "fm.left_short", L"L", nullptr, nullptr, nullptr },
-    { "fm.right_short", L"R", nullptr, nullptr, nullptr },
-    { "fm.label.on", L"On", nullptr, nullptr, nullptr },
-    { "fm.label.off", L"Off", nullptr, nullptr, nullptr },
-    { "fm.all", L"All", nullptr, nullptr, nullptr },
-    { "theme.editor.default_name", L"My theme", nullptr, nullptr, nullptr },
-    { "settings.keep_deleted_tabs", L"Keep deleted files in memory", nullptr, nullptr, nullptr },
-    { "settings.keep_deleted_tabs.hint", L"Increases RAM usage; until Tinta closes", nullptr, nullptr, nullptr },
+    { "fm.type.text", L"text", L"\u6587\u672C", L"\u6587\u5B57\u5217", L"\uD14D\uC2A4\uD2B8" },
+    { "fm.type.date", L"date", L"\u65E5\u671F", L"\u65E5\u4ED8", L"\uB0A0\uC9DC" },
+    { "fm.type.list", L"list", L"\u5217\u8868", L"\u30EA\u30B9\u30C8", L"\uBAA9\uB85D" },
+    { "fm.type.boolean", L"bool", L"\u5E03\u5C14", L"\u771F\u507D", L"\uBD88\uB9AC\uC5B8" },
+    { "fm.type.object", L"object", L"\u5BF9\u8C61", L"\u30DE\u30C3\u30D7", L"\uAC1D\uCCB4" },
+    { "fm.left_short", L"L", L"\u5DE6", L"\u5DE6", L"\uC88C" },
+    { "fm.right_short", L"R", L"\u53F3", L"\u53F3", L"\uC6B0" },
+    { "fm.label.on", L"On", L"\u5F00", L"\u30AA\u30F3", L"\uCF2C" },
+    { "fm.label.off", L"Off", L"\u5173", L"\u30AA\u30D5", L"\uB054" },
+    { "fm.all", L"All", L"\u5168\u90E8", L"\u5168\u90E8", L"\uC804\uCCB4" },
+    { "theme.editor.default_name", L"My theme", L"\u6211\u7684\u4E3B\u9898", L"\u30DE\u30A4\u30C6\u30FC\u30DE", L"\uB0B4 \uD14C\uB9C8" },
+    { "settings.keep_deleted_tabs", L"Keep deleted files in memory", L"\u5C06\u5DF2\u5220\u9664\u6587\u4EF6\u4FDD\u7559\u5728\u5185\u5B58\u4E2D", L"\u524A\u9664\u3057\u305F\u30D5\u30A1\u30A4\u30EB\u3092\u30E1\u30E2\u30EA\u306B\u4FDD\u6301", L"\uC0AD\uC81C\uD55C \uD30C\uC77C\uC744 \uBA54\uBAA8\uB9AC\uC5D0 \uC720\uC9C0" },
+    { "settings.keep_deleted_tabs.hint", L"Increases RAM usage; until Tinta closes", L"\u4F1A\u589E\u52A0\u5185\u5B58\u5360\u7528\uFF0C\u76F4\u5230 Tinta \u5173\u95ED", L"Tinta \u3092\u7D42\u4E86\u3059\u308B\u307E\u3067\u30E1\u30E2\u30EA\u4F7F\u7528\u91CF\u304C\u5897\u52A0\u3057\u307E\u3059", L"Tinta\uAC00 \uC885\uB8CC\uB420 \uB54C\uAE4C\uC9C0 \uBA54\uBAA8\uB9AC \uC0AC\uC6A9\uB7C9\uC774 \uC99D\uAC00\uD569\uB2C8\uB2E4" },
     { "settings.notifications", L"Show notifications", L"\u663E\u793A\u901A\u77E5", L"\u901A\u77E5\u3092\u8868\u793A", L"\uC54C\uB9BC \uD45C\uC2DC" },
     { "settings.notifications.hint", L"Copy, save and status messages; warnings still show", L"\u590D\u5236\u3001\u4FDD\u5B58\u7B49\u63D0\u793A\uFF1B\u8B66\u544A\u4ECD\u4F1A\u663E\u793A", L"\u30B3\u30D4\u30FC\u3084\u4FDD\u5B58\u306A\u3069\u306E\u30E1\u30C3\u30BB\u30FC\u30B8\u3002\u8B66\u544A\u306F\u5E38\u306B\u8868\u793A", L"\uBCF5\uC0AC, \uC800\uC7A5 \uB4F1\uC758 \uBA54\uC2DC\uC9C0. \uACBD\uACE0\uB294 \uD56D\uC0C1 \uD45C\uC2DC" },
     { "toast.file_missing", L"File not found:", L"\u627e\u4e0d\u5230\u6587\u4ef6\uff1a", L"\u30d5\u30a1\u30a4\u30eb\u304c\u898b\u3064\u304b\u308a\u307e\u305b\u3093\uff1a", L"\ud30c\uc77c\uc744 \ucc3e\uc744 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4:" },
@@ -108,7 +109,7 @@ const Entry kEntries[] = {
     { "help.edit.enter_edit",      L"Enter edit mode",              L"\u8FDB\u5165\u7F16\u8F91\u6A21\u5F0F",              L"\u7DE8\u96C6\u30E2\u30FC\u30C9\u306B\u5165\u308B", L"\uD3B8\uC9D1 \uBAA8\uB4DC \uC9C4\uC785" },
     { "help.edit.save",            L"Save (in edit mode)",          L"\u4FDD\u5B58\uFF08\u7F16\u8F91\u6A21\u5F0F\u4E0B\uFF09", L"\u4FDD\u5B58\uFF08\u7DE8\u96C6\u30E2\u30FC\u30C9\uFF09", L"\uC800\uC7A5 (\uD3B8\uC9D1 \uBAA8\uB4DC)" },
     { "help.edit.preview",         L"Show / hide preview pane",     L"\u663E\u793A / \u9690\u85CF\u9884\u89C8\u7A97\u683C", L"\u30D7\u30EC\u30D3\u30E5\u30FC\u30DA\u30A4\u30F3\u3092\u8868\u793A / \u975E\u8868\u793A", L"\uBBF8\uB9AC\uBCF4\uAE30 \uD328\uB110 \uD45C\uC2DC / \uC228\uAE40" },
-    { "help.edit.word_wrap",       L"Toggle word wrap",             L"\u5207\u6362\u81EA\u52A8\u6362\u884C",              L"\u6298\u308A\u8FD4\u3057\u3092\u5207\u308A\u66FF\u3048", L"\uC790\uB3D9 \uC904\uBC14\uAFC0 \uC804\uD658" },
+    { "help.edit.word_wrap",       L"Toggle word wrap",             L"\u5207\u6362\u81EA\u52A8\u6362\u884C",              L"\u6298\u308A\u8FD4\u3057\u3092\u5207\u308A\u66FF\u3048", L"\uC790\uB3D9 \uC904\uBC14\uAFC8 \uC804\uD658" },
     { "help.edit.exit_edit",       L"Exit edit mode",               L"\u9000\u51FA\u7F16\u8F91\u6A21\u5F0F",              L"\u7DE8\u96C6\u30E2\u30FC\u30C9\u3092\u7D42\u4E86", L"\uD3B8\uC9D1 \uBAA8\uB4DC \uC885\uB8CC" },
 
     { "help.general.select_all",   L"Select all text",              L"\u5168\u9009\u6587\u672C",                          L"\u3059\u3079\u3066\u306E\u30C6\u30AD\u30B9\u30C8\u3092\u9078\u629E", L"\uBAA8\uB4E0 \uD14D\uC2A4\uD2B8 \uC120\uD0DD" },
@@ -123,7 +124,7 @@ const Entry kEntries[] = {
     { "search.no_matches",     L"No matches",                               L"\u65E0\u5339\u914D",                                   L"\u4E00\u81F4\u3059\u308B\u7D50\u679C\u306A\u3057", L"\uAC80\uC0C9 \uACB0\uACFC \uC5C6\uC74C" },
     // Fixed argument order (current, total): MSVC's printf family has no
     // positional specifiers, so locales phrase around the same order
-    { "search.match_count",    L"%d of %zu",                                L"\u7B2C %d / %zu \u4E2A",                       L"%d / %zu \u4EF6", L"%zu\uAC1C \uC911 %d\uBC88\uC9F8" },
+    { "search.match_count",    L"%d of %zu",                                L"\u7B2C %d / %zu \u4E2A",                       L"%d / %zu \u4EF6", L"%d / %zu\uAC1C" },
     { "search.results.title", L"Results", L"\u641C\u7D22\u7ED3\u679C", L"\u691C\u7D22\u7D50\u679C", L"\uAC80\uC0C9 \uACB0\uACFC" },
     { "search.results.tabs", L"Open tabs", L"\u5DF2\u6253\u5F00\u7684\u6807\u7B7E\u9875", L"\u958B\u3044\u3066\u3044\u308B\u30BF\u30D6", L"\uC5F4\uB9B0 \uD0ED" },
     { "search.results.folder", L"This folder", L"\u6B64\u6587\u4EF6\u5939", L"\u3053\u306E\u30D5\u30A9\u30EB\u30C0\u30FC", L"\uC774 \uD3F4\uB354" },
@@ -163,6 +164,7 @@ const Entry kEntries[] = {
     { "toast.wrap_on",         L"Word wrap on (Ctrl+W to turn off)",        L"\u5DF2\u5F00\u542F\u81EA\u52A8\u6362\u884C\uFF08Ctrl+W \u5173\u95ED\uFF09", L"\u81EA\u52D5\u6539\u884C\u3092\u30AA\u30F3\u306B\u3057\u307E\u3057\u305F (Ctrl+W\u3067\u30AA\u30D5)", L"\uC790\uB3D9 \uC904\uBC14\uAFC0 \uCF1C\uAE30 (Ctrl+W\uB85C \uB044\uAE30)" },
     { "toast.wrap_off",        L"Word wrap off (Ctrl+W to turn on)",        L"\u5DF2\u5173\u95ED\u81EA\u52A8\u6362\u884C\uFF08Ctrl+W \u5F00\u542F\uFF09", L"\u81EA\u52D5\u6539\u884C\u3092\u30AA\u30D5\u306B\u3057\u307E\u3057\u305F (Ctrl+W\u3067\u30AA\u30F3)", L"\uC790\uB3D9 \uC904\uBC14\uAFC0 \uB044\uAE30 (Ctrl+W\uB85C \uCF1C\uAE30)" },
     { "toast.copied",          L"Copied!",                                  L"\u5DF2\u590D\u5236\uFF01",                             L"\u30B3\u30D4\u30FC\u3057\u307E\u3057\u305F\uFF01",             L"\uBCF5\uC0AC\uD588\uC2B5\uB2C8\uB2E4!" },
+    { "toast.clipboard_busy", L"Clipboard busy \u2014 nothing copied", L"\u526A\u8D34\u677F\u88AB\u5360\u7528\uFF0C\u672A\u590D\u5236", L"\u30AF\u30EA\u30C3\u30D7\u30DC\u30FC\u30C9\u4F7F\u7528\u4E2D\uFF1A\u30B3\u30D4\u30FC\u3055\u308C\u307E\u305B\u3093\u3067\u3057\u305F", L"\uD074\uB9BD\uBCF4\uB4DC \uC0AC\uC6A9 \uC911 \u2014 \uBCF5\uC0AC\uB418\uC9C0 \uC54A\uC74C" },
     { "toast.paste_table",     L"Pasted as a table \u00B7 Ctrl+Shift+V pastes plain", L"\u5DF2\u7C98\u8D34\u4E3A\u8868\u683C\uFF08Ctrl+Shift+V \u7C98\u8D34\u7EAF\u6587\u672C\uFF09", L"\u8868\u3068\u3057\u3066\u8CBC\u308A\u4ED8\u3051\u307E\u3057\u305F (Ctrl+Shift+V\u3067\u305D\u306E\u307E\u307E)", L"\uD45C\uB85C \uBD99\uC5EC\uB123\uC5C8\uC2B5\uB2C8\uB2E4 (Ctrl+Shift+V\uB294 \uC77C\uBC18 \uBD99\uC5EC\uB123\uAE30)" },
 
     // Code block hover button + confirmation pill
@@ -280,29 +282,36 @@ const Entry kEntries[] = {
     { "rail.diagram", L"Insert diagram", L"\u63D2\u5165\u56FE\u8868", L"\u56F3\u3092\u633F\u5165", L"\uB2E4\uC774\uC5B4\uADF8\uB7A8 \uC0BD\uC785" },
     { "rail.image", L"Insert image", L"\u63D2\u5165\u56FE\u7247", L"\u753B\u50CF\u3092\u633F\u5165", L"\uC774\uBBF8\uC9C0 \uC0BD\uC785" },
     { "help.edit.mode", L"WYSIWYG / raw markdown", L"\u6240\u89C1\u5373\u6240\u5F97 / \u539F\u59CB Markdown", L"WYSIWYG / Raw Markdown", L"WYSIWYG / \uC6D0\uC2DC \uB9C8\uD06C\uB2E4\uC6B4" },
-    { "fm.section", L"Frontmatter", nullptr, nullptr, nullptr },
-    { "fm.title", L"Frontmatter properties", nullptr, nullptr, nullptr },
-    { "fm.strip_hint", L"Show YAML properties above the document", nullptr, nullptr, nullptr },
-    { "fm.hidden", L"Hidden", nullptr, nullptr, nullptr },
-    { "fm.shown", L"Shown", nullptr, nullptr, nullptr },
-    { "fm.save_hint", L"Show created / updated to add and maintain them on save.", nullptr, nullptr, nullptr },
-    { "fm.key", L"KEY", nullptr, nullptr, nullptr },
-    { "fm.show", L"SHOW", nullptr, nullptr, nullptr },
-    { "fm.side", L"SIDE", nullptr, nullptr, nullptr },
-    { "fm.label", L"LABEL", nullptr, nullptr, nullptr },
-    { "fm.format", L"FORMAT", nullptr, nullptr, nullptr },
-    { "fm.other", L"Any new key discovered in documents", nullptr, nullptr, nullptr },
-    { "fm.preview", L"PREVIEW", nullptr, nullptr, nullptr },
-    { "fm.hidden_preview", L"The property strip is hidden.", nullptr, nullptr, nullptr },
-    { "fm.plain", L"Plain", nullptr, nullptr, nullptr },
-    { "fm.large", L"Large text", nullptr, nullptr, nullptr },
-    { "fm.absolute", L"Jan 3, 2026", nullptr, nullptr, nullptr },
-    { "fm.relative", L"Relative date", nullptr, nullptr, nullptr },
-    { "fm.chips", L"Chips", nullptr, nullptr, nullptr },
-    { "fm.hashtags", L"#hashtags", nullptr, nullptr, nullptr },
-    { "fm.comma", L"Comma list", nullptr, nullptr, nullptr },
-    { "fm.count", L"Count only", nullptr, nullptr, nullptr },
-    { "fm.up_to", L"Show up to", nullptr, nullptr, nullptr },
+    { "fm.section", L"Frontmatter", L"\u5143\u6570\u636E", L"\u30E1\u30BF\u30C7\u30FC\u30BF", L"\uBA54\uD0C0\uB370\uC774\uD130" },
+    { "fm.title", L"Frontmatter properties", L"\u6587\u6863\u5C5E\u6027", L"\u30C9\u30AD\u30E5\u30E1\u30F3\u30C8\u306E\u30D7\u30ED\u30D1\u30C6\u30A3", L"\uBB38\uC11C \uC18D\uC131" },
+    { "fm.strip_hint", L"Show YAML properties above the document", L"\u5728\u6587\u6863\u4E0A\u65B9\u663E\u793A YAML \u5C5E\u6027", L"\u30C9\u30AD\u30E5\u30E1\u30F3\u30C8\u306E\u4E0A\u306B YAML \u30D7\u30ED\u30D1\u30C6\u30A3\u3092\u8868\u793A", L"\uBB38\uC11C \uC704\uC5D0 YAML \uC18D\uC131 \uD45C\uC2DC" },
+    { "fm.hidden", L"Hidden", L"\u9690\u85CF", L"\u975E\u8868\u793A", L"\uC228\uAE40" },
+    { "fm.shown", L"Shown", L"\u663E\u793A", L"\u8868\u793A", L"\uD45C\uC2DC" },
+    { "fm.save_hint", L"Show created / updated to add and maintain them on save.", L"\u663E\u793A created / updated \u540E\uFF0C\u4FDD\u5B58\u65F6\u4F1A\u81EA\u52A8\u6DFB\u52A0\u5E76\u66F4\u65B0\u3002", L"created / updated \u3092\u8868\u793A\u3059\u308B\u3068\u3001\u4FDD\u5B58\u6642\u306B\u8FFD\u52A0\u30FB\u66F4\u65B0\u3055\u308C\u307E\u3059\u3002", L"created / updated \uD56D\uBAA9\uC744 \uD45C\uC2DC\uD558\uBA74 \uC800\uC7A5\uD560 \uB54C \uCD94\uAC00\u00B7\uAC31\uC2E0\uB429\uB2C8\uB2E4." },
+    { "fm.key", L"KEY", L"\u952E", L"\u30AD\u30FC", L"\uD0A4" },
+    { "fm.show", L"SHOW", L"\u663E\u793A", L"\u8868\u793A", L"\uD45C\uC2DC" },
+    { "fm.side", L"SIDE", L"\u4F4D\u7F6E", L"\u4F4D\u7F6E", L"\uC704\uCE58" },
+    { "fm.label", L"LABEL", L"\u540D\u79F0", L"\u540D\u524D", L"\uC774\uB984" },
+    { "fm.format", L"FORMAT", L"\u683C\u5F0F", L"\u5F62\u5F0F", L"\uD615\uC2DD" },
+    { "fm.other", L"Any new key discovered in documents", L"\u6587\u6863\u4E2D\u65B0\u51FA\u73B0\u7684\u952E", L"\u30C9\u30AD\u30E5\u30E1\u30F3\u30C8\u3067\u898B\u3064\u304B\u3063\u305F\u65B0\u3057\u3044\u30AD\u30FC", L"\uBB38\uC11C\uC5D0\uC11C \uC0C8\uB85C \uBC1C\uACAC\uB41C \uD0A4" },
+    { "fm.preview", L"PREVIEW", L"\u9884\u89C8", L"\u30D7\u30EC\u30D3\u30E5\u30FC", L"\uBBF8\uB9AC \uBCF4\uAE30" },
+    { "fm.hidden_preview", L"The property strip is hidden.", L"\u5C5E\u6027\u680F\u5DF2\u9690\u85CF\u3002", L"\u30D7\u30ED\u30D1\u30C6\u30A3\u30D0\u30FC\u306F\u975E\u8868\u793A\u3067\u3059\u3002", L"\uC18D\uC131 \uD45C\uC2DC\uC904\uC774 \uC228\uACA8\uC838 \uC788\uC2B5\uB2C8\uB2E4." },
+    { "fm.plain", L"Plain", L"\u666E\u901A", L"\u6A19\u6E96", L"\uC77C\uBC18" },
+    { "fm.large", L"Large text", L"\u5927\u53F7\u6587\u5B57", L"\u5927\u304D\u306A\u6587\u5B57", L"\uD070 \uAE00\uC790" },
+    { "fm.relative", L"Relative date", L"\u76F8\u5BF9\u65E5\u671F", L"\u76F8\u5BFE\u65E5\u4ED8", L"\uC0C1\uB300 \uB0A0\uC9DC" },
+    { "fm.chips", L"Chips", L"\u6807\u7B7E", L"\u30C1\u30C3\u30D7", L"\uCE69" },
+    { "fm.hashtags", L"#hashtags", L"#\u8BDD\u9898\u6807\u7B7E", L"#\u30CF\u30C3\u30B7\u30E5\u30BF\u30B0", L"#\uD574\uC2DC\uD0DC\uADF8" },
+    { "fm.comma", L"Comma list", L"\u9017\u53F7\u5206\u9694", L"\u30AB\u30F3\u30DE\u533A\u5207\u308A", L"\uC27C\uD45C \uAD6C\uBD84" },
+    { "fm.count", L"Count only", L"\u4EC5\u663E\u793A\u6570\u91CF", L"\u4EF6\u6570\u306E\u307F", L"\uAC1C\uC218\uB9CC" },
+    { "fm.up_to", L"Show up to", L"\u6700\u591A\u663E\u793A", L"\u6700\u5927\u8868\u793A\u6570", L"\uCD5C\uB300 \uD45C\uC2DC" },
+    { "fm.just_now", L"just now", L"\u521A\u521A", L"\u305F\u3063\u305F\u4ECA", L"\uBC29\uAE08" },
+    { "fm.ago.minutes", L"%d minute ago|%d minutes ago", L"%d \u5206\u949F\u524D", L"%d \u5206\u524D", L"%d\uBD84 \uC804" },
+    { "fm.ago.hours", L"%d hour ago|%d hours ago", L"%d \u5C0F\u65F6\u524D", L"%d \u6642\u9593\u524D", L"%d\uC2DC\uAC04 \uC804" },
+    { "fm.ago.days", L"%d day ago|%d days ago", L"%d \u5929\u524D", L"%d \u65E5\u524D", L"%d\uC77C \uC804" },
+    { "fm.in.minutes", L"in %d minute|in %d minutes", L"%d \u5206\u949F\u540E", L"%d \u5206\u5F8C", L"%d\uBD84 \uD6C4" },
+    { "fm.in.hours", L"in %d hour|in %d hours", L"%d \u5C0F\u65F6\u540E", L"%d \u6642\u9593\u5F8C", L"%d\uC2DC\uAC04 \uD6C4" },
+    { "fm.in.days", L"in %d day|in %d days", L"%d \u5929\u540E", L"%d \u65E5\u5F8C", L"%d\uC77C \uD6C4" },
+    { "fm.items", L"%d item|%d items", L"%d \u9879", L"%d \u4EF6", L"%d\uAC1C" },
     { "settings.editor_assists", L"Markdown assists in the raw editor", L"\u539F\u59CB\u7F16\u8F91\u5668\u7684 Markdown \u8F85\u52A9", L"Raw \u30A8\u30C7\u30A3\u30BF\u306E Markdown \u30A2\u30B7\u30B9\u30C8", L"\uC6D0\uC2DC \uD3B8\uC9D1\uAE30\uC758 \uB9C8\uD06C\uB2E4\uC6B4 \uB3C4\uC6B0\uBBF8" },
     { "settings.editor_assists.hint", L"Lists continue on Enter, Tab indents, Ctrl+B/I wrap", L"\u56DE\u8F66\u7EED\u5199\u5217\u8868\uFF0CTab \u7F29\u8FDB\uFF0CCtrl+B/I \u5305\u88F9", L"Enter \u3067\u30EA\u30B9\u30C8\u7D99\u7D9A\u3001Tab \u3067\u30A4\u30F3\u30C7\u30F3\u30C8\u3001Ctrl+B/I \u3067\u88C5\u98FE", L"Enter\uB85C \uBAA9\uB85D \uACC4\uC18D, Tab \uB4E4\uC5EC\uC4F0\uAE30, Ctrl+B/I \uAC10\uC2F8\uAE30" },
     { "rail.export", L"Export via Pandoc", L"\u901A\u8FC7 Pandoc \u5BFC\u51FA", L"Pandoc \u3067\u30A8\u30AF\u30B9\u30DD\u30FC\u30C8", L"Pandoc\uB85C \uB0B4\uBCF4\uB0B4\uAE30" },
@@ -365,7 +374,7 @@ const Entry kEntries[] = {
     { "settings.title", L"Settings", L"\u8BBE\u7F6E", L"\u8A2D\u5B9A", L"\uC124\uC815" },
     { "settings.section.general", L"General", L"\u5E38\u89C4", L"\u4E00\u822C", L"\uC77C\uBC18" },
     { "settings.section.appearance", L"Appearance", L"\u5916\u89C2", L"\u5916\u89B3", L"\uC678\uAD00" },
-    { "settings.section.editor", L"Editor", L"\u7F16\u8F91\u5668", L"\u7DE8\u96C6\u30A8\u30C7\u30A3\u30BF\u30FC", L"\uD3B8\uC9D1\uAE30" },
+    { "settings.section.editor", L"Editor", L"\u7F16\u8F91\u5668", L"\u30A8\u30C7\u30A3\u30BF\u30FC", L"\uD3B8\uC9D1\uAE30" },
     { "settings.folder_search", L"Folder search results", L"\u6587\u4EF6\u5939\u641C\u7D22\u7ED3\u679C", L"\u30D5\u30A9\u30EB\u30C0\u30FC\u691C\u7D22\u7D50\u679C", L"\uD3F4\uB354 \uAC80\uC0C9 \uACB0\uACFC" },
     { "settings.folder_search.hint", L"Sibling files matched while searching", L"\u641C\u7D22\u65F6\u540C\u65F6\u5339\u914D\u540C\u76EE\u5F55\u7684\u5176\u4ED6\u6587\u4EF6", L"\u691C\u7D22\u4E2D\u306B\u540C\u3058\u30D5\u30A9\u30EB\u30C0\u30FC\u306E\u30D5\u30A1\u30A4\u30EB\u3082\u4E00\u81F4", L"\uAC80\uC0C9 \uC911 \uAC19\uC740 \uD3F4\uB354\uC758 \uD30C\uC77C\uB3C4 \uD45C\uC2DC" },
     // Unsaved-changes exit dialog
@@ -433,14 +442,14 @@ const Entry kEntries[] = {
     { "settings.browse", L"Browse", L"\u6D4F\u89C8", L"\u53C2\u7167", L"\uCC3E\uAE30" },
     { "settings.edit", L"Edit", L"\u7F16\u8F91", L"\u7DE8\u96C6", L"\uD3B8\uC9D1" },
     { "settings.new", L"+ New", L"+ \u65B0\u5EFA", L"+ \u65B0\u898F", L"+ \uC0C8\uB85C \uB9CC\uB4E4\uAE30" },
-    { "settings.word_wrap", L"Word wrap", L"\u81EA\u52A8\u6362\u884C", L"\u81EA\u52D5\u6539\u884C", L"\uC790\uB3D9 \uC904\uBC14\uAFC0" },
-    { "settings.word_wrap.hint", L"Wrap long lines in the editor pane", L"\u7F16\u8F91\u5668\u5185\u957F\u884C\u81EA\u52A8\u6362\u884C", L"\u7DE8\u96C6\u30DA\u30A4\u30F3\u3067\u9577\u3044\u884C\u3092\u6298\u308A\u8FD4\u3059", L"\uD3B8\uC9D1\uAE30\uC5D0\uC11C \uAE34 \uC904\uC744 \uC790\uB3D9\uC73C\uB85C \uBC14\uAFC0" },
+    { "settings.word_wrap", L"Word wrap", L"\u81EA\u52A8\u6362\u884C", L"\u81EA\u52D5\u6539\u884C", L"\uC790\uB3D9 \uC904\uBC14\uAFC8" },
+    { "settings.word_wrap.hint", L"Wrap long lines in the editor pane", L"\u7F16\u8F91\u5668\u5185\u957F\u884C\u81EA\u52A8\u6362\u884C", L"\u7DE8\u96C6\u30DA\u30A4\u30F3\u3067\u9577\u3044\u884C\u3092\u6298\u308A\u8FD4\u3059", L"\uD3B8\uC9D1\uAE30\uC5D0\uC11C \uAE34 \uC904\uC744 \uC790\uB3D9\uC73C\uB85C \uC904\uBC14\uAFC8" },
     { "settings.preview_pane", L"Preview pane", L"\u9884\u89C8\u7A97\u683C", L"\u30D7\u30EC\u30D3\u30E5\u30FC\u30DA\u30A4\u30F3", L"\uBBF8\uB9AC\uBCF4\uAE30 \uD328\uB110" },
     { "settings.preview_pane.hint", L"Show the rendered preview beside the editor", L"\u5728\u7F16\u8F91\u5668\u65C1\u663E\u793A\u6E32\u67D3\u9884\u89C8", L"\u7DE8\u96C6\u30DA\u30A4\u30F3\u306E\u6A2A\u306B\u30EC\u30F3\u30C0\u30EA\u30F3\u30B0\u30D7\u30EC\u30D3\u30E5\u30FC\u3092\u8868\u793A", L"\uD3B8\uC9D1\uAE30 \uC606\uC5D0 \uB80C\uB354\uB9C1 \uBBF8\uB9AC\uBCF4\uAE30 \uD45C\uC2DC" },
     { "settings.language", L"Language", L"\u754C\u9762\u8BED\u8A00", L"\u8A00\u8A9E", L"\uC5B8\uC5B4" },
     { "settings.language.hint", L"Auto follows the Windows display language", L"\u81EA\u52A8 = \u8DDF\u968F Windows \u663E\u793A\u8BED\u8A00", L"\u81EA\u52D5 = Windows \u306E\u8868\u793A\u8A00\u8A9E\u306B\u5F93\u3046", L"\uC790\uB3D9 = Windows \uD45C\uC2DC \uC5B8\uC5B4 \uB530\uB984" },
     { "settings.lang.auto", L"Auto", L"\u81EA\u52A8", L"\u81EA\u52D5", L"\uC790\uB3D9" },
-    { "settings.footer", L"Esc to close \u2022 changes apply immediately", L"\u6309 Esc \u5173\u95ED \u2022 \u66F4\u6539\u7ACB\u5373\u751F\u6548", L"ESC\u3067\u9589\u3058\u308B \u2022 \u5909\u66F4\u306F\u3050\u3059\u306B\u53CD\u6620", L"ESC\uB85C \uB2EB\uAE30 \u2022 \uBCC0\uACBD \uC989\uC2DC \uC801\uC6A9" },
+    { "settings.footer", L"Esc to close \u2022 changes apply immediately", L"\u6309 Esc \u5173\u95ED \u2022 \u66F4\u6539\u7ACB\u5373\u751F\u6548", L"ESC\u3067\u9589\u3058\u308B \u2022 \u5909\u66F4\u306F\u3059\u3050\u306B\u53CD\u6620", L"ESC\uB85C \uB2EB\uAE30 \u2022 \uBCC0\uACBD \uC989\uC2DC \uC801\uC6A9" },
     { "settings.open_langs", L"Edit languages.ini", L"\u7F16\u8F91 languages.ini", L"languages.ini\u3092\u7DE8\u96C6", L"languages.ini \uD3B8\uC9D1" },
     { "settings.open_langs.hint", L"Add or fix translations \u2014 more languages welcome", L"\u8865\u5145\u6216\u4FEE\u6B63\u7FFB\u8BD1\uFF08\u6B22\u8FCE\u66F4\u591A\u8BED\u8A00\uFF09", L"\u7FFB\u8A33\u3092\u8FFD\u52A0\u307E\u305F\u306F\u4FEE\u6B63 \u2014 \u65B0\u3057\u3044\u8A00\u8A9E\u3082\u6B53\u8FCE", L"\uBC88\uC5ED \uCD94\uAC00 \uB610\uB294 \uC218\uC815 \u2014 \uB354 \uB9CE\uC740 \uC5B8\uC5B4\uB97C \uD658\uC601\uD569\uB2C8\uB2E4" },
     { "settings.full", L"Full", L"\u5168\u5BBD", L"\u5168\u5E45", L"\uC804\uCCB4" },
@@ -544,6 +553,21 @@ const wchar_t* tr(int langIndex, const char* key) {
 
 const wchar_t* tr(const App& app, const char* key) {
     return tr(app.currentLanguageIndex, key);
+}
+
+bool languageTranslatesKey(int langIndex, const char* key) {
+    if (!key) return false;
+    langIndex = clampLanguageIndex(langIndex);
+    if (overrideFor(languageIdAt(langIndex), key)) return true;
+    const Entry* e = findEntry(key);
+    if (!e) return false;
+    switch (languageCompiledColumn(langIndex)) {
+        case 0: return true;
+        case 1: return e->zh != nullptr;
+        case 2: return e->ja != nullptr;
+        case 3: return e->ko != nullptr;
+        default: return false;
+    }
 }
 
 int clampLanguageIndex(int index) {
@@ -658,6 +682,14 @@ const BuiltinTranslation kBuiltinTranslations[] = {
       L"Gehe zu Zeile",
       L"Aller \u00E0 la ligne",
       L"Vai alla riga" },
+    { "settings.keep_deleted_tabs",
+      L"Gel\u00F6schte Dateien im Arbeitsspeicher behalten",
+      L"Conserver les fichiers supprim\u00E9s en m\u00E9moire",
+      L"Mantieni i file eliminati in memoria" },
+    { "settings.keep_deleted_tabs.hint",
+      L"Erh\u00F6ht den Arbeitsspeicherverbrauch bis zum Beenden von Tinta",
+      L"Consommation de RAM accrue jusqu'\u00E0 la fermeture de Tinta",
+      L"Aumenta il consumo di RAM fino alla chiusura di Tinta" },
     { "settings.notifications",
       L"Benachrichtigungen anzeigen",
       L"Afficher les notifications",
@@ -846,6 +878,10 @@ const BuiltinTranslation kBuiltinTranslations[] = {
       L"Kopiert!",
       L"Copi\u00E9 !",
       L"Copiato!" },
+    { "toast.clipboard_busy",
+      L"Zwischenablage belegt \u2014 nichts kopiert",
+      L"Presse-papiers occup\u00E9 \u2014 rien n'a \u00E9t\u00E9 copi\u00E9",
+      L"Appunti occupati \u2014 nulla \u00E8 stato copiato" },
     { "toast.paste_table",
       L"Als Tabelle eingef\u00FCgt (Ctrl+Shift+V f\u00FCgt unver\u00E4ndert ein)",
       L"Coll\u00E9 en tableau (Ctrl+Shift+V colle le texte brut)",
@@ -1482,6 +1518,534 @@ const BuiltinTranslation kBuiltinTranslations[] = {
       L"Weiter bearbeiten",
       L"Continuer l'\u00E9dition",
       L"Continua a modificare" },
+    { "fm.type.text",
+      L"Text",
+      L"texte",
+      L"testo" },
+    { "fm.type.date",
+      L"Datum",
+      L"date",
+      L"data" },
+    { "fm.type.list",
+      L"Liste",
+      L"liste",
+      L"lista" },
+    { "fm.type.boolean",
+      L"Bool",
+      L"bool",
+      L"bool" },
+    { "fm.type.object",
+      L"Objekt",
+      L"objet",
+      L"oggetto" },
+    { "fm.left_short",
+      L"L",
+      L"G",
+      L"S" },
+    { "fm.right_short",
+      L"R",
+      L"D",
+      L"D" },
+    { "fm.label.on",
+      L"An",
+      L"Oui",
+      L"S\u00EC" },
+    { "fm.label.off",
+      L"Aus",
+      L"Non",
+      L"No" },
+    { "fm.all",
+      L"Alle",
+      L"Tous",
+      L"Tutti" },
+    { "theme.editor.default_name",
+      L"Mein Design",
+      L"Mon th\u00E8me",
+      L"Il mio tema" },
+    { "toast.file_missing",
+      L"Datei nicht gefunden:",
+      L"Fichier introuvable :",
+      L"File non trovato:" },
+    { "toast.file_no_app",
+      L"F\u00FCr diese Datei ist keine Standard-App festgelegt:",
+      L"Aucune application par d\u00E9faut n'est d\u00E9finie pour ce fichier :",
+      L"Nessuna app predefinita impostata per questo file:" },
+    { "toast.file_open_failed",
+      L"Datei konnte nicht ge\u00F6ffnet werden:",
+      L"Impossible d'ouvrir le fichier :",
+      L"Impossibile aprire il file:" },
+    { "editor.read",
+      L"Lesen \u00B7 Ctrl+Shift+E",
+      L"Lire \u00B7 Ctrl+Shift+E",
+      L"Leggi \u00B7 Ctrl+Shift+E" },
+    { "editor.resume",
+      L"Bearbeiten \u00B7 Esc",
+      L"Modifier \u00B7 Esc",
+      L"Modifica \u00B7 Esc" },
+    { "editor.read_help",
+      L"Ungespeicherte \u00C4nderungen lesen / zur\u00FCck zum Bearbeiten",
+      L"Lire les modifications non enregistr\u00E9es / revenir \u00E0 l'\u00E9dition",
+      L"Leggi le modifiche non salvate / torna a modificare" },
+    { "editor.count.words",
+      L"%s W\u00F6rter",
+      L"%s mots",
+      L"%s parole" },
+    { "editor.count.word",
+      L"%s Wort",
+      L"%s mot",
+      L"%s parola" },
+    { "editor.count.chars",
+      L"%s Zeichen",
+      L"%s caract\u00E8res",
+      L"%s caratteri" },
+    { "editor.count.char",
+      L"%s Zeichen",
+      L"%s caract\u00E8re",
+      L"%s carattere" },
+    { "help.edit.move_line",
+      L"Zeile nach oben / unten verschieben",
+      L"D\u00E9placer la ligne vers le haut / le bas",
+      L"Sposta la riga su / gi\u00F9" },
+    { "help.edit.add_caret",
+      L"Cursor dar\u00FCber / darunter hinzuf\u00FCgen",
+      L"Ajouter un curseur au-dessus / en dessous",
+      L"Aggiungi un cursore sopra / sotto" },
+    { "help.edit.alt_click",
+      L"Cursor hinzuf\u00FCgen oder entfernen",
+      L"Ajouter ou retirer un curseur",
+      L"Aggiungi o rimuovi un cursore" },
+    { "help.edit.next_match",
+      L"N\u00E4chstes Vorkommen ausw\u00E4hlen",
+      L"S\u00E9lectionner l'occurrence suivante",
+      L"Seleziona l'occorrenza successiva" },
+    { "settings.word_count",
+      L"Wortz\u00E4hlung",
+      L"Nombre de mots",
+      L"Conteggio parole" },
+    { "settings.word_count.hint",
+      L"W\u00F6rter und Zeichen neben der Lesen-Schaltfl\u00E4che",
+      L"Mots et caract\u00E8res \u00E0 c\u00F4t\u00E9 du bouton Lire",
+      L"Parole e caratteri accanto al pulsante Leggi" },
+    { "settings.close_drafts",
+      L"Ohne Nachfrage schlie\u00DFen",
+      L"Fermer sans demander",
+      L"Chiudi senza chiedere" },
+    { "settings.close_drafts.hint",
+      L"Ungespeicherte \u00C4nderungen warten als Entwurf auf den n\u00E4chsten Start",
+      L"Les modifications non enregistr\u00E9es attendent en brouillon le prochain lancement",
+      L"Le modifiche non salvate restano come bozze fino al prossimo avvio" },
+    { "help.general.new_window",
+      L"Neues Fenster",
+      L"Nouvelle fen\u00EAtre",
+      L"Nuova finestra" },
+    { "ctx.annotate",
+      L"Anmerken",
+      L"Annoter",
+      L"Annota" },
+    { "annot.note_hint",
+      L"Notiz (Markdown)",
+      L"Note (Markdown)",
+      L"Nota (Markdown)" },
+    { "annot.nolocate",
+      L"Auswahl nicht gefunden",
+      L"S\u00E9lection introuvable",
+      L"Selezione non trovata" },
+    { "toast.agent_copied",
+      L"F\u00FCr den Agenten kopiert",
+      L"Copi\u00E9 pour l'agent",
+      L"Copiato per l'agente" },
+    { "table.copy",
+      L"TSV kopieren",
+      L"Copier en TSV",
+      L"Copia TSV" },
+    { "table.copied",
+      L"Tabelle kopiert",
+      L"Tableau copi\u00E9",
+      L"Tabella copiata" },
+    { "diagram.png",
+      L"Bild",
+      L"Image",
+      L"Immagine" },
+    { "diagram.copied",
+      L"Bild kopiert",
+      L"Image copi\u00E9e",
+      L"Immagine copiata" },
+    { "update.available",
+      L"Tinta %ls ist verf\u00FCgbar",
+      L"Tinta %ls est disponible",
+      L"Tinta %ls \u00E8 disponibile" },
+    { "draft.recovered",
+      L"Ungespeicherte Entw\u00FCrfe wiederherstellen: %d",
+      L"Restaurer les brouillons non enregistr\u00E9s : %d",
+      L"Ripristina bozze non salvate: %d" },
+    { "createref.title",
+      L"Diese Datei erstellen?",
+      L"Cr\u00E9er ce fichier ?",
+      L"Creare questo file?" },
+    { "createref.create",
+      L"Erstellen",
+      L"Cr\u00E9er",
+      L"Crea" },
+    { "createref.cancel",
+      L"Abbrechen",
+      L"Annuler",
+      L"Annulla" },
+    { "start.tagline",
+      L"Markdown & Mermaid in nativer Geschwindigkeit.",
+      L"Markdown et Mermaid, \u00E0 vitesse native.",
+      L"Markdown e Mermaid, a velocit\u00E0 nativa." },
+    { "start.open",
+      L"Datei \u00F6ffnen",
+      L"Ouvrir un fichier",
+      L"Apri un file" },
+    { "start.new",
+      L"Neues Dokument",
+      L"Nouveau document",
+      L"Nuovo documento" },
+    { "start.browse",
+      L"Durchsuchen",
+      L"Parcourir",
+      L"Sfoglia" },
+    { "start.recent",
+      L"ZULETZT",
+      L"R\u00C9CENTS",
+      L"RECENTI" },
+    { "start.clear",
+      L"leeren",
+      L"effacer",
+      L"cancella" },
+    { "start.learn",
+      L"LERNEN",
+      L"APPRENDRE",
+      L"IMPARA" },
+    { "start.learn_sample",
+      L"Beispieldokument",
+      L"Document d'exemple",
+      L"Documento di esempio" },
+    { "start.learn_sample_d",
+      L"Alle Funktionen in einer Datei zum Durchscrollen.",
+      L"Toutes les fonctions dans un seul fichier.",
+      L"Tutte le funzioni in un unico file." },
+    { "start.learn_mermaid",
+      L"Mermaid-Diagramme",
+      L"Diagrammes Mermaid",
+      L"Diagrammi Mermaid" },
+    { "start.learn_mermaid_d",
+      L"Flussdiagramme, Sequenzen und Gantt-Diagramme aus reinem Text.",
+      L"Organigrammes, s\u00E9quences et Gantt \u00E0 partir de texte brut.",
+      L"Diagrammi di flusso, sequenze e Gantt da testo semplice." },
+    { "start.learn_md",
+      L"Markdown-Grundlagen",
+      L"Bases de Markdown",
+      L"Basi di Markdown" },
+    { "start.learn_md_d",
+      L"Die ganze Syntax, die Tinta darstellt, in zwei Minuten.",
+      L"Toute la syntaxe que Tinta affiche, en deux minutes.",
+      L"Tutta la sintassi che Tinta mostra, in due minuti." },
+    { "start.shortcuts",
+      L"Alle Tastaturk\u00FCrzel",
+      L"Tous les raccourcis",
+      L"Tutte le scorciatoie" },
+    { "start.drop",
+      L"oder eine .md- / .mmd- / .puml-Datei irgendwo ablegen",
+      L"ou d\u00E9posez un fichier .md / .mmd / .puml n'importe o\u00F9",
+      L"oppure trascina un file .md / .mmd / .puml ovunque" },
+    { "start.just_now",
+      L"gerade eben",
+      L"\u00E0 l'instant",
+      L"proprio ora" },
+    { "start.min_ago",
+      L"vor %d Min.",
+      L"il y a %d min",
+      L"%d min fa" },
+    { "start.today",
+      L"heute",
+      L"aujourd'hui",
+      L"oggi" },
+    { "start.yesterday",
+      L"gestern",
+      L"hier",
+      L"ieri" },
+    { "start.empty",
+      L"Ge\u00F6ffnete Dateien erscheinen hier",
+      L"Les fichiers ouverts appara\u00EEtront ici",
+      L"I file aperti compariranno qui" },
+    { "rail.bold",
+      L"Fett",
+      L"Gras",
+      L"Grassetto" },
+    { "rail.italic",
+      L"Kursiv",
+      L"Italique",
+      L"Corsivo" },
+    { "rail.strike",
+      L"Durchgestrichen",
+      L"Barr\u00E9",
+      L"Barrato" },
+    { "rail.code",
+      L"Inline-Code",
+      L"Code en ligne",
+      L"Codice inline" },
+    { "rail.link",
+      L"Link",
+      L"Lien",
+      L"Link" },
+    { "rail.bullets",
+      L"Aufz\u00E4hlung",
+      L"Liste \u00E0 puces",
+      L"Elenco puntato" },
+    { "rail.tasks",
+      L"Aufgabenliste",
+      L"Liste de t\u00E2ches",
+      L"Elenco di attivit\u00E0" },
+    { "rail.quote",
+      L"Zitat",
+      L"Citation",
+      L"Citazione" },
+    { "rail.table",
+      L"Tabelle einf\u00FCgen",
+      L"Ins\u00E9rer un tableau",
+      L"Inserisci tabella" },
+    { "rail.diagram",
+      L"Diagramm einf\u00FCgen",
+      L"Ins\u00E9rer un diagramme",
+      L"Inserisci diagramma" },
+    { "rail.image",
+      L"Bild einf\u00FCgen",
+      L"Ins\u00E9rer une image",
+      L"Inserisci immagine" },
+    { "help.edit.mode",
+      L"WYSIWYG / reines Markdown",
+      L"WYSIWYG / Markdown brut",
+      L"WYSIWYG / Markdown grezzo" },
+    { "fm.section",
+      L"Metadaten",
+      L"M\u00E9tadonn\u00E9es",
+      L"Metadati" },
+    { "fm.title",
+      L"Dokumenteigenschaften",
+      L"Propri\u00E9t\u00E9s du document",
+      L"Propriet\u00E0 del documento" },
+    { "fm.strip_hint",
+      L"YAML-Eigenschaften \u00FCber dem Dokument anzeigen",
+      L"Afficher les propri\u00E9t\u00E9s YAML au-dessus du document",
+      L"Mostra le propriet\u00E0 YAML sopra il documento" },
+    { "fm.hidden",
+      L"Verborgen",
+      L"Masqu\u00E9",
+      L"Nascosto" },
+    { "fm.shown",
+      L"Sichtbar",
+      L"Affich\u00E9",
+      L"Visibile" },
+    { "fm.save_hint",
+      L"Sichtbare created / updated werden beim Speichern gepflegt.",
+      L"created / updated affich\u00E9s sont mis \u00E0 jour \u00E0 l'enregistrement.",
+      L"created / updated visibili si aggiornano al salvataggio." },
+    { "fm.key",
+      L"SCHL\u00DCSSEL",
+      L"CL\u00C9",
+      L"CHIAVE" },
+    { "fm.show",
+      L"ZEIGEN",
+      L"VOIR",
+      L"VEDI" },
+    { "fm.side",
+      L"SEITE",
+      L"C\u00D4T\u00C9",
+      L"LATO" },
+    { "fm.label",
+      L"NAME",
+      L"NOM",
+      L"NOME" },
+    { "fm.format",
+      L"FORMAT",
+      L"FORMAT",
+      L"FORMATO" },
+    { "fm.other",
+      L"Neue Schl\u00FCssel aus Dokumenten",
+      L"Toute nouvelle cl\u00E9 trouv\u00E9e dans les documents",
+      L"Nuove chiavi trovate nei documenti" },
+    { "fm.preview",
+      L"VORSCHAU",
+      L"APER\u00C7U",
+      L"ANTEPRIMA" },
+    { "fm.hidden_preview",
+      L"Die Eigenschaftsleiste ist ausgeblendet.",
+      L"Le bandeau des propri\u00E9t\u00E9s est masqu\u00E9.",
+      L"La barra delle propriet\u00E0 \u00E8 nascosta." },
+    { "fm.plain",
+      L"Normal",
+      L"Normal",
+      L"Normale" },
+    { "fm.large",
+      L"Gro\u00DFer Text",
+      L"Grand texte",
+      L"Testo grande" },
+    { "fm.relative",
+      L"Relatives Datum",
+      L"Date relative",
+      L"Data relativa" },
+    { "fm.chips",
+      L"Chips",
+      L"Pastilles",
+      L"Etichette" },
+    { "fm.hashtags",
+      L"#Hashtags",
+      L"#hashtags",
+      L"#hashtag" },
+    { "fm.comma",
+      L"Kommaliste",
+      L"Liste \u00E0 virgules",
+      L"Elenco con virgole" },
+    { "fm.count",
+      L"Nur Anzahl",
+      L"Nombre seul",
+      L"Solo numero" },
+    { "fm.up_to",
+      L"H\u00F6chstens",
+      L"Afficher jusqu'\u00E0",
+      L"Mostra fino a" },
+    { "fm.just_now",
+      L"gerade eben",
+      L"\u00E0 l'instant",
+      L"proprio ora" },
+    { "fm.ago.minutes",
+      L"vor %d Minute|vor %d Minuten",
+      L"il y a %d minute|il y a %d minutes",
+      L"%d minuto fa|%d minuti fa" },
+    { "fm.ago.hours",
+      L"vor %d Stunde|vor %d Stunden",
+      L"il y a %d heure|il y a %d heures",
+      L"%d ora fa|%d ore fa" },
+    { "fm.ago.days",
+      L"vor %d Tag|vor %d Tagen",
+      L"il y a %d jour|il y a %d jours",
+      L"%d giorno fa|%d giorni fa" },
+    { "fm.in.minutes",
+      L"in %d Minute|in %d Minuten",
+      L"dans %d minute|dans %d minutes",
+      L"tra %d minuto|tra %d minuti" },
+    { "fm.in.hours",
+      L"in %d Stunde|in %d Stunden",
+      L"dans %d heure|dans %d heures",
+      L"tra %d ora|tra %d ore" },
+    { "fm.in.days",
+      L"in %d Tag|in %d Tagen",
+      L"dans %d jour|dans %d jours",
+      L"tra %d giorno|tra %d giorni" },
+    { "fm.items",
+      L"%d Eintrag|%d Eintr\u00E4ge",
+      L"%d \u00E9l\u00E9ment|%d \u00E9l\u00E9ments",
+      L"%d elemento|%d elementi" },
+    { "settings.editor_assists",
+      L"Markdown-Hilfen im Quelltext-Editor",
+      L"Aides Markdown dans l'\u00E9diteur brut",
+      L"Aiuti Markdown nell'editor del sorgente" },
+    { "settings.editor_assists.hint",
+      L"Enter setzt Listen fort, Tab r\u00FCckt ein, Ctrl+B/I umschlie\u00DFen",
+      L"Entr\u00E9e continue les listes, Tab indente, Ctrl+B/I encadrent",
+      L"Invio continua gli elenchi, Tab rientra, Ctrl+B/I racchiudono" },
+    { "rail.export",
+      L"\u00DCber Pandoc exportieren",
+      L"Exporter via Pandoc",
+      L"Esporta tramite Pandoc" },
+    { "toast.pandoc_ok",
+      L"Exportiert",
+      L"Export\u00E9",
+      L"Esportato" },
+    { "toast.pandoc_fail",
+      L"Pandoc-Export fehlgeschlagen",
+      L"\u00C9chec de l'export Pandoc",
+      L"Esportazione Pandoc non riuscita" },
+    { "settings.pandoc",
+      L"Pandoc-Konverter",
+      L"Convertisseur Pandoc",
+      L"Convertitore Pandoc" },
+    { "settings.pandoc.hint",
+      L"Erg\u00E4nzt den Editor um EPUB-, ODT-, PPTX-, RTF- und LaTeX-Export",
+      L"Ajoute l'export EPUB, ODT, PPTX, RTF et LaTeX \u00E0 l'\u00E9diteur",
+      L"Aggiunge all'editor l'esportazione in EPUB, ODT, PPTX, RTF e LaTeX" },
+    { "ectx.cut",
+      L"Ausschneiden",
+      L"Couper",
+      L"Taglia" },
+    { "ectx.copy",
+      L"Kopieren",
+      L"Copier",
+      L"Copia" },
+    { "ectx.paste",
+      L"Einf\u00FCgen",
+      L"Coller",
+      L"Incolla" },
+    { "ectx.insert",
+      L"EINF\u00DCGEN",
+      L"INS\u00C9RER",
+      L"INSERISCI" },
+    { "ectx.table",
+      L"Tabelle",
+      L"Tableau",
+      L"Tabella" },
+    { "ectx.diagram",
+      L"Diagramm",
+      L"Diagramme",
+      L"Diagramma" },
+    { "ectx.image",
+      L"Bild",
+      L"Image",
+      L"Immagine" },
+    { "ectx.codeblock",
+      L"Codeblock",
+      L"Bloc de code",
+      L"Blocco di codice" },
+    { "ectx.link",
+      L"Link",
+      L"Lien",
+      L"Link" },
+    { "ectx.hr",
+      L"Trennlinie",
+      L"Ligne horizontale",
+      L"Linea orizzontale" },
+    { "ectx.wysiwyg",
+      L"Im WYSIWYG-Modus bearbeiten",
+      L"Modifier en WYSIWYG",
+      L"Modifica in WYSIWYG" },
+    { "ectx.templates",
+      L"MERMAID-VORLAGEN",
+      L"MOD\u00C8LES MERMAID",
+      L"MODELLI MERMAID" },
+    { "ectx.table_word",
+      L"Tabelle",
+      L"tableau",
+      L"tabella" },
+    { "ectx.d.flow",
+      L"Flussdiagramm",
+      L"Organigramme",
+      L"Diagramma di flusso" },
+    { "ectx.d.seq",
+      L"Sequenz",
+      L"S\u00E9quence",
+      L"Sequenza" },
+    { "ectx.d.class",
+      L"Klasse",
+      L"Classe",
+      L"Classe" },
+    { "ectx.d.state",
+      L"Zustand",
+      L"\u00C9tat",
+      L"Stato" },
+    { "ectx.d.gantt",
+      L"Gantt",
+      L"Gantt",
+      L"Gantt" },
+    { "ectx.d.pie",
+      L"Kreis",
+      L"Secteurs",
+      L"Torta" },
+    { "ectx.d.empty",
+      L"Leerer Block",
+      L"Bloc vide",
+      L"Blocco vuoto" },
 };
 
 void seedBuiltinOverrides() {
@@ -1643,6 +2207,9 @@ void openLanguagesIniFile() {
         f << "; Values override the built-in strings \xe2\x80\x94 including the shipped\n";
         f << "; de/fr/it/ru translations, so corrections work per-key; missing keys\n";
         f << "; fall back to English.\n";
+        f << "; Counts list their plural forms split by |, in the order of the\n";
+        f << "; language's rule (one|other, or one|few|many as in Russian); %d is\n";
+        f << "; the number.\n";
         for (const SeedLanguage& lang : kSeedLanguages) {
             f << "\n[" << lang.id << "]\n";
             f << "name=" << lang.nativeUtf8 << "\n";
@@ -1660,4 +2227,130 @@ void openLanguagesIniFile() {
     }
     ShellExecuteW(nullptr, L"open", configFilePathForShell(path).c_str(),
                   nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+// ---- Counts and dates in the language's own words ----
+
+namespace {
+
+// Which of a count's '|' forms a number takes, by the language's cardinal
+// plural rule
+size_t pluralForm(const std::string& id, long long n) {
+    const std::string language = id.substr(0, id.find('-'));
+    const long long mod10 = n % 10, mod100 = n % 100;
+    const bool few = mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14);
+    if (language == "ru" || language == "uk" || language == "be") {
+        return mod10 == 1 && mod100 != 11 ? 0 : few ? 1 : 2;
+    }
+    if (language == "pl") return n == 1 ? 0 : few ? 1 : 2;
+    if (language == "fr" || language == "pt") return n <= 1 ? 0 : 1;
+    return n == 1 ? 0 : 1;
+}
+
+bool isPictureLetter(wchar_t c) { return c == L'd' || c == L'M' || c == L'y' || c == L'g'; }
+
+} // namespace
+
+std::wstring trCount(int langIndex, const char* key, long long count) {
+    langIndex = clampLanguageIndex(langIndex);
+    const std::wstring text = tr(langIndex, key);
+    // Text that fell back to English takes English's rule
+    const size_t form = pluralForm(languageTranslatesKey(langIndex, key) ? languageIdAt(langIndex) : "en", count);
+    size_t start = 0;
+    for (size_t i = 0; i < form; ++i) {
+        const size_t bar = text.find(L'|', start);
+        if (bar == std::wstring::npos) break;  // fewer forms: the last one
+        start = bar + 1;
+    }
+    std::wstring out = text.substr(start, text.find(L'|', start) - start);
+    const size_t number = out.find(L"%d");
+    if (number != std::wstring::npos) out.replace(number, 2, std::to_wstring(count));
+    return out;
+}
+
+std::wstring dateLocaleFor(const std::string& languageId, const std::wstring& userLocale) {
+    const std::wstring id(languageId.begin(), languageId.end());
+    // A language with a region of its own (zh-tw) keeps it
+    const std::wstring userLanguage = userLocale.substr(0, userLocale.find(L'-'));
+    if (id.find(L'-') == std::wstring::npos && !userLanguage.empty() &&
+        _wcsicmp(userLanguage.c_str(), id.c_str()) == 0) {
+        return userLocale;
+    }
+    wchar_t resolved[LOCALE_NAME_MAX_LENGTH] = {};
+    if (ResolveLocaleName(id.c_str(), resolved, LOCALE_NAME_MAX_LENGTH) > 0 && resolved[0]) {
+        return resolved;
+    }
+    return L"en-US";
+}
+
+std::wstring dateLocale(int langIndex) {
+    wchar_t user[LOCALE_NAME_MAX_LENGTH] = {};
+    if (!GetUserDefaultLocaleName(user, LOCALE_NAME_MAX_LENGTH)) user[0] = 0;
+    return dateLocaleFor(languageIdAt(clampLanguageIndex(langIndex)), user);
+}
+
+std::wstring shortDatePicture(const std::wstring& picture) {
+    // Fields (runs of one picture letter), quoted text, and the plain
+    // separators between them
+    enum Kind { Field, Quoted, Plain };
+    struct Part { Kind kind; std::wstring text; };
+    std::vector<Part> parts;
+    for (size_t i = 0; i < picture.size();) {
+        size_t end = i + 1;
+        Kind kind = Plain;
+        if (picture[i] == L'\'') {
+            kind = Quoted;
+            // '' inside quotes is a quote character
+            while (end < picture.size() &&
+                   (picture[end] != L'\'' || (end + 1 < picture.size() && picture[end + 1] == L'\''))) {
+                end += picture[end] == L'\'' ? 2 : 1;
+            }
+            end = std::min(end + 1, picture.size());
+        } else if (isPictureLetter(picture[i])) {
+            kind = Field;
+            while (end < picture.size() && picture[end] == picture[i]) ++end;
+        } else {
+            while (end < picture.size() && picture[end] != L'\'' && !isPictureLetter(picture[end])) ++end;
+        }
+        parts.push_back({kind, picture.substr(i, end - i)});
+        i = end;
+    }
+    // The weekday goes with the separator that joined it to the date: the
+    // one after it when it leads, else the one before it
+    for (size_t i = 0; i < parts.size();) {
+        if (parts[i].kind != Field || parts[i].text[0] != L'd' || parts[i].text.size() < 3) {
+            ++i;
+            continue;
+        }
+        if (i == 0 && parts.size() > 1 && parts[1].kind == Plain) {
+            parts.erase(parts.begin() + 1);
+        } else if (i > 0 && parts[i - 1].kind == Plain) {
+            parts.erase(parts.begin() + --i);
+        }
+        parts.erase(parts.begin() + i);
+    }
+    std::wstring out;
+    for (const Part& part : parts) {
+        if (part.kind == Field && part.text == L"MMMM") out += L"MMM";
+        else if (part.kind == Field && part.text == L"dd") out += L"d";
+        else out += part.text;
+    }
+    return out;
+}
+
+std::wstring formatDate(const std::wstring& locale, int year, int month, int day, bool withYear) {
+    SYSTEMTIME date = {};
+    date.wYear = (WORD)year;
+    date.wMonth = (WORD)month;
+    date.wDay = (WORD)day;
+    wchar_t picture[128] = {};
+    wchar_t out[128] = {};
+    if (GetLocaleInfoEx(locale.c_str(), withYear ? LOCALE_SLONGDATE : LOCALE_SMONTHDAY, picture, 128) > 0 &&
+        GetDateFormatEx(locale.c_str(), 0, &date, shortDatePicture(picture).c_str(), out, 128, nullptr) > 0) {
+        return out;
+    }
+    if (GetDateFormatEx(L"en-US", 0, &date, withYear ? L"MMM d, yyyy" : L"MMM d", out, 128, nullptr) > 0) {
+        return out;
+    }
+    return L"";
 }

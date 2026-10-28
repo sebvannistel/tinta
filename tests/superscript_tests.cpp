@@ -67,6 +67,7 @@ void scriptLayout(App& app, const std::string& fixture) {
         "> base^SUP^ base~SUB~\n",
         "- base^SUP^ base~SUB~\n", "**base^SUP^** *base~SUB~*\n",
         "[base^SUP^](#target) base~SUB~\n",
+        "~~base^SUP^~~ ==base~SUB~==\n", "==base^SUP^ ~~base~SUB~~~==\n",
         "| Header |\n| --- |\n| base^SUP^ base~SUB~ |\n"}) {
         layout(app, source);
         const auto* base = runFor(app, L"base");

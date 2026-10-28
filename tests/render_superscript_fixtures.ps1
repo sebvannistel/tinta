@@ -18,7 +18,7 @@ openInTabs=0
 checkUpdates=0
 language=en
 '@ | Set-Content -LiteralPath "$taskOutput/runner/settings.ini"
-foreach ($taskName in @('superscript-subscript','markdown-regression-control','tab-drop-position')) {
+foreach ($taskName in @('superscript-subscript','nested-inline-extensions','markdown-regression-control','tab-drop-position')) {
     $taskSource = Join-Path $PSScriptRoot "fixtures/$taskName.md"
     $taskBefore = (Get-FileHash -LiteralPath $taskSource).Hash
     $taskDest = Join-Path $taskOutput $taskName
@@ -45,6 +45,17 @@ foreach ($taskName in @('superscript-subscript','markdown-regression-control','t
         ($taskHtml -notmatch '<sup>2</sup>' -or $taskHtml -notmatch '<sub>2</sub>' -or
          [regex]::Matches($taskHtml,'class="math-(inline|display)"').Count -ne 6)) {
         throw 'Script fixture lost a script or equation'
+    }
+    if ($taskName -eq 'superscript-subscript' -and $taskHtml -notmatch '<del>struck x<sup>2</sup></del>') {
+        throw 'Script fixture lost the superscript inside strikethrough'
+    }
+    if ($taskName -eq 'nested-inline-extensions' -and
+        ($taskHtml -notmatch '<del>struck x<sup>2</sup></del>' -or
+         $taskHtml -notmatch '<mark>marked H<sub>2</sub>O</mark>' -or
+         $taskHtml -notmatch '<del>a <sub>b</sub></del>' -or
+         $taskHtml -notmatch '<mark><del>x<sup>2</sup></del></mark>' -or
+         [regex]::Matches($taskHtml,'class="math-(inline|display)"').Count -ne 7)) {
+        throw 'Nested fixture lost a nested span or equation'
     }
     if ((Get-FileHash -LiteralPath $taskSource).Hash -ne $taskBefore) { throw "$taskName source changed" }
     $taskPages = @(Get-ChildItem -LiteralPath "$taskDest/pages" -Filter 'page-*.png')

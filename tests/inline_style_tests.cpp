@@ -201,6 +201,26 @@ int main() {
         check(sub != nullptr && sub->style.drawYOffset > 0.0f, "subscript is pushed down");
     }
     {
+        // Scripts nested in an extension span get the small face and keep
+        // the span's decoration; none of the inner delimiters stay literal
+        auto runs = flattenFirstBlock(app, parser, "~~struck x^2^~~ and ==mark H~2~O== after\n");
+        const StyledRun* struckSup = nullptr;
+        const StyledRun* markedSub = nullptr;
+        for (const auto& run : runs) {
+            check(textOf(run).find_first_of("^~=") == std::string::npos,
+                  "nested script delimiters are consumed");
+            if (run.style.format != kSupSub) continue;
+            if (run.style.hasStrike && run.style.drawYOffset == 0.0f) struckSup = &run;
+            if (run.style.hasBg && run.style.drawYOffset > 0.0f) markedSub = &run;
+        }
+        check(struckSup && textOf(*struckSup) == "2" && !struckSup->style.hasBg,
+              "superscript inside strikethrough is small and struck");
+        check(markedSub && textOf(*markedSub) == "2" && !markedSub->style.hasStrike,
+              "subscript inside a highlight is small, lowered and marked");
+        check(!runs.empty() && !runs.back().style.hasBg && !runs.back().style.fixedSize,
+              "text after the nested spans is back to plain body text");
+    }
+    {
         // The small face wins over emphasis inside it, instead of jumping
         // back up to body size
         auto runs = flattenFirstBlock(app, parser, "x^**2**^\n");

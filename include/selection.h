@@ -41,12 +41,15 @@ bool selectionRangeRect(const App& app, const App::TextRect& tr,
 // lines and blocks, so this pastes as sensible plain text.
 std::wstring selectionTextForRange(const App& app, size_t start, size_t end);
 
-// The same range as an HTML fragment: the plain text's lines and spacing,
-// with bold spans in <b>, so a paste into Outlook or Word keeps them.
+// The same range as an HTML fragment: the plain text's lines (a <div> each)
+// and spacing, with bold in <b>, italics in <i> and web and mail links in
+// <a href>, so a paste into Outlook or Word keeps them.
 std::wstring selectionHtmlForRange(const App& app, size_t start, size_t end);
 
-// Copies [start, end) as plain text plus its HTML; false when empty.
-bool copySelectionRange(const App& app, HWND hwnd, size_t start, size_t end);
+// Copies [start, end) as plain text plus its HTML; false when empty, or
+// when the clipboard stayed held (then held is set).
+bool copySelectionRange(const App& app, HWND hwnd, size_t start, size_t end,
+                        bool* held = nullptr);
 
 void clearSelection(App& app);
 

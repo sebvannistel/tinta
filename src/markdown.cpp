@@ -710,7 +710,8 @@ static int textCallback(MD_TEXTTYPE type, const MD_CHAR* text, MD_SIZE size, voi
 //
 // md4c has no extension hooks for these Obsidian/Typora spans, so a pass
 // over the finished tree splits Text nodes, keeping intervening inline
-// math opaque. Code spans, code blocks, and Mermaid sources are never touched.
+// math opaque, then splits each new span's content the same way. Code
+// spans, code blocks, and Mermaid sources are never touched.
 
 namespace {
 
@@ -760,6 +761,20 @@ static bool isRangeTilde(const std::string& text, size_t i) {
     return rangeEnd(codePointBefore(text, i)) && rangeEnd(codePointAt(text, i + 1));
 }
 
+static bool findExtensionSpan(const std::string& text, size_t from, ExtensionMatch& match);
+
+// True when scanning text[from, end) the way splitInlineExtensions will
+// leaves a span closing exactly at `end`
+static bool spanClosesAt(const std::string& text, size_t from, size_t end) {
+    const std::string inner = text.substr(from, end - from);
+    ExtensionMatch m;
+    for (size_t cursor = 0; findExtensionSpan(inner, cursor, m);) {
+        cursor = m.start + m.delimLen + m.contentLen + m.delimLen;
+        if (cursor == inner.size()) return true;
+    }
+    return false;
+}
+
 // Find the first extension span at or after `from`. Delimiters are ASCII,
 // so byte scanning is UTF-8 safe.
 static bool findExtensionSpan(const std::string& text, size_t from, ExtensionMatch& match) {
@@ -774,6 +789,12 @@ static bool findExtensionSpan(const std::string& text, size_t from, ExtensionMat
         } else if (c == '~' && i + 1 < text.size() && text[i + 1] == '~') {
             size_t close = text.find("~~", i + 2);
             if (close != std::string::npos && close > i + 2) {
+                // ~~a ~b~~~: a subscript inside closes on the first tilde
+                // of the run and the strikethrough takes the last two
+                if (close + 2 < text.size() && text[close + 2] == '~' &&
+                    spanClosesAt(text, i + 2, close + 1)) {
+                    close++;
+                }
                 match = {i, close - (i + 2), 2, ElementType::Strikethrough};
                 return true;
             }
@@ -962,6 +983,9 @@ static void splitInlineExtensions(const ElementPtr& parent) {
             span->parent = parent.get();
             run.append(m.start + m.delimLen, m.start + m.delimLen + m.contentLen,
                        span, span->children);
+            // Spans nest: ~~struck x^2^~~, ==mark H~2~O==. A span's content
+            // holds none of its own delimiter, so this ends within four levels
+            splitInlineExtensions(span);
             rebuilt.push_back(std::move(span));
             cursor = m.start + m.delimLen + m.contentLen + m.delimLen;
         }

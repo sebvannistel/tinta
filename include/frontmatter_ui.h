@@ -15,6 +15,10 @@ bool frontmatterMouseDown(App& app, float x, float y);
 void frontmatterMouseMove(App& app, float x, float y);
 bool frontmatterMouseUp(App& app, float x, float y);
 void frontmatterScroll(App& app, float delta);
+// A value as the property strip shows it, dates and counts in the words of
+// the language at that index
+std::wstring frontmatterValue(int language, const fm::Property& property, fm::Format format,
+                              const std::string& now);
 // Same layout for the document and the settings preview.
 float layoutFrontmatterStrip(App& app, const std::vector<fm::Property>& properties,
                              float x, float y, float width, float scale, bool preview=false);

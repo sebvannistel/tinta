@@ -9,10 +9,12 @@
 #include "render.h"
 #include "search.h"
 #include "settings.h"
+#include "sidepanels.h"
 #include "tabs.h"
 #include "utils.h"
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -297,6 +299,49 @@ int runSearchPanelTests() {
     check(app.searchPanelScroll > 0.0f && std::fabs(app.searchPanelScroll - maxScroll) < 0.5f,
           "the wheel scrolls the list to its end and no further");
     check(app.scrollY == app.targetScrollY, "the page stays put while the list scrolls");
+
+    // The list's thin bar drags end to end and takes track clicks, and its
+    // release selects no match (#287)
+    {
+        PanelListView view;
+        check(panelListView(app, PanelList::Search, view) &&
+                  view.contentHeight > view.list.bottom - view.list.top,
+              "the results list has its bar");
+        app.searchPanelScroll = view.scroll = 0.0f;
+        ScrollbarGeometry bar = panelListScrollbar(app, view);
+        const float travel = bar.trackLength - bar.thumbLength;
+        const int barX = (int)(view.barRight - dpi(app, 1.5f));
+        const int grabY = (int)(bar.thumbStart + bar.thumbLength / 2);
+        const int selected = app.searchCurrentIndex;
+        handleMouseMove(app, app.hwnd, MAKELPARAM(barX, grabY));
+        handleMouseDown(app, app.hwnd, MK_LBUTTON, MAKELPARAM(barX, grabY));
+        check(app.panelScrollbarDrag.list == PanelList::Search && app.searchPanelScroll == 0.0f,
+              "a press on the results bar takes its thumb");
+        handleMouseMove(app, app.hwnd, MAKELPARAM(barX, grabY + (int)std::lround(travel)));
+        check(app.searchPanelScroll >= bar.maxScroll - (bar.maxScroll / travel * 0.5f + 0.5f),
+              "the results thumb at its track's foot shows the list's end");
+        // Over a row, the drag following, the release selects no match
+        const LPARAM overRow = MAKELPARAM((int)(view.list.left + 40), (int)(view.list.top + 40));
+        handleMouseMove(app, app.hwnd, overRow);
+        handleMouseUp(app, app.hwnd, 0, overRow);
+        check(app.panelScrollbarDrag.list == PanelList::None && app.searchCurrentIndex == selected &&
+                  app.showSearchPanel,
+              "the release over a row selects no match");
+        // Off the thumb, on the longer side of the track: the thumb centres
+        // there as far as the track allows
+        view.scroll = app.searchPanelScroll;
+        bar = panelListScrollbar(app, view);
+        const float above = bar.thumbStart - bar.trackStart;
+        const float below = bar.trackStart + bar.trackLength - bar.thumbStart - bar.thumbLength;
+        const int clickY = (int)(below > above ? bar.thumbStart + bar.thumbLength + below / 2
+                                               : bar.trackStart + above / 2);
+        const float before = app.searchPanelScroll;
+        handleMouseDown(app, app.hwnd, MK_LBUTTON, MAKELPARAM(barX, clickY));
+        check(app.searchPanelScroll != before &&
+                  std::fabs(app.searchPanelScroll - bar.scrollForThumb(clickY - bar.thumbLength / 2)) <= 0.5f,
+              "a press on the results track centres the thumb on it");
+        handleMouseUp(app, app.hwnd, 0, MAKELPARAM(barX, clickY));
+    }
 
     // Scope rows switch other tabs and this folder, and remember it
     const float scopeX = (panelList.left + panelList.right) / 2;

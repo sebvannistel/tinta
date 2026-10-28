@@ -8,6 +8,7 @@
 #include "settings.h"
 #include "utils.h"
 #include "export.h"
+#include "i18n.h"
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
@@ -20,6 +21,32 @@ void check(bool value,const char* message){if(!value){std::cerr<<"FAIL: "<<messa
 std::string read(const std::filesystem::path&p){std::ifstream f(p,std::ios::binary);return {(std::istreambuf_iterator<char>(f)),{}};}
 void write(const std::filesystem::path&p,const std::string&s){std::ofstream f(p,std::ios::binary);f<<s;}
 void show(fm::Settings&s,const std::string&key){for(auto&r:s.rules)if(r.key==key)r.show=true;}
+// Dates, relative times and list counts in the interface language
+void formatTests(){
+    loadLanguageOverrides();
+    int en=languageIndexById("en"),de=languageIndexById("de"),ja=languageIndexById("ja"),ru=languageIndexById("ru");
+    auto doc=fm::parse("---\ncreated: 2026-01-03\nupdated: 2026-01-03T10:00:00Z\nmoved: '2026-01-03T10:00:00+02:00'\n"
+                       "tags: [a, b, c]\none: [x]\n---\n");
+    const auto&created=*fm::find(doc,"created");const auto&updated=*fm::find(doc,"updated");
+    auto relative=[&](const char*now,int lang){return frontmatterValue(lang,updated,fm::Format::Relative,now);};
+    check(relative("2026-01-03T10:00:30Z",en)==L"just now"&&relative("2026-01-03T10:01:00Z",en)==L"1 minute ago"&&
+          relative("2026-01-03T15:00:00Z",en)==L"5 hours ago"&&relative("2026-01-01T08:00:00Z",en)==L"in 2 days",
+          "English relative dates read as before");
+    check(relative("2026-01-04T10:00:00Z",de)==L"vor 1 Tag","German relative date");
+    check(frontmatterValue(en,*fm::find(doc,"moved"),fm::Format::Relative,"2026-01-03T09:00:00Z")==L"1 hour ago",
+          "an RFC 3339 offset still moves the relative time");
+    check(relative("2026-01-24T10:00:00Z",ru)==L"21 \u0434\u0435\u043D\u044C \u043D\u0430\u0437\u0430\u0434"&&relative("2026-01-03T08:00:00Z",ru)==L"\u0447\u0435\u0440\u0435\u0437 2 \u0447\u0430\u0441\u0430",
+          "Russian relative dates take their plural forms");
+    check(relative("2026-01-06T10:00:00Z",ja)==L"3 \u65E5\u524D","Japanese relative date");
+    check(frontmatterValue(en,*fm::find(doc,"tags"),fm::Format::Count,"")==L"3 items"&&
+          frontmatterValue(en,*fm::find(doc,"one"),fm::Format::Count,"")==L"1 item","English list counts, one item singular");
+    check(frontmatterValue(ru,*fm::find(doc,"tags"),fm::Format::Count,"")==L"3 \u044D\u043B\u0435\u043C\u0435\u043D\u0442\u0430","Russian list count");
+    check(frontmatterValue(ja,created,fm::Format::Absolute,"")==L"2026\u5E741\u67083\u65E5","Japanese absolute date");
+    check(frontmatterValue(en,created,fm::Format::Absolute,"")==formatDate(dateLocale(en),2026,1,3)&&
+          frontmatterValue(de,created,fm::Format::Absolute,"")==formatDate(dateLocale(de),2026,1,3),
+          "absolute dates as the language writes them");
+    check(frontmatterValue(ru,created,fm::Format::Plain,"")==L"2026-01-03","a plain date stays as written");
+}
 void dataTests(){
     fm::Settings settings;check(!fm::maintained(settings,"created")&&!fm::maintained(settings,"updated"),"automatic dates default off");
     show(settings,"created");show(settings,"updated");
@@ -135,13 +162,36 @@ void saveTests(App&app,const std::filesystem::path&output){
     check(bytes.substr(0,3)==crlf.substr(0,3)&&bytes.find("\r\n")!=std::string::npos&&bytes.find("\r\r\n")==std::string::npos,"native save preserves BOM and original CRLF style");
     for(size_t i=0;i<bytes.size();++i)if(bytes[i]=='\n')check(i>0&&bytes[i-1]=='\r',"all saved line endings remain CRLF");
 }
+// Dates, relative times and counts in every shipped language, often longer
+// than the English, still fit the strip's columns
+void localizedStripTests(App&app){
+    auto source=read(std::filesystem::path(TINTA_FRONTMATTER_FIXTURES)/"frontmatter-dates-localized.md");
+    auto parsed=parseDocument(app.parser,source,"dates.md");
+    check(parsed.success&&parsed.root->children.front()->type==ElementType::Properties,"localized dates fixture parses");
+    if(!parsed.success||parsed.root->children.front()->type!=ElementType::Properties)return;
+    auto properties=parsed.root->children.front()->properties;
+    auto saved=app.frontmatter;fm::discover(app.frontmatter,properties);
+    for(const char*key:{"created","updated","reviewed","due","tags","owners"})show(app.frontmatter,key);
+    for(auto&r:app.frontmatter.rules) {
+        if(r.key=="tags"||r.key=="owners")r.format=fm::Format::Count;
+        if(r.key=="updated"||r.key=="due")r.format=fm::Format::Relative;
+    }
+    applyTheme(app,0);app.contentScale=1;
+    for(const char*id:{"en","de","fr","it","ru","ja","zh","ko"})for(int width:{420,650,1180}) {
+        app.currentLanguageIndex=languageIndexById(id);app.width=width;updateTextFormats(app);app.clearLayoutCache();
+        float end=layoutFrontmatterStrip(app,properties,40,40,(float)width-80,1);
+        check(end>40&&app.layoutTextRuns.size()>=7,"every shown property lays out in every language");
+        for(const auto&r:app.layoutTextRuns)check(r.bounds.left>=39.9f&&r.bounds.right<=width-39.9f&&r.bounds.bottom<=end,"localized property text stays within the strip");
+    }
+    app.frontmatter=saved;app.currentLanguageIndex=0;app.clearLayoutCache();
+}
 }
 int main(){
-    namespace fs=std::filesystem;dataTests();auto state=std::make_unique<App>();auto&app=*state;
+    namespace fs=std::filesystem;dataTests();formatTests();auto state=std::make_unique<App>();auto&app=*state;
     app.hwnd=CreateWindowExW(0,L"STATIC",L"Frontmatter tests",WS_POPUP,0,0,1180,900,nullptr,nullptr,nullptr,nullptr);
     if(!app.hwnd||!initD2D(app)||!createRenderTarget(app))return 2;
     fs::path output=fs::current_path()/"frontmatter-test-output";fs::create_directories(output);
-    nativeTests(app,output);saveTests(app,output);
+    nativeTests(app,output);saveTests(app,output);localizedStripTests(app);
     DestroyWindow(app.hwnd);app.hwnd=nullptr;state.reset();CoUninitialize();
     std::cout<<"Frontmatter: "<<failures<<" failures\n";return failures?1:0;
 }

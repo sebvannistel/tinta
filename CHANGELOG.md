@@ -1,5 +1,21 @@
 # Changelog
 
+## [v3.9.4] - 2026-10-28
+
+### Added
+- Touch: drag a finger to scroll the document, the editor and the side panels, and flick to keep it moving. A tap clicks, and pressing and holding selects a word, sliding to extend the selection; lifting the finger opens the context menu. Requested by @SHM-white (#286)
+- Copying from the viewer keeps bold, italics and web links for rich paste targets such as Outlook, Word and web mail, and each line pastes as its own paragraph. In Outlook and Word the text takes Outlook's compose font. Contributed by @sebvannistel (#285)
+- Front-matter dates, relative times and counts read in the interface language: a calendar date in the language's own short form (3. Jan 2026, 3 janv. 2026, 2026年1月3日), in your regional format when that is in the same language, and "3 days ago" or "5 items" with the plural the number takes. The start page's dates for recent files follow the language too
+
+### Fixed
+- Dragging the document's scrollbar follows the pointer along the whole track instead of being offset by the title bar, and the scrollbars of the Contents panel, the file browser and the search results can be dragged. Reported by @SHM-white (#287)
+- Opening the theme editor shows the theme's font in the font list instead of the top of the list. Reported by @go4399 (#284)
+- "Keep deleted files in memory" and its hint read in every language. Contributed by @go4399 (#283)
+- Every interface string has its Chinese, Japanese, Korean, German, French and Italian text. In Korean the search counter shows the current match before the total, and the French "Non" in the frontmatter settings is no longer cut off
+- Copy and Cut wait a moment when another program, such as Remote Desktop or clipboard history, holds the clipboard. If it stays busy, Tinta says "Clipboard busy — nothing copied" instead of "Copied!", and Cut keeps the text
+- Nested Obsidian and Typora spans render, as in `~~struck x^2^~~`, `==marked H~2~O==` and `x^a~i~^`; their inner `^`, `~` and `==` showed as text before
+- A highlight that holds a superscript, a subscript, struck words, a link or an equation is one even band, without darker strips or pale gaps where its pieces meet
+
 ## [v3.9.3] - 2026-10-26
 
 ### Fixed

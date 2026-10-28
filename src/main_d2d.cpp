@@ -42,6 +42,7 @@
 #include <thread>
 #pragma comment(lib, "winhttp.lib")
 #include "input.h"
+#include "touch.h"
 #include "editor.h"
 #include "print.h"
 #include "export.h"
@@ -750,7 +751,6 @@ render_document:
     // Determine scrollbar visibility
     bool needsVScroll = app.verticalScrollbarVisible;
     bool needsHScroll = app.contentWidth > documentWidth;
-    float scrollbarSize = dpi(app, 14.0f);
 
     // In the panel layout, scrollbars appear on activity and quietly fade out.
     const ULONGLONG scrollNow = GetTickCount64();
@@ -773,17 +773,14 @@ render_document:
     // Scrollbar color: dark on light themes, light on dark themes
     float sbColorValue = app.theme.isDark ? 1.0f : 0.0f;
 
-    // Draw vertical scrollbar
+    // Draw vertical scrollbar, where presses and drags find it (#287)
     if (needsVScroll) {
+        const ScrollbarGeometry vBar = documentScrollbarV(app);
         float scrollExtent = std::max((float)app.height, app.scrollbarContentHeight);
-        float scrollbarMaxY = std::max(0.0f, scrollExtent - app.height);
-        float trackTop = chromeTopHeight(app);
-        float trackHeight =
-            app.height - trackTop - (needsHScroll ? scrollbarSize : 0);
-        float sbHeight = trackHeight / scrollExtent * trackHeight;
-        sbHeight = std::max(sbHeight, dpi(app, 30.0f));
-        float sbY = trackTop +
-            ((scrollbarMaxY > 0) ? (app.scrollY / scrollbarMaxY * (trackHeight - sbHeight)) : 0);
+        float trackTop = vBar.trackStart;
+        float trackHeight = vBar.trackLength;
+        float sbHeight = vBar.thumbLength;
+        float sbY = vBar.thumbStart;
 
         float sbWidth = quietScrollbars ? dpi(app, 4.0f) :
             ((app.scrollbarHovered || app.scrollbarDragging) ? dpi(app, 10.0f) : dpi(app, 6.0f));
@@ -851,11 +848,11 @@ render_document:
 
     // Draw horizontal scrollbar
     if (needsHScroll) {
-        float scrollbarMaxX = std::max(0.0f, app.contentWidth - documentWidth);
-        float trackWidth = documentWidth - (needsVScroll ? scrollbarSize : 0);
-        float sbWidth = trackWidth / app.contentWidth * trackWidth;
-        sbWidth = std::max(sbWidth, dpi(app, 30.0f));
-        float sbX = (scrollbarMaxX > 0) ? (app.scrollX / scrollbarMaxX * (trackWidth - sbWidth)) : 0;
+        // The geometry is in window coordinates; this pass draws offset by
+        // the viewport's left edge
+        const ScrollbarGeometry hBar = documentScrollbarH(app);
+        float sbWidth = hBar.thumbLength;
+        float sbX = hBar.thumbStart - documentViewportX(app);
 
         float sbHeight = quietScrollbars ? dpi(app, 4.0f) :
             ((app.hScrollbarHovered || app.hScrollbarDragging) ? dpi(app, 10.0f) : dpi(app, 6.0f));
@@ -1257,6 +1254,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (app) tabHoverCardDismiss(*app, hwnd);
             if (app) searchInputMouseUp(*app);
             if (app) cancelDocumentScrollbarDrag(*app, hwnd);
+            if (app) panelScrollbarEnd(*app, hwnd, true);
             if (app) sidePanelResizeEnd(*app, hwnd, true);
             if (app && app->showContextMenu) {
                 closeContextMenu(*app);
@@ -1451,10 +1449,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
 
         case WM_MOUSEWHEEL:
+            if (app) touchStopFling(*app, hwnd);
             if (app) handleMouseWheel(*app, hwnd, wParam, lParam);
             return 0;
 
         case WM_MOUSEHWHEEL:
+            if (app) touchStopFling(*app, hwnd);
             if (app) handleMouseHWheel(*app, hwnd, wParam, lParam);
             return 0;
 
@@ -1463,8 +1463,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_LBUTTONDOWN:
+            if (app) touchStopFling(*app, hwnd);
             if (app) handleMouseDown(*app, hwnd, wParam, lParam);
             return 0;
+
+        case WM_POINTERDOWN:
+        case WM_POINTERUPDATE:
+        case WM_POINTERUP:
+        case WM_POINTERCAPTURECHANGED:
+            // A finger pans, taps and holds here (#286); the pen, and the
+            // touches left to them, go on to Windows' mouse emulation
+            if (app && handlePointerMessage(*app, hwnd, msg, wParam, lParam)) return 0;
+            break;
 
         case WM_LBUTTONUP:
             if (app) handleMouseUp(*app, hwnd, wParam, lParam);
@@ -1503,6 +1513,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             if (app && (HWND)lParam != hwnd) cancelDocumentScrollbarDrag(*app, hwnd);
+            if (app && (HWND)lParam != hwnd) panelScrollbarEnd(*app, hwnd, true);
             if (app && (HWND)lParam != hwnd) sidePanelResizeEnd(*app, hwnd, true);
             // Losing capture mid tab-drag (Alt+Tab, a popup stealing the
             // mouse) aborts the drag instead of leaving a stray ghost
@@ -1521,6 +1532,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             if (app) cancelDocumentScrollbarDrag(*app, hwnd);
+            if (app) panelScrollbarEnd(*app, hwnd, true);
             if (app) sidePanelResizeEnd(*app, hwnd, true);
             break;
 
@@ -1545,6 +1557,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             break;
 
         case WM_KEYDOWN:
+            if (app) touchStopFling(*app, hwnd);
             if (app) return handleKeyDown(*app, hwnd, wParam) ? 1 : 0;
             return 0;
 
@@ -1645,6 +1658,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (wParam == TIMER_SELECT_SCROLL && app) {
                 handleSelectScrollTimer(*app, hwnd);
             }
+            if (wParam == TIMER_TOUCH_HOLD && app) touchHold(*app, hwnd);
+            if (wParam == TIMER_TOUCH_FLING && app) touchFlingStep(*app, hwnd, touchClockMs());
             if (wParam == TIMER_IMAGE_REFLOW && app) {
                 // One relayout for however many images arrived since armed
                 KillTimer(hwnd, TIMER_IMAGE_REFLOW);

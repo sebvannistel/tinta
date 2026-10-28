@@ -35,6 +35,27 @@ const wchar_t* tr(int langIndex, const char* key);
 // Convenience overload using app.currentLanguageIndex.
 const wchar_t* tr(const App& app, const char* key);
 
+// Whether a language has its own text for a key rather than falling back
+// to English (its text may still read the same as the English)
+bool languageTranslatesKey(int langIndex, const char* key);
+
+// A count in the language's words. The key's text lists its plural forms
+// split by '|', in the order of the language's rule ("%d day ago|%d days
+// ago"; Russian and Polish have one|few|many), and %d is the count.
+std::wstring trCount(int langIndex, const char* key, long long count);
+
+// The locale a language writes dates in: the user's regional format when
+// it is in the same language (en-GB, de-AT), else the language's own
+std::wstring dateLocale(int langIndex);
+std::wstring dateLocaleFor(const std::string& languageId, const std::wstring& userLocale);
+
+// A short date as a locale writes it: its long date without the weekday,
+// the month abbreviated (Jan 3, 2026; 3. Jan 2026; 2026年1月3日 in
+// Japanese), or without the year its month and day (Jan 3; 1月3日)
+std::wstring formatDate(const std::wstring& locale, int year, int month, int day, bool withYear = true);
+// The picture formatDate makes of a long date or month-day picture
+std::wstring shortDatePicture(const std::wstring& picture);
+
 // Detect the user's preferred UI language via GetUserPreferredUILanguages.
 // Returns one of the LANG_INDEX_* values (always English as the last resort).
 int detectSystemLanguage();

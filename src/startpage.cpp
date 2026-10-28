@@ -357,14 +357,12 @@ static std::wstring relativeWhen(App& app, unsigned long long when) {
     if (dayDiff == 0) return tr(app, "start.today");
     if (dayDiff == 1) return tr(app, "start.yesterday");
 
+    // Month and day in the interface language: a fixed "MMM d" read "1 3"
+    // in Japanese and Korean, whose short month names are bare numbers
     SYSTEMTIME st{};
     FileTimeToSystemTime(&whenLocal, &st);
-    wchar_t buf[48];
-    if (GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, 0, &st, L"MMM d", buf,
-                        _countof(buf), nullptr) > 0) {
-        return buf;
-    }
-    return tr(app, "start.today");
+    std::wstring date = formatDate(dateLocale(app.currentLanguageIndex), st.wYear, st.wMonth, st.wDay, false);
+    return date.empty() ? tr(app, "start.today") : date;
 }
 
 // --- State ---------------------------------------------------------------

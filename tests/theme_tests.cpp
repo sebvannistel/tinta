@@ -52,7 +52,8 @@ std::string themeSection(std::string ini, const std::string& name) {
 }
 
 // #256: the theme editor sets the text, heading and code faces through its
-// own clicks, and every saved theme lists headingfont=
+// own clicks, and every saved theme lists headingfont=. #284: its font list
+// shows the face it sets
 void themeEditorFonts(const std::filesystem::path& dir) {
     auto state = std::make_unique<App>();
     App& app = *state;
@@ -147,6 +148,49 @@ void themeEditorFonts(const std::filesystem::path& dir) {
                   "an empty headingfont= sets headings in font=");
         }
     }
+
+    // The list opens on the face it sets, and comes back to the choice when
+    // the base theme or the face it sets changes (#284)
+    const float rowHeight = dpi(app, 26.0f);
+    auto familyIndex = [&](const std::wstring& family) {
+        for (size_t i = 0; i < app.systemFontFamilies.size(); i++) {
+            if (_wcsicmp(app.systemFontFamilies[i].c_str(), family.c_str()) == 0) return (int)i;
+        }
+        return -1;
+    };
+    // The family's whole row inside the list, or an empty rect
+    auto shownRow = [&](const std::wstring& family) {
+        const int index = familyIndex(family);
+        for (const auto& [r, action] : app.themeEditorHits) {
+            if (index >= 0 && action == TE_FONT_BASE + index && r.bottom - r.top > rowHeight - 0.5f) return r;
+        }
+        return D2D1_RECT_F{};
+    };
+    auto centred = [&](const D2D1_RECT_F& row) {
+        const D2D1_RECT_F& list = app.themeEditorFontListRect;
+        return std::abs((row.top + row.bottom) / 2 - (list.top + list.bottom) / 2) <= rowHeight / 2;
+    };
+    applyTheme(app, 0);  // Paper: Segoe UI, far down the list on any system
+    open(L"Editor follow");
+    D2D1_RECT_F row = shownRow(app.themeEditorFont);
+    check(row.bottom > row.top, "the font list opens on the text face");
+    check(centred(row), "the text face opens in the middle of the list");
+    check(click(app.themeEditorHits, TE_FONT_CODE) && shownRow(app.themeEditorCodeFont).bottom > 0,
+          "switching to the code face shows it");
+    check(click(app.themeEditorHits, TE_FONT_TEXT) && centred(shownRow(app.themeEditorFont)),
+          "switching back to the text face shows it again");
+    app.themeEditorFontScroll = 0.0f;  // browsed to the top
+    paint();
+    check(shownRow(app.themeEditorFont).bottom == 0, "browsing scrolls the face out of view");
+    check(click(app.themeEditorHits, TE_BASE_NEXT) && app.themeEditorBase == 1, "the base switches to Sakura");
+    check(centred(shownRow(app.themeEditorFont)), "a new base shows its text face");
+    // The last family stops at the list's end instead of the middle
+    app.themeEditorFont = app.systemFontFamilies.back();
+    click(app.themeEditorHits, TE_FONT_TEXT);
+    row = shownRow(app.themeEditorFont);
+    check(row.bottom > row.top && std::abs(row.bottom - app.themeEditorFontListRect.bottom) < 1.0f,
+          "the last family sits at the bottom of a list scrolled to its end");
+    check(click(app.themeEditorHits, TE_CANCEL) && !app.showThemeEditor, "the theme editor cancels");
     DestroyWindow(app.hwnd);
     app.hwnd = nullptr;
 }

@@ -28,12 +28,23 @@ void updateWindowTitle(App& app);
 // Ctrl+N: spawns a second Tinta window on an untitled quick note
 void launchQuickNoteWindow();
 void openUrl(const std::string& url);
-bool copyToClipboard(HWND hwnd, const std::wstring& text);
+// Opens the clipboard, trying again for up to about 50 ms: Remote Desktop's
+// clipboard sync, clipboard history and clipboard managers hold it open for
+// a moment after each change. held is set when it stayed held.
+bool openClipboard(HWND hwnd, bool* held = nullptr);
+// A copy that found the clipboard held for longer copied nothing: a
+// warning says so (warnings show with notifications off too)
+void signalClipboardBusy(App& app);
+bool copyToClipboard(HWND hwnd, const std::wstring& text, bool* held = nullptr);
 // Plain text plus an HTML fragment ("HTML Format") for rich paste targets
 bool copyRichTextToClipboard(HWND hwnd, const std::wstring& text,
-                             const std::wstring& htmlFragment);
+                             const std::wstring& htmlFragment, bool* held = nullptr);
 // The CF_HTML payload (UTF-8, with its offset header) for a fragment
 std::string clipboardHtml(const std::wstring& htmlFragment);
+// Outlook's compose font (its ComposeFontComplex style) as CSS that only
+// Word-based editors read: a paste into Outlook matches the mail around
+// it, and web mail keeps its own font
+std::string composeFontCss(const std::string& style);
 // What a code block's Copy button puts on the clipboard: its lines without
 // the line break that ends the last one (#269)
 std::wstring codeCopyText(const std::wstring& code);

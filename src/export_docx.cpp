@@ -1739,7 +1739,7 @@ bool exportDocxFile(App& app, const std::wstring& path) {
 // Rasterizes the diagram exactly like the DOCX path, then hands the pixels
 // to the clipboard as CF_DIB (universal) plus a "PNG" stream (kept by apps
 // that prefer lossless with metadata)
-bool copyDiagramImage(App& app, HWND hwnd, const std::string& sourceUtf8) {
+bool copyDiagramImage(App& app, HWND hwnd, const std::string& sourceUtf8, bool* held) {
     mermaidext::Built built = buildDiagramPrims(app, sourceUtf8, kRasterScale);
     if (!built.ok || built.prims.empty()) return false;
     RasterTarget rt;
@@ -1797,7 +1797,7 @@ bool copyDiagramImage(App& app, HWND hwnd, const std::string& sourceUtf8) {
         }
     }
 
-    if (!OpenClipboard(hwnd)) {
+    if (!openClipboard(hwnd, held)) {
         GlobalFree(dib);
         if (pngGlobal) GlobalFree(pngGlobal);
         return false;
@@ -1883,7 +1883,7 @@ bool plantumlOpaquePixels(App& app, const std::wstring& pngPath, UINT scale,
 // mermaid Image button (CF_DIB plus a "PNG" stream), composited over the
 // theme background (plantumlOpaquePixels). Failure is silent: the caller
 // shows no toast.
-bool copyPlantumlImageToClipboard(App& app, const std::wstring& pngPath) {
+bool copyPlantumlImageToClipboard(App& app, const std::wstring& pngPath, bool* held) {
     UINT outW = 0, outH = 0;
     std::vector<BYTE> pixels;
     if (!plantumlOpaquePixels(app, pngPath, 2, pixels, outW, outH)) return false;
@@ -1935,7 +1935,7 @@ bool copyPlantumlImageToClipboard(App& app, const std::wstring& pngPath) {
         }
     }
 
-    if (!OpenClipboard(app.hwnd)) {
+    if (!openClipboard(app.hwnd, held)) {
         GlobalFree(dib);
         if (pngGlobal) GlobalFree(pngGlobal);
         return false;
@@ -1959,7 +1959,7 @@ bool clipboardImageToPngFile(App& app, HWND hwnd, const std::wstring& path) {
     if (!IsClipboardFormatAvailable(CF_BITMAP) || !app.wicFactory) {
         return false;
     }
-    if (!OpenClipboard(hwnd)) return false;
+    if (!openClipboard(hwnd)) return false;
     bool ok = false;
     if (HBITMAP hbm = (HBITMAP)GetClipboardData(CF_BITMAP)) {
         IWICBitmap* bitmap = nullptr;

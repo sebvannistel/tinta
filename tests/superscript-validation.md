@@ -62,6 +62,7 @@ render script are tracked. The live test copies use isolated settings.
 Scripts nested inside `==highlight==` or `~~strikethrough~~` still have the existing
 parser limitation (inner delimiters remain literal). This change restores the
 font lifecycle and example editing; it does not rewrite nested extension parsing.
+(Nested parsing was fixed later; see `nested-inline-extensions-validation.md`.)
 The frontmatter property strip also uses this document small font and now retains
 its intended smaller size. Physical printer output and switching between actual
 monitors were not tested; native print output and simulated DPI layout were tested.

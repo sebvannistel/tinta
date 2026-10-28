@@ -221,7 +221,20 @@ void handleLinkClick(App& app) {
     }
 }
 
-bool copyToClipboard(HWND hwnd, const std::wstring& text) {
+bool openClipboard(HWND hwnd, bool* held) {
+    for (int attempt = 0; attempt < 10; ++attempt) {
+        if (OpenClipboard(hwnd)) return true;
+        Sleep(5);
+    }
+    if (held) *held = true;
+    return false;
+}
+
+void signalClipboardBusy(App& app) {
+    signalPushKey(app, SIG_WARN, SIGI_WARNING, "toast.clipboard_busy");
+}
+
+bool copyToClipboard(HWND hwnd, const std::wstring& text, bool* held) {
     if (text.empty()) return false;
     size_t size = (text.length() + 1) * sizeof(wchar_t);
     HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, size);
@@ -233,7 +246,7 @@ bool copyToClipboard(HWND hwnd, const std::wstring& text) {
     }
     memcpy(dest, text.c_str(), size);
     GlobalUnlock(hMem);
-    if (!OpenClipboard(hwnd)) {
+    if (!openClipboard(hwnd, held)) {
         GlobalFree(hMem);
         return false;
     }
@@ -246,6 +259,42 @@ bool copyToClipboard(HWND hwnd, const std::wstring& text) {
 // Outlook's own font for new mail, as CSS, so pasted text matches what is
 // typed around it; without it Word-based editors fall back to Times New
 // Roman for HTML. Empty when Outlook has not stored one.
+std::string composeFontCss(const std::string& style) {
+    auto declaration = [&](const char* property) -> std::string {
+        size_t at = style.find(property);
+        // Skip mso-ascii-font-family and the like: only the property named
+        while (at != std::string::npos && at > 0 && style[at - 1] == '-') {
+            at = style.find(property, at + 1);
+        }
+        if (at == std::string::npos) return {};
+        size_t valueStart = at + strlen(property);
+        size_t valueEnd = style.find_first_of(";}", valueStart);
+        if (valueEnd == std::string::npos) return {};
+        std::string value = style.substr(valueStart, valueEnd - valueStart);
+        size_t first = value.find_first_not_of(" \t\r\n");
+        size_t last = value.find_last_not_of(" \t\r\n");
+        value = first == std::string::npos ? std::string() : value.substr(first, last - first + 1);
+        if (value.find_first_of("<>'") != std::string::npos) return {};
+        return value;
+    };
+    // Only Word-based editors (Outlook among them) read mso- properties;
+    // browsers drop them, so web mail keeps its own font (#285)
+    std::string ascii = declaration("mso-ascii-font-family:");
+    if (ascii.empty()) {
+        // The first face of the plain list
+        ascii = declaration("font-family:");
+        ascii = ascii.substr(0, ascii.find(','));
+    }
+    std::string hansi = declaration("mso-hansi-font-family:");
+    if (hansi.empty()) hansi = ascii;
+    std::string css;
+    if (!ascii.empty()) css += "mso-ascii-font-family:" + ascii + ";";
+    if (!hansi.empty()) css += "mso-hansi-font-family:" + hansi + ";";
+    std::string sizePt = declaration("mso-ansi-font-size:");
+    if (!sizePt.empty()) css += "mso-ansi-font-size:" + sizePt + ";";
+    return css;
+}
+
 static std::string mailComposeCss() {
     BYTE data[8192];
     DWORD size = sizeof(data);
@@ -255,27 +304,7 @@ static std::string mailComposeCss() {
                      &size) != ERROR_SUCCESS) {
         return {};
     }
-    std::string style(reinterpret_cast<const char*>(data), size);
-    auto declaration = [&](const char* property) -> std::string {
-        size_t at = style.find(property);
-        // Skip mso-ascii-font-family and the like: only the plain property
-        while (at != std::string::npos && at > 0 && style[at - 1] == '-') {
-            at = style.find(property, at + 1);
-        }
-        if (at == std::string::npos) return {};
-        size_t valueStart = at + strlen(property);
-        size_t valueEnd = style.find_first_of(";}", valueStart);
-        if (valueEnd == std::string::npos) return {};
-        std::string value = style.substr(valueStart, valueEnd - valueStart);
-        if (value.find_first_of("<>'") != std::string::npos) return {};
-        return value;
-    };
-    std::string css;
-    std::string family = declaration("font-family:");
-    if (!family.empty()) css += "font-family:" + family + ";";
-    std::string sizePt = declaration("mso-ansi-font-size:");
-    if (!sizePt.empty()) css += "font-size:" + sizePt + ";";
-    return css;
+    return composeFontCss(std::string(reinterpret_cast<const char*>(data), size));
 }
 
 std::string clipboardHtml(const std::wstring& htmlFragment) {
@@ -312,7 +341,7 @@ std::string clipboardHtml(const std::wstring& htmlFragment) {
 }
 
 bool copyRichTextToClipboard(HWND hwnd, const std::wstring& text,
-                             const std::wstring& htmlFragment) {
+                             const std::wstring& htmlFragment, bool* held) {
     if (text.empty()) return false;
     static const UINT htmlFormat = RegisterClipboardFormatW(L"HTML Format");
     std::string html = clipboardHtml(htmlFragment);
@@ -328,7 +357,7 @@ bool copyRichTextToClipboard(HWND hwnd, const std::wstring& text,
     HGLOBAL textMem = globalCopy(text.c_str(), (text.size() + 1) * sizeof(wchar_t));
     if (!textMem) return false;
     HGLOBAL htmlMem = htmlFormat ? globalCopy(html.c_str(), html.size() + 1) : nullptr;
-    if (!OpenClipboard(hwnd)) {
+    if (!openClipboard(hwnd, held)) {
         GlobalFree(textMem);
         if (htmlMem) GlobalFree(htmlMem);
         return false;
@@ -365,8 +394,11 @@ std::wstring absoluteFilePath(const std::string& path) {
 }
 
 void copyFilePath(App& app, HWND hwnd, const std::string& path) {
-    if (copyToClipboard(hwnd, absoluteFilePath(path)))
+    bool held = false;
+    if (copyToClipboard(hwnd, absoluteFilePath(path), &held))
         signalPushKey(app, SIG_INFO, SIGI_COPY, "toast.copied");
+    else if (held)
+        signalClipboardBusy(app);
 }
 
 void extractText(const ElementPtr& elem, std::wstring& out) {

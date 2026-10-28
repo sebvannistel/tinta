@@ -8,6 +8,7 @@
 #include "settings.h"
 #include "tableedit.h"
 #include "utils.h"
+#include "clipboard_snapshot.h"
 #include <fstream>
 #include <filesystem>
 #include <iostream>
@@ -73,11 +74,12 @@ void fieldEditing(App& app) {
     key(app, VK_BACK, 8, true);
     check(app.searchQuery == L"two", "Ctrl+Backspace removes the preceding word");
 
-    // Preserve the user's clipboard, including non-text formats.
-    Microsoft::WRL::ComPtr<IDataObject> clipboard;
-    HRESULT saved = OleGetClipboard(clipboard.GetAddressOf());
-    check(SUCCEEDED(saved), "clipboard can be preserved for editing tests");
-    if (SUCCEEDED(saved)) {
+    // Preserve the user's clipboard, including non-text formats. The snapshot
+    // restores it when it goes out of scope, before the check below.
+    const std::wstring before = clipboardLine(app.hwnd);
+    if (ClipboardSnapshot clipboard(app.hwnd); !clipboard.captured) {
+        check(false, "clipboard can be preserved for editing tests");
+    } else {
         query(app, L"copy me"); key(app, 'A', 1, true); key(app, 'C', 3, true);
         check(clipboardLine(app.hwnd) == L"copy me", "copy puts the selected field text on the clipboard");
         key(app, VK_END); key(app, 'V', 22, true);
@@ -86,11 +88,8 @@ void fieldEditing(App& app) {
         check(app.searchQuery.empty(), "cut removes the selected search text");
         key(app, VK_TAB); key(app, 'A', 1, true); key(app, 'V', 22, true);
         check(app.replaceText == L"copy mecopy me", "paste replaces the replacement selection");
-        HRESULT restored = E_FAIL;
-        for (int attempt = 0; attempt < 10 && FAILED(restored = OleSetClipboard(clipboard.Get())); ++attempt) Sleep(5);
-        if (FAILED(restored)) std::cerr << "clipboard restore HRESULT=" << std::hex << restored << std::dec << '\n';
-        check(SUCCEEDED(restored), "clipboard restored");
     }
+    check(clipboardLine(app.hwnd) == before, "clipboard restored");
 
     for (int theme : {0, 5}) for (bool wrap : {false, true})
     for (float scale : {1.0f, 1.5f})

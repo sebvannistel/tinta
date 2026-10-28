@@ -54,6 +54,8 @@ int tocItemIndexAt(App& app, float x, float y);
 D2D1_RECT_F tocListRect(const App& app);
 float tocHeadingIndent(const App& app, int level);
 float tocMaxScroll(const App& app);
+// The rows that pass the filter, end to end
+float tocListContentHeight(const App& app);
 
 // Shared geometry for the floating file-browser card (t13 design 13b):
 // one source of truth for render, cursor, and click hit-tests
@@ -72,6 +74,10 @@ FolderBrowserMetrics folderBrowserMetrics(const App& app);
 // Top edge of item i inside the scrolled content (labels included),
 // relative to the content origin (add listStartY + namingOffset - scroll)
 float folderItemContentY(const FolderBrowserMetrics& g, int index);
+// The scrolled content end to end (a naming row, labels and items), and
+// how far it scrolls in the list's room
+float folderBrowserContentHeight(const App& app, const FolderBrowserMetrics& g);
+float folderBrowserMaxScroll(const App& app);
 void renderSettingsOverlay(App& app);
 D2D1_RECT_F settingsPanelRect(const App& app);
 D2D1_RECT_F settingsCloseButtonRect(const App& app);

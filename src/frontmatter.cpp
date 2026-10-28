@@ -195,36 +195,25 @@ std::string utcNow() {
     sprintf_s(value,"%04u-%02u-%02uT%02u:%02u:%02uZ",st.wYear,st.wMonth,st.wDay,st.wHour,st.wMinute,st.wSecond);
     return value;
 }
-std::string formatValue(const Property& p,Format format,const std::string& now) {
-    if(p.kind==Kind::List) {
-        if(format==Format::Count)return std::to_string(p.items.size())+" items";
-        std::string out;for(const auto& item:p.items){if(!out.empty())out+=", ";out+=item;}return out;
-    }
+bool calendarDate(const std::string& value,int& year,int& month,int& day) {
+    SYSTEMTIME st{};if(!dateParts(value,st))return false;
+    year=st.wYear;month=st.wMonth;day=st.wDay;return true;
+}
+bool secondsSince(const std::string& value,const std::string& now,long long& seconds) {
     SYSTEMTIME st{},current{};
-    if(p.kind==Kind::Date&&dateParts(p.text,st)) {
-        if(format==Format::Absolute) {
-            static const char* months[]={"Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
-            return std::string(months[st.wMonth-1])+" "+std::to_string(st.wDay)+", "+std::to_string(st.wYear);
-        }
-        if(format==Format::Relative&&dateParts(now,current)) {
-            FILETIME a{},b{};SystemTimeToFileTime(&st,&a);SystemTimeToFileTime(&current,&b);
-            auto ticks=[](FILETIME t){return (static_cast<long long>(t.dwHighDateTime)<<32)|t.dwLowDateTime;};
-            auto offset=[](const std::string& text) -> long long {
-                // RFC 3339 offset; the displayed calendar date stays as written.
-                auto sign=text.find_first_of("+-",10);
-                if(sign==std::string::npos)return 0;
-                int h=0,m=0;
-                if(sscanf_s(text.c_str()+sign+1,"%d:%d",&h,&m)!=2||h>23||m>59)return 0;
-                return (text[sign]=='-'?-1:1)*(h*3600LL+m*60LL);
-            };
-            long long delta=(ticks(b)-ticks(a))/10000000+offset(p.text)-offset(now),absolute=delta<0?-delta:delta;
-            if(absolute<60)return "just now";
-            long long n=absolute<3600?absolute/60:absolute<86400?absolute/3600:absolute/86400;
-            std::string unit=absolute<3600?"minute":absolute<86400?"hour":"day";
-            return (delta<0?"in ":"")+std::to_string(n)+" "+unit+(n==1?"":"s")+(delta>=0?" ago":"");
-        }
-    }
-    return p.text;
+    if(!dateParts(value,st)||!dateParts(now,current))return false;
+    FILETIME a{},b{};SystemTimeToFileTime(&st,&a);SystemTimeToFileTime(&current,&b);
+    auto ticks=[](FILETIME t){return (static_cast<long long>(t.dwHighDateTime)<<32)|t.dwLowDateTime;};
+    auto offset=[](const std::string& text) -> long long {
+        // RFC 3339 offset; the displayed calendar date stays as written.
+        auto sign=text.find_first_of("+-",10);
+        if(sign==std::string::npos)return 0;
+        int h=0,m=0;
+        if(sscanf_s(text.c_str()+sign+1,"%d:%d",&h,&m)!=2||h>23||m>59)return 0;
+        return (text[sign]=='-'?-1:1)*(h*3600LL+m*60LL);
+    };
+    seconds=(ticks(b)-ticks(a))/10000000+offset(value)-offset(now);
+    return true;
 }
 std::string stamp(const std::string& source,const Settings& settings,const std::string& firstSeen,const std::string& now) {
     auto doc=parse(source);if(!doc.present||!doc.safeToWrite)return source;

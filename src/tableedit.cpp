@@ -541,9 +541,10 @@ bool tableEditKeyDown(App& app, HWND hwnd, WPARAM key) {
         if (key=='A') { app.tableEditAnchor=0; app.tableEditCaret=app.tableEditText.size(); }
         else if (key=='C' || key=='X') {
             if (start!=end) {
-                bool copied=false;
-                for(int attempt=0;attempt<10 && !(copied=copyToClipboard(hwnd,app.tableEditText.substr(start,end-start)));++attempt) Sleep(5);
+                bool held=false;
+                bool copied=copyToClipboard(hwnd,app.tableEditText.substr(start,end-start),&held);
                 if (copied && key=='X') insertCell(app,L"");
+                if (held) signalClipboardBusy(app);
             }
         } else if (key=='V') {
             // Cell paste is always plain text, never an entire new table.

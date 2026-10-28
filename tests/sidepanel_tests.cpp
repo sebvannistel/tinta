@@ -8,6 +8,7 @@
 #include "settings.h"
 #include "utils.h"
 
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -29,6 +30,7 @@ LRESULT CALLBACK testProc(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
     if (app && message == WM_CAPTURECHANGED && reinterpret_cast<HWND>(l) != hwnd) {
         sidePanelResizeEnd(*app, hwnd, true);
         cancelDocumentScrollbarDrag(*app, hwnd);
+        panelScrollbarEnd(*app, hwnd, true);
     }
     if (app && (message == WM_KILLFOCUS || message == WM_CANCELMODE))
         cancelDocumentScrollbarDrag(*app, hwnd);
@@ -319,6 +321,269 @@ void scrollbarAcrossPanels(App& app) {
     app.tocPinned = app.browserPinned = false;
 }
 
+// #287: the document's vertical bar is drawn below the tab strip, and
+// short of the horizontal bar. Its thumb follows the pointer along that
+// track, so the track's ends are the document's ends: a thumb taken to the
+// top of the visible track shows the start, where the pointer used to have
+// to go on into the tab strip.
+void documentScrollbarTrack(App& app) {
+    for (float scale : {1.0f, 1.5f, 2.0f}) {
+        for (bool wide : {false, true}) {
+            for (bool zen : {false, true}) {
+                app.contentScale = scale;
+                app.zenMode = zen;
+                app.width = (int)dpi(app, 1050);
+                app.height = (int)dpi(app, 900);
+                app.showToc = app.showFolderBrowser = false;
+                app.contentHeight = app.scrollbarContentHeight = dpi(app, 6000);
+                app.verticalScrollbarVisible = true;
+                const float viewport = documentViewportWidth(app);
+                app.contentWidth = wide ? viewport * 3 : viewport;
+                app.scrollX = app.targetScrollX = 0;
+                const float maxScroll = app.contentHeight - app.height;
+                app.scrollY = app.targetScrollY = maxScroll / 2;
+                app.swallowNextMouseUp = false;
+                ScrollbarGeometry bar = documentScrollbarV(app);
+                check(closeEnough(bar.trackStart, chromeTopHeight(app)) &&
+                          closeEnough(bar.trackStart + bar.trackLength,
+                                      app.height - (wide ? dpi(app, 14) : 0.0f)),
+                      "the vertical track runs from the tab strip to the window's foot or the other bar");
+                const float travel = bar.trackLength - bar.thumbLength;
+                const float slack = maxScroll / travel * 0.5f + 0.5f;  // half a pointer pixel
+                const int x = (int)(viewport - dpi(app, 7));
+                const int grabY = (int)(bar.thumbStart + bar.thumbLength / 2);
+                handleMouseMove(app, app.hwnd, MAKELPARAM(x, grabY));
+                handleMouseDown(app, app.hwnd, MK_LBUTTON, MAKELPARAM(x, grabY));
+                check(app.scrollbarDragging && closeEnough(app.scrollY, maxScroll / 2),
+                      "a press on the thumb takes it where it is");
+                const int topY = grabY - (int)std::lround(bar.thumbStart - bar.trackStart);
+                handleMouseMove(app, app.hwnd, MAKELPARAM(x, topY));
+                check(app.scrollY <= slack,
+                      "the thumb at the top of its visible track shows the document's start (#287)");
+                const int bottomY = grabY + (int)std::lround(bar.trackStart + travel - bar.thumbStart);
+                handleMouseMove(app, app.hwnd, MAKELPARAM(x, bottomY));
+                check(app.scrollY >= maxScroll - slack, "the thumb at the foot of its track shows the end");
+                const int thirdY = topY + (int)std::lround(travel / 3);
+                handleMouseMove(app, app.hwnd, MAKELPARAM(x, thirdY));
+                bar = documentScrollbarV(app);
+                check(std::fabs(bar.thumbStart - (bar.trackStart + (thirdY - topY))) <= 1.0f,
+                      "the drawn thumb stays under the pointer");
+                handleMouseUp(app, app.hwnd, 0, MAKELPARAM(x, thirdY));
+                check(!app.scrollbarDragging, "the release ends the drag");
+
+                // A click on the track centres the thumb on it
+                app.scrollY = app.targetScrollY = 0;
+                bar = documentScrollbarV(app);
+                const int clickY = (int)(bar.trackStart + bar.trackLength * 0.75f);
+                handleMouseMove(app, app.hwnd, MAKELPARAM(x, clickY));
+                handleMouseDown(app, app.hwnd, MK_LBUTTON, MAKELPARAM(x, clickY));
+                bar = documentScrollbarV(app);
+                check(std::fabs(bar.thumbStart + bar.thumbLength / 2 - clickY) <= 1.0f,
+                      "a click on the vertical track centres the thumb on it");
+                handleMouseUp(app, app.hwnd, 0, MAKELPARAM(x, clickY));
+                if (!wide) continue;
+
+                // The horizontal bar, beside a pinned Contents on the left
+                app.showToc = app.tocPinned = app.tocOnLeft = true;
+                app.tocAnimation = 1;
+                app.tocWidth = 280;
+                const float left = documentViewportX(app), width = documentViewportWidth(app);
+                app.contentWidth = width * 3;
+                const float maxX = app.contentWidth - width;
+                app.scrollX = app.targetScrollX = maxX / 2;
+                bar = documentScrollbarH(app);
+                check(closeEnough(bar.trackStart, left) && closeEnough(bar.trackLength, width - dpi(app, 14)),
+                      "the horizontal track runs along the viewport, short of the vertical bar");
+                const float hTravel = bar.trackLength - bar.thumbLength;
+                const float hSlack = maxX / hTravel * 0.5f + 0.5f;
+                const int y = app.height - (int)dpi(app, 6);
+                const int grabX = (int)(bar.thumbStart + bar.thumbLength / 2);
+                handleMouseMove(app, app.hwnd, MAKELPARAM(grabX, y));
+                handleMouseDown(app, app.hwnd, MK_LBUTTON, MAKELPARAM(grabX, y));
+                check(app.hScrollbarDragging && closeEnough(app.scrollX, maxX / 2),
+                      "a press on the horizontal thumb takes it where it is");
+                const int startX = grabX - (int)std::lround(bar.thumbStart - bar.trackStart);
+                handleMouseMove(app, app.hwnd, MAKELPARAM(startX, y));
+                check(app.scrollX <= hSlack, "the horizontal thumb at its track's start shows the left edge");
+                handleMouseMove(app, app.hwnd,
+                                MAKELPARAM(grabX + (int)std::lround(bar.trackStart + hTravel - bar.thumbStart), y));
+                check(app.scrollX >= maxX - hSlack, "and at its track's end, the right edge");
+                handleMouseUp(app, app.hwnd, 0, MAKELPARAM(startX, y));
+                app.showToc = app.tocPinned = app.tocOnLeft = false;
+            }
+        }
+    }
+    app.zenMode = false;
+    app.contentScale = 1;
+    app.scrollX = app.targetScrollX = app.scrollY = app.targetScrollY = 0;
+}
+
+float listScroll(const App& app, PanelList which) {
+    PanelListView view;
+    return panelListView(app, which, view) ? view.scroll : -1.0f;
+}
+
+// #287: a side panel list's thin bar drags end to end and takes track
+// clicks; neither its press nor its release acts on the rows beneath
+void dragPanelBar(App& app, PanelList which) {
+    const HCURSOR arrow = LoadCursor(nullptr, IDC_ARROW);
+    PanelListView view;
+    check(panelListView(app, which, view) && view.contentHeight > view.list.bottom - view.list.top,
+          "the panel's list outgrows its room");
+    setPanelListScroll(app, which, 0);
+    view.scroll = 0;
+    ScrollbarGeometry bar = panelListScrollbar(app, view);
+    const float travel = bar.trackLength - bar.thumbLength;
+    const float slack = bar.maxScroll / travel * 0.5f + 0.5f;
+    const int x = (int)(view.barRight - dpi(app, 1.5f));
+    const int grabY = (int)(bar.thumbStart + bar.thumbLength / 2);
+    SetCursor(nullptr);
+    handleMouseMove(app, app.hwnd, MAKELPARAM(x, grabY));
+    check(GetCursor() == arrow && panelScrollbarHot(app, which),
+          "an arrow over the panel's bar, which lights up");
+    handleMouseDown(app, app.hwnd, MK_LBUTTON, MAKELPARAM(x, grabY));
+    check(app.panelScrollbarDrag.list == which && GetCapture() == app.hwnd &&
+              closeEnough(listScroll(app, which), 0),
+          "a press on the panel's thumb takes it where it is");
+    const float pageScroll = app.scrollY;
+    handleMouseMove(app, app.hwnd, MAKELPARAM(x, grabY + (int)std::lround(travel)));
+    check(listScroll(app, which) >= bar.maxScroll - slack,
+          "the panel's thumb at the foot of its track shows the list's end");
+    const int half = (int)std::lround(travel / 2);
+    handleMouseMove(app, app.hwnd, MAKELPARAM(x, grabY + half));
+    view.scroll = listScroll(app, which);
+    check(std::fabs(panelListScrollbar(app, view).thumbStart - (bar.thumbStart + half)) <= 1.0f,
+          "the panel's thumb stays under the pointer");
+    handleMouseMove(app, app.hwnd, MAKELPARAM(app.width / 2, -50));
+    check(listScroll(app, which) <= slack && closeEnough(app.scrollY, pageScroll),
+          "dragged up past the panel, the list is at its start and the page stays put");
+    // Over a row, the drag following, the release opens nothing
+    const LPARAM row = MAKELPARAM((int)(view.list.left + dpi(app, 30)), (int)(view.list.top + dpi(app, 12)));
+    handleMouseMove(app, app.hwnd, row);
+    handleMouseUp(app, app.hwnd, 0, row);
+    check(app.panelScrollbarDrag.list == PanelList::None && GetCapture() != app.hwnd,
+          "the release over a row ends the panel drag");
+
+    // A press on the track, off the thumb on its longer side, centres the
+    // thumb there as far as the track allows
+    view.scroll = listScroll(app, which);
+    bar = panelListScrollbar(app, view);
+    const float above = bar.thumbStart - bar.trackStart;
+    const float below = bar.trackStart + bar.trackLength - bar.thumbStart - bar.thumbLength;
+    const int clickY = (int)(below > above ? bar.thumbStart + bar.thumbLength + below / 2
+                                           : bar.trackStart + above / 2);
+    const float before = listScroll(app, which);
+    handleMouseMove(app, app.hwnd, MAKELPARAM(x, clickY));
+    handleMouseDown(app, app.hwnd, MK_LBUTTON, MAKELPARAM(x, clickY));
+    check(app.panelScrollbarDrag.list == which && listScroll(app, which) != before &&
+              std::fabs(listScroll(app, which) - bar.scrollForThumb(clickY - bar.thumbLength / 2)) <= 0.5f,
+          "a press on the panel's track centres the thumb on it");
+    // Lost capture ends the drag; the stray release after it is swallowed
+    ReleaseCapture();
+    check(app.panelScrollbarDrag.list == PanelList::None, "lost capture ends the panel drag");
+    handleMouseUp(app, app.hwnd, 0, row);
+}
+
+void panelListScrollbars(App& app) {
+    app.contentScale = 1;
+    app.zenMode = false;
+    updateTextFormats(app);
+    std::string source;
+    for (int i = 0; i < 80; ++i)
+        source += "## Section " + std::to_string(i) +
+                  "\n\nA paragraph with **bold**, `code` and [a link](#section-0).\n\n";
+    layout(app, source);
+    check(app.headings.size() == 80, "the long outline lays out");
+    for (float scale : {1.0f, 1.5f}) {
+        for (bool left : {false, true}) {
+            for (bool pinned : {false, true}) {
+                app.contentScale = scale;
+                app.width = (int)dpi(app, 1050);
+                app.height = (int)dpi(app, 500);
+                app.showFolderBrowser = false;
+                app.showToc = true;
+                app.tocOnLeft = left;
+                app.tocPinned = pinned;
+                app.tocAnimation = 1;
+                app.tocWidth = 280;
+                app.tocFilter.clear();
+                app.tocSpyOverride = -1;
+                app.scrollY = app.targetScrollY = 0;
+                dragPanelBar(app, PanelList::Contents);
+                check(app.showToc && app.tocSpyOverride == -1 && closeEnough(app.scrollY, 0),
+                      "the Contents bar's presses and releases neither jump to a heading nor close the panel");
+                PanelListView view;
+                panelListView(app, PanelList::Contents, view);
+                const float y = (view.list.top + view.list.bottom) / 2;
+                if (left)
+                    check(view.barRight < view.cardRight - dpi(app, 5) &&
+                              sidePanelResizeAt(app, view.cardRight - dpi(app, 2), y) == SidePanel::Contents &&
+                              panelScrollbarAt(app, view.cardRight - dpi(app, 2), y) == PanelList::None,
+                          "a Contents edge that resizes keeps its band, the thumb drawn clear of it");
+            }
+        }
+    }
+
+    // The file browser's list
+    app.showToc = false;
+    const std::wstring browserPath = app.folderBrowserPath;
+    const std::string currentFile = app.currentFile;
+    for (float scale : {1.0f, 1.5f}) {
+        for (bool pinned : {false, true}) {
+            app.contentScale = scale;
+            app.width = (int)dpi(app, 1050);
+            app.height = (int)dpi(app, 500);
+            app.showFolderBrowser = true;
+            app.browserPinned = pinned;
+            app.folderBrowserAnimation = 1;
+            app.browserWidth = 300;
+            dragPanelBar(app, PanelList::Browser);
+            check(app.showFolderBrowser && app.folderBrowserPath == browserPath && app.currentFile == currentFile,
+                  "the browser bar's presses and releases neither open nor enter a row");
+            PanelListView view;
+            panelListView(app, PanelList::Browser, view);
+            const float y = (view.list.top + view.list.bottom) / 2;
+            check(view.barRight < view.cardRight - dpi(app, 5) &&
+                      sidePanelResizeAt(app, view.cardRight - dpi(app, 2), y) == SidePanel::Browser &&
+                      panelScrollbarAt(app, view.cardRight - dpi(app, 2), y) == PanelList::None,
+                  "the browser's edge still resizes, its thumb drawn clear of it");
+        }
+    }
+
+    // A short folder that only just outgrows the card: the wheel reaches its
+    // last row (the wheel's own row sizes stopped it short)
+    namespace fs = std::filesystem;
+    const fs::path folder = fs::current_path() / "short-folder";
+    fs::create_directories(folder / "drafts");
+    for (int i = 0; i < 16; ++i)
+        std::ofstream(folder / ("note-" + std::to_string(i) + ".md")) << "# Note\n";
+    app.folderBrowserPath = folder.wstring();
+    populateFolderItems(app);
+    for (float scale : {1.0f, 1.5f}) {
+        app.contentScale = scale;
+        app.width = (int)dpi(app, 1050);
+        app.height = (int)dpi(app, 900);
+        FolderBrowserMetrics g = folderBrowserMetrics(app);
+        const float frame = app.height - (g.listBottom - g.listStartY);
+        app.height = (int)std::ceil(folderBrowserContentHeight(app, g) + frame - dpi(app, 30));
+        g = folderBrowserMetrics(app);
+        app.folderBrowserScroll = 0;
+        const float rowX = dpi(app, 100);
+        handleMouseMove(app, app.hwnd, MAKELPARAM((int)rowX, (int)((g.listStartY + g.listBottom) / 2)));
+        for (int i = 0; i < 20; ++i)
+            handleMouseWheel(app, app.hwnd, MAKEWPARAM(0, (WORD)(short)-WHEEL_DELTA), 0);
+        const float maxScroll = folderBrowserMaxScroll(app);
+        check(maxScroll > dpi(app, 20) && closeEnough(app.folderBrowserScroll, maxScroll) &&
+                  folderItemIndexAt(app, rowX, g.listBottom - g.itemHeight / 2) ==
+                      (int)app.folderItems.size() - 1,
+              "the wheel scrolls a short folder's list to its last row");
+    }
+    app.folderBrowserPath = browserPath;
+    populateFolderItems(app);
+    app.showFolderBrowser = app.browserPinned = false;
+    app.contentScale = 1;
+}
+
 void longContents(App& app) {
     app.contentScale = 1;
     updateTextFormats(app);
@@ -413,6 +678,8 @@ int runSidePanelTests() {
     widthLimits(app);
     quietPanelEdges(app);
     scrollbarAcrossPanels(app);
+    documentScrollbarTrack(app);
+    panelListScrollbars(app);
     longContents(app);
 
     app.contentScale = app.zoomFactor = 1;

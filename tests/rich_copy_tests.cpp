@@ -71,19 +71,37 @@ void layoutTests(App& app) {
           "a bold span across a soft line break stays one span");
     check(has(all, L"<b>a &lt; b &amp; c &gt; d</b> and &quot;quotes&quot;"),
           "markup characters are escaped inside and outside bold");
-    check(has(all, L"<b>Please let me know in writing,</b><br>"),
-          "a bold paragraph closes before its line break");
+    check(has(all, L"<div><b>Please let me know in writing,</b></div>"),
+          "a bold paragraph closes with its line");
+    // With <br> between lines, Word and Outlook pasted the whole copy as one
+    // paragraph; a <div> per line gives a paragraph per line, as plain text
+    check(has(all, L"<div>Dear team,</div>\r\n<div><br></div>\r\n<div><b>Please review"),
+          "each line is a <div>, an empty line <div><br></div>");
+    check(!has(all, L"<br>\r\n"), "no line ends in a bare <br>");
     check(has(all, L"<b>north bed</b>") && has(all, L"<b>watering schedule</b>"),
           "bold inside list items");
     check(has(all, L"<b>bold inside</b> the quote"), "bold inside a blockquote");
-    check(has(all, L"<b>A12</b><span"), "bold inside a table cell");
-    check(has(all, L"<span style='mso-tab-count:1'>"), "table cells keep their tab separators");
+    check(has(all, L"<div><b>A12</b>&#9;ready</div>"), "bold inside a table cell");
+    // Word made two tabs of a tab wrapped in mso-tab-count
+    check(has(all, L"<div>Bed&#9;Status</div>") && !has(all, L"mso-tab-count"),
+          "a table cell's separator is one plain tab");
     check(has(all, L"<b>bold code</b> and plain code"), "bold inline code is bold, plain code is not");
     check(has(all, L"Code blocks copy as they read, **not bold**."),
           "a code block's asterisks are literal text");
     check(!has(all, L"<b>Dear") && !has(all, L"<b>Best") && !has(all, L"<b>italic") &&
               !has(all, L"<b>a link"),
           "plain, italic and linked text stay unbolded");
+    // Italics and web links carry over too; a link inside the document
+    // pastes as its text, as it would lead nowhere from a mail
+    check(has(all, L"<i>italic words</i> italic") && has(all, L"<i>italic</i> stays italic"),
+          "italics are <i> spans");
+    check(has(all, L"<a href=\"https://example.com\">a link</a>"),
+          "a web link is an <a href> around its text");
+    check(has(all, L"a heading link pastes") && !has(all, L"#message"),
+          "a link to a heading pastes as its text");
+    check(has(all, L"<b><i>bold italic</i></b>"), "bold italic nests <i> in <b>");
+    check(has(all, L"<a href=\"https://example.org/?a=1&amp;b=2\"><b>a bold link</b></a>"),
+          "a bold link nests <b> in <a>, its address escaped");
     check(!has(all, L"<b>Rich copy") && !has(all, L"<b>Message"),
           "headings copy as their text, as before");
 
@@ -92,7 +110,7 @@ void layoutTests(App& app) {
     check(at != std::wstring::npos, "the fixture's accented phrase is laid out");
     if (at != std::wstring::npos) {
         std::wstring part = selectionHtmlForRange(app, at + 2, at + 11);
-        check(part == L"<b>f\u00e9 na\u00efve</b>.", "partial bold selection: " + narrow(part));
+        check(part == L"<div><b>f\u00e9 na\u00efve</b>.</div>", "partial bold selection: " + narrow(part));
     }
     std::string payload = clipboardHtml(all);
     checkClipboardHtml(payload, "<b>A12</b> and <b>B7+3</b>.");
@@ -100,8 +118,12 @@ void layoutTests(App& app) {
 
     // A rebuilt layout leaves no stale ranges behind
     size_t ranges = app.docBoldRanges.size();
+    size_t italics = app.docItalicRanges.size(), links = app.docLinkRanges.size();
     layoutDocument(app);
     check(app.docBoldRanges.size() == ranges, "relayout records each bold span once");
+    check(app.docItalicRanges.size() == italics && italics >= 3 && app.docLinkRanges.size() == links &&
+              links == 2,
+          "relayout records each italic span and web link once");
     for (size_t i = 0; i < app.docBoldRanges.size(); ++i) {
         const auto& r = app.docBoldRanges[i];
         check(r.first < r.second && r.second <= text.size() &&
@@ -110,11 +132,30 @@ void layoutTests(App& app) {
     }
 }
 
+// Outlook's compose font reaches Word-based editors only: mso- properties,
+// which browsers drop, so web mail keeps its own font (#285)
+void composeFontTests() {
+    const std::string personal =
+        "<html>\n<head>\n<style>\n /* Style Definitions */\n span.PersonalComposeStyle\n"
+        "\t{mso-style-name:\"Personal Compose Style\";\n\tmso-style-type:personal-compose;\n"
+        "\tmso-ansi-font-size:11.0pt;\n\tmso-bidi-font-size:11.0pt;\n"
+        "\tfont-family:\"Aptos\",sans-serif;\n\tmso-ascii-font-family:Aptos;\n"
+        "\tmso-hansi-font-family:Aptos;\n\tmso-bidi-font-family:\"Times New Roman\";\n"
+        "\tcolor:windowtext;}\n</style>\n</head>\n</html>\n";
+    std::string css = composeFontCss(personal);
+    check(css == "mso-ascii-font-family:Aptos;mso-hansi-font-family:Aptos;mso-ansi-font-size:11.0pt;",
+          "Outlook's compose font becomes mso- properties only: " + css);
+    css = composeFontCss("{font-family:\"Segoe UI\",sans-serif;\nmso-ansi-font-size:12.0pt;}");
+    check(css == "mso-ascii-font-family:\"Segoe UI\";mso-hansi-font-family:\"Segoe UI\";"
+                 "mso-ansi-font-size:12.0pt;",
+          "without mso- faces, the first face of the plain list: " + css);
+    check(composeFontCss("{font-family:Aptos'><b>;}").empty() && composeFontCss("").empty(),
+          "markup in a value, or no compose font, gives no style");
+}
+
 std::string clipboardFormat(HWND hwnd, UINT format) {
     std::string out;
-    bool opened = false;
-    for (int i = 0; i < 100 && !(opened = OpenClipboard(hwnd)); ++i) Sleep(5);
-    if (!opened) { check(false, "clipboard opens for inspection"); return out; }
+    if (!ClipboardSnapshot::open(hwnd)) { check(false, "clipboard opens for inspection"); return out; }
     if (HANDLE data = GetClipboardData(format)) {
         if (auto bytes = static_cast<const char*>(GlobalLock(data))) {
             out = bytes;
@@ -132,8 +173,10 @@ void clipboardTests(App& app) {
     keystroke(app, 'C', {true});
     std::string html = clipboardFormat(app.hwnd, RegisterClipboardFormatW(L"HTML Format"));
     checkClipboardHtml(html, "<b>A12</b> and <b>B7+3</b>.");
+    // Retried like the HTML read: over Remote Desktop the clipboard sync
+    // holds the clipboard for a moment after each change
     std::wstring text;
-    if (OpenClipboard(app.hwnd)) {
+    if (ClipboardSnapshot::open(app.hwnd)) {
         if (HANDLE data = GetClipboardData(CF_UNICODETEXT)) {
             if (auto chars = static_cast<const wchar_t*>(GlobalLock(data))) {
                 text = chars;
@@ -167,7 +210,16 @@ int main(int argc, char** argv) {
         layoutDocument(app);
         layoutTests(app);
     }
+    composeFontTests();
     if (testClipboard) clipboardTests(app);
+    // --dump-html PATH: the copy of the whole fixture (at the 420 px layout
+    // last laid out) as an HTML file, for opening in Word without touching
+    // the clipboard
+    if (argc == 3 && std::string(argv[1]) == "--dump-html") {
+        std::string payload = clipboardHtml(selectionHtmlForRange(app, 0, app.docText.size()));
+        size_t html = payload.find("<html>");
+        std::ofstream(argv[2], std::ios::binary) << payload.substr(html == std::string::npos ? 0 : html);
+    }
     std::cout << "Rich copy: " << failures << " failures"
               << (testClipboard ? "" : " (clipboard checks require --clipboard-test)") << '\n';
     return failures ? 1 : 0;

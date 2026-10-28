@@ -1,7 +1,8 @@
-# Rich copy: bold survives the paste
+# Rich copy: bold, italics and links survive the paste
 
 Select all (Ctrl+A), copy (Ctrl+C) and paste into Outlook, Word or a web
-mail. The **bold words** stay bold; everything else pastes as it reads.
+mail. The **bold words** stay bold, *italic words* italic and web links
+links; everything else pastes as it reads.
 
 ## Message
 
@@ -11,8 +12,10 @@ Dear team,
 The main items are **A12** and **B7+3**.
 
 A bold span that **wraps across a soft
-line break** stays one span, and *italic* or [a link](https://example.com)
-stay plain text. Escapes: **a < b & c > d** and "quotes".
+line break** stays one span, *italic* stays italic, [a link](https://example.com)
+stays a link, and [a heading link](#message) pastes as its text. Mixed:
+***bold italic*** and **[a bold link](https://example.org/?a=1&b=2)**.
+Escapes: **a < b & c > d** and "quotes".
 
 **Please let me know in writing,**
 
