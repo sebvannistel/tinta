@@ -2782,7 +2782,8 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
         size_t listItem = app.docListItems.size();
         app.docListItems.push_back({app.docText.size(), app.docText.size(), listDepth - 1,
                                     elem->ordered, itemNum,
-                                    child->isTask ? (child->taskChecked ? 2 : 1) : 0});
+                                    child->isTask ? (child->taskChecked ? 2 : 1) : 0,
+                                    elem.get()});
 
         if (child->isTask) {
             // Task item: a clickable checkbox replaces the bullet

@@ -1146,6 +1146,7 @@ struct App {
         bool ordered;
         int number;      // an ordered item's number
         int task;        // 0 no checkbox, 1 open, 2 done
+        const void* list;  // the list it belongs to: items of one list share it
     };
     std::vector<DocListItem> docListItems;
 

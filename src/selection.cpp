@@ -274,32 +274,14 @@ std::wstring selectionHtmlForRange(const App& app, size_t start, size_t end) {
             openItems.pop_back();
         }
     };
-    // Opens the line at i: a <div>, or the <li> of the list item around it
-    auto openLine = [&](size_t i) {
-        std::vector<const App::DocListItem*> chain;  // items around i, outermost first
-        for (const App::DocListItem& item : app.docListItems) {
-            if (item.start > i) break;
-            if (i < item.end) chain.push_back(&item);
-        }
-        if (chain.empty()) {
-            closeListsFrom(0);
-            html += L"<div>";
-            return;
-        }
-        size_t same = 0;
-        while (same < openItems.size() && same < chain.size() && openItems[same] == chain[same])
-            same++;
-        if (same == chain.size() && same == openItems.size()) {
-            html += L"<br>";  // another line of the same item
-            return;
-        }
+    // Makes the open items chain, whose first `same` are open already. A
+    // list split by a task line reopens at its next item's number.
+    auto openItemsFor = [&](const std::vector<const App::DocListItem*>& chain, size_t same) {
         closeListsFrom(same + 1);
         // The next item of the same list closes only the previous item
         bool sibling = false;
         if (openItems.size() > same) {
-            sibling = same < chain.size() &&
-                      openItems[same]->ordered == chain[same]->ordered &&
-                      openItems[same]->depth == chain[same]->depth;
+            sibling = same < chain.size() && openItems[same]->list == chain[same]->list;
             if (sibling) {
                 html += L"</li>\r\n";
                 openItems.pop_back();
@@ -314,12 +296,60 @@ std::wstring selectionHtmlForRange(const App& app, size_t start, size_t end) {
                     html += item->number == 1 ? std::wstring(L"<ol>")
                             : L"<ol start=\"" + std::to_wstring(item->number) + L"\">";
                 } else {
-                    html += item->task ? L"<ul style=\"list-style-type:none\">" : L"<ul>";
+                    html += L"<ul>";
                 }
             }
             html += L"<li>";
-            if (item->task) html += item->task == 2 ? L"\u2611 " : L"\u2610 ";
             openItems.push_back(item);
+        }
+    };
+    // A line is a <div> or <p> (lineEnd closes it) or part of an open <li>.
+    // listContext: the last line was a list line, so the empty lines after
+    // it go.
+    const wchar_t* lineEnd = nullptr;
+    bool listContext = false;
+    const App::DocListItem* marked = nullptr;  // the last item given a text marker
+    // Opens the line at i: a <div>, or the <li> of the list item around it
+    // (an empty item counts as around its own position)
+    auto openLine = [&](size_t i) {
+        std::vector<const App::DocListItem*> chain;  // items around i, outermost first
+        for (const App::DocListItem& item : app.docListItems) {
+            if (item.start > i) break;
+            if (i < item.end || item.start == i) chain.push_back(&item);
+        }
+        // From a task item in, lines paste as indented paragraphs with the
+        // marker as text: Word bullets every list item whatever its style,
+        // which put a bullet before each checkbox
+        size_t firstTask = 0;
+        while (firstTask < chain.size() && !chain[firstTask]->task) firstTask++;
+        std::vector<const App::DocListItem*> asText(chain.begin() + firstTask, chain.end());
+        chain.resize(firstTask);
+        listContext = !chain.empty() || !asText.empty();
+        if (!listContext) {
+            closeListsFrom(0);
+            html += L"<div>";
+            lineEnd = L"</div>";
+            return;
+        }
+        size_t same = 0;
+        while (same < openItems.size() && same < chain.size() && openItems[same] == chain[same])
+            same++;
+        if (same == chain.size() && same == openItems.size()) {
+            if (asText.empty()) html += L"<br>";  // another line of the same item
+        } else {
+            openItemsFor(chain, same);
+        }
+        if (!asText.empty()) {
+            // A <p>: Word drops a <div>'s margin, so the line lost its indent
+            html += L"<p style=\"margin:0 0 0 " + std::to_wstring(36 * asText.size()) + L"pt\">";
+            lineEnd = L"</p>";
+            const App::DocListItem* item = asText.back();
+            if (item != marked) {
+                marked = item;
+                if (item->task) html += item->task == 2 ? L"\u2611 " : L"\u2610 ";
+                else if (item->ordered) html += std::to_wstring(item->number) + L". ";
+                else html += L"\u2022 ";
+            }
         }
     };
     bool inLine = false;
@@ -336,7 +366,20 @@ std::wstring selectionHtmlForRange(const App& app, size_t start, size_t end) {
         // a line belongs to its <li>, and the empty lines between items go.
         if (c == L'\n') {
             closeFrom(true, true, true);
-            if (openItems.empty()) html += inLine ? L"</div>\r\n" : L"<div><br></div>\r\n";
+            // An empty item has no character to open it: open it at its line
+            if (!inLine) {
+                for (const App::DocListItem& item : app.docListItems) {
+                    if (item.start > i) break;
+                    if (item.start == i && item.end == i) { openLine(i); inLine = true; break; }
+                }
+            }
+            if (lineEnd) {
+                html += lineEnd;
+                html += L"\r\n";
+                lineEnd = nullptr;
+            } else if (!inLine && !listContext) {
+                html += L"<div><br></div>\r\n";
+            }
             inLine = false;
             lineStart = true;
             continue;
@@ -375,8 +418,8 @@ std::wstring selectionHtmlForRange(const App& app, size_t start, size_t end) {
         lineStart = false;
     }
     closeFrom(true, true, true);
-    if (!openItems.empty()) closeListsFrom(0);
-    else if (inLine) html += L"</div>";
+    if (lineEnd) html += lineEnd;
+    closeListsFrom(0);
     return html;
 }
 

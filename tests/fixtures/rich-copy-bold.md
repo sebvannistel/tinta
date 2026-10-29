@@ -34,6 +34,27 @@ In order:
 - [x] seeds bought
 - [ ] tools cleaned
 
+* Buy groceries
+* [x] Buy milk
+* Drive home
+
++ First
++
++ Third
+
+Numbers around a task:
+
+1. Book
+2. [x] Pay
+3. Go
+
+Tasks under an item:
+
+1. Plan
+   - [x] measured
+   - [ ] fenced
+2. Plant
+
 > Quoted text with **bold inside** the quote.
 
 | Bed | Status |
