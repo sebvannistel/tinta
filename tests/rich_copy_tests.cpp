@@ -104,6 +104,26 @@ void layoutTests(App& app) {
           "a bold link nests <b> in <a>, its address escaped");
     check(!has(all, L"<b>Rich copy") && !has(all, L"<b>Message"),
           "headings copy as their text, as before");
+    // Lists paste as lists: bullets, numbers and nesting, without the empty
+    // line between items
+    check(has(all, L"<div><b>Please let me know in writing,</b></div>\r\n<div><br></div>\r\n"
+                   L"<ul><li>whether the <b>north bed</b> can be planted,</li>\r\n"
+                   L"<li>which <b>watering schedule</b> applies and</li>\r\n"
+                   L"<li>which paths must stay clear.</li></ul>\r\n<div>In order:</div>"),
+          "a bullet list pastes as <ul> items: " + narrow(all));
+    check(has(all, L"<ol><li>Dig the bed.</li>\r\n<li>Water it.<ul><li>morning</li>\r\n"
+                   L"<li>evening</li></ul>\r\n</li>\r\n<li>Mulch.</li></ol>\r\n"),
+          "a numbered list with a nested list");
+    check(has(all, L"<ul style=\"list-style-type:none\"><li>\u2611 seeds bought</li>\r\n"
+                   L"<li>\u2610 tools cleaned</li></ul>"),
+          "a task list pastes its checkboxes");
+    size_t middle = text.find(L"watering schedule");
+    if (middle != std::wstring::npos) {
+        std::wstring part = selectionHtmlForRange(app, middle, text.find(L"stay clear") + 10);
+        check(part == L"<ul><li><b>watering schedule</b> applies and</li>\r\n"
+                      L"<li>which paths must stay clear</li></ul>\r\n",
+              "a selection starting inside a list item still pastes a list: " + narrow(part));
+    }
 
     // A selection that starts or ends inside a bold span opens and closes it
     size_t at = text.find(L"Caf\u00e9");
@@ -119,7 +139,9 @@ void layoutTests(App& app) {
     // A rebuilt layout leaves no stale ranges behind
     size_t ranges = app.docBoldRanges.size();
     size_t italics = app.docItalicRanges.size(), links = app.docLinkRanges.size();
+    size_t items = app.docListItems.size();
     layoutDocument(app);
+    check(app.docListItems.size() == items && items == 10, "relayout records each list item once");
     check(app.docBoldRanges.size() == ranges, "relayout records each bold span once");
     check(app.docItalicRanges.size() == italics && italics >= 3 && app.docLinkRanges.size() == links &&
               links == 2,

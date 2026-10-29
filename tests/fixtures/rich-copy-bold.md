@@ -1,8 +1,8 @@
 # Rich copy: bold, italics and links survive the paste
 
 Select all (Ctrl+A), copy (Ctrl+C) and paste into Outlook, Word or a web
-mail. The **bold words** stay bold, *italic words* italic and web links
-links; everything else pastes as it reads.
+mail. The **bold words** stay bold, *italic words* italic, web links
+links and lists lists; everything else pastes as it reads.
 
 ## Message
 
@@ -22,6 +22,17 @@ Escapes: **a < b & c > d** and "quotes".
 - whether the **north bed** can be planted,
 - which **watering schedule** applies and
 - which paths must stay clear.
+
+In order:
+
+1. Dig the bed.
+2. Water it.
+   - morning
+   - evening
+3. Mulch.
+
+- [x] seeds bought
+- [ ] tools cleaned
 
 > Quoted text with **bold inside** the quote.
 

@@ -1138,6 +1138,16 @@ struct App {
     std::vector<std::pair<size_t, size_t>> docItalicRanges;
     struct DocLinkRange { size_t start, end; std::string url; };
     std::vector<DocLinkRange> docLinkRanges;
+    // docText ranges of list items, in document order (a nested item
+    // follows its parent and lies inside it), so a copy pastes real lists
+    struct DocListItem {
+        size_t start, end;
+        int depth;       // 0 for a top-level list
+        bool ordered;
+        int number;      // an ordered item's number
+        int task;        // 0 no checkbox, 1 open, 2 done
+    };
+    std::vector<DocListItem> docListItems;
 
     // Cached space widths for common formats
     float spaceWidthText = 0.0f;
@@ -1536,6 +1546,7 @@ struct App {
         docBoldRanges.clear();
         docItalicRanges.clear();
         docLinkRanges.clear();
+        docListItems.clear();
         headings.clear();
         headingSlugCounts.clear();
         footnoteAnchors.clear();

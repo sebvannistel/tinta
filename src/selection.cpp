@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace {
 
@@ -264,6 +265,63 @@ std::wstring selectionHtmlForRange(const App& app, size_t start, size_t end) {
         if (boldToo && inBold) { html += L"</b>"; inBold = false; }
         if (linkToo && inLink) { html += L"</a>"; inLink = nullptr; }
     };
+    // List lines paste as real lists: the items whose <li> is open, outermost
+    // first, each inside its open <ul> or <ol>
+    std::vector<const App::DocListItem*> openItems;
+    auto closeListsFrom = [&](size_t level) {
+        while (openItems.size() > level) {
+            html += openItems.back()->ordered ? L"</li></ol>\r\n" : L"</li></ul>\r\n";
+            openItems.pop_back();
+        }
+    };
+    // Opens the line at i: a <div>, or the <li> of the list item around it
+    auto openLine = [&](size_t i) {
+        std::vector<const App::DocListItem*> chain;  // items around i, outermost first
+        for (const App::DocListItem& item : app.docListItems) {
+            if (item.start > i) break;
+            if (i < item.end) chain.push_back(&item);
+        }
+        if (chain.empty()) {
+            closeListsFrom(0);
+            html += L"<div>";
+            return;
+        }
+        size_t same = 0;
+        while (same < openItems.size() && same < chain.size() && openItems[same] == chain[same])
+            same++;
+        if (same == chain.size() && same == openItems.size()) {
+            html += L"<br>";  // another line of the same item
+            return;
+        }
+        closeListsFrom(same + 1);
+        // The next item of the same list closes only the previous item
+        bool sibling = false;
+        if (openItems.size() > same) {
+            sibling = same < chain.size() &&
+                      openItems[same]->ordered == chain[same]->ordered &&
+                      openItems[same]->depth == chain[same]->depth;
+            if (sibling) {
+                html += L"</li>\r\n";
+                openItems.pop_back();
+            } else {
+                closeListsFrom(same);
+            }
+        }
+        for (size_t level = openItems.size(); level < chain.size(); level++) {
+            const App::DocListItem* item = chain[level];
+            if (!(sibling && level == same)) {
+                if (item->ordered) {
+                    html += item->number == 1 ? std::wstring(L"<ol>")
+                            : L"<ol start=\"" + std::to_wstring(item->number) + L"\">";
+                } else {
+                    html += item->task ? L"<ul style=\"list-style-type:none\">" : L"<ul>";
+                }
+            }
+            html += L"<li>";
+            if (item->task) html += item->task == 2 ? L"\u2611 " : L"\u2610 ";
+            openItems.push_back(item);
+        }
+    };
     bool inLine = false;
     bool lineStart = true;
     for (size_t i = start; i < end; i++) {
@@ -274,15 +332,16 @@ std::wstring selectionHtmlForRange(const App& app, size_t start, size_t end) {
         if (c == L'\r') continue;
         // Each line is a <div>, so Word and Outlook paste a paragraph per
         // line as they do the plain text (with <br> the whole copy became
-        // one paragraph); what is open closes with its line
+        // one paragraph); what is open closes with its line. Inside a list
+        // a line belongs to its <li>, and the empty lines between items go.
         if (c == L'\n') {
             closeFrom(true, true, true);
-            html += inLine ? L"</div>\r\n" : L"<div><br></div>\r\n";
+            if (openItems.empty()) html += inLine ? L"</div>\r\n" : L"<div><br></div>\r\n";
             inLine = false;
             lineStart = true;
             continue;
         }
-        if (!inLine) { html += L"<div>"; inLine = true; }
+        if (!inLine) { openLine(i); inLine = true; }
         const App::DocLinkRange* wantLink =
             link != app.docLinkRanges.end() && link->start <= i ? &*link : nullptr;
         bool wantBold = bold != app.docBoldRanges.end() && bold->first <= i;
@@ -316,7 +375,8 @@ std::wstring selectionHtmlForRange(const App& app, size_t start, size_t end) {
         lineStart = false;
     }
     closeFrom(true, true, true);
-    if (inLine) html += L"</div>";
+    if (!openItems.empty()) closeListsFrom(0);
+    else if (inLine) html += L"</div>";
     return html;
 }
 

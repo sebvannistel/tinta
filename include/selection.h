@@ -42,8 +42,9 @@ bool selectionRangeRect(const App& app, const App::TextRect& tr,
 std::wstring selectionTextForRange(const App& app, size_t start, size_t end);
 
 // The same range as an HTML fragment: the plain text's lines (a <div> each)
-// and spacing, with bold in <b>, italics in <i> and web and mail links in
-// <a href>, so a paste into Outlook or Word keeps them.
+// and spacing, with bold in <b>, italics in <i>, web and mail links in
+// <a href> and list items in <ul>/<ol>, so a paste into Outlook or Word
+// keeps them.
 std::wstring selectionHtmlForRange(const App& app, size_t start, size_t end);
 
 // Copies [start, end) as plain text plus its HTML; false when empty, or

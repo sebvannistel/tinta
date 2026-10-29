@@ -218,6 +218,9 @@ static void rollbackTo(App& app, const LayoutSnapshot& s) {
     auto& links = app.docLinkRanges;
     while (!links.empty() && links.back().start >= s.docTextLen) links.pop_back();
     if (!links.empty()) links.back().end = std::min(links.back().end, s.docTextLen);
+    auto& items = app.docListItems;
+    while (!items.empty() && items.back().start >= s.docTextLen) items.pop_back();
+    for (auto& item : items) item.end = std::min(item.end, s.docTextLen);
     app.taskRects.resize(s.tasks);
     app.htmlAnchors.resize(s.anchors);  // a trial layout's anchors sit at trial positions
 }
@@ -2766,9 +2769,20 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
     float scale = app.contentScale * app.zoomFactor;
     float listIndent = 24.0f * scale;
     int itemNum = elem->start;
+    // How deep this list sits in other lists, for the copy's nesting
+    static int listDepth = 0;
+    struct DepthScope {
+        DepthScope() { listDepth++; }
+        ~DepthScope() { listDepth--; }
+    } depthScope;
 
     for (const auto& child : elem->children) {
         if (child->type != ElementType::ListItem) continue;
+
+        size_t listItem = app.docListItems.size();
+        app.docListItems.push_back({app.docText.size(), app.docText.size(), listDepth - 1,
+                                    elem->ordered, itemNum,
+                                    child->isTask ? (child->taskChecked ? 2 : 1) : 0});
 
         if (child->isTask) {
             // Task item: a clickable checkbox replaces the bullet
@@ -2840,6 +2854,9 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
             if (!inlineElements.empty()) {
                 layoutInlineContent(app, inlineElements, indent + listIndent, y,
                     maxWidth - listIndent, app.textFormat, app.theme.text);
+                // The item's text ends its line before a nested list, as
+                // on screen (a copy read "Water it.morning")
+                app.docText += L"\n";
             }
 
             for (const auto& blockChild : blockElements) {
@@ -2850,6 +2867,7 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
                 maxWidth - listIndent, app.textFormat, app.theme.text);
         }
 
+        if (listItem < app.docListItems.size()) app.docListItems[listItem].end = app.docText.size();
         app.docText += L"\n\n";
 
         if (y < itemStartY + 28 * scale) {
