@@ -1,8 +1,9 @@
-# Personal build: once a week (Mondays), merge the owner's latest code into this fork's
-# master (in the runner only, nothing is pushed), build and test it, and
-# publish tinta.exe as a release whenever the owner's version number moves
-# on. A merge conflict or a failing test publishes nothing; GitHub emails
-# the failed run. The installed Tinta updates itself from these releases.
+# Personal build: once a week (Mondays), replay this fork's own commits on
+# top of the owner's latest code (in the runner only, nothing is pushed),
+# build and test it, and publish tinta.exe as a release whenever the owner's
+# version number moves on. A conflict or a failing test publishes nothing;
+# GitHub emails the failed run. The installed Tinta updates itself from
+# these releases.
 name: Personal build
 
 on:
@@ -41,14 +42,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
-      - name: Merge the owner's latest code
+      # A rebase, not a merge: it skips commits whose changes the owner
+      # already has, such as copies of merged pull requests, which a merge
+      # would set against the owner's later edits to the same lines
+      - name: Put this fork's commits on the owner's latest code
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898747+github-actions[bot]@users.noreply.github.com"
           git remote add upstream https://github.com/oipoistar/tinta.git
           git fetch upstream master
-          git merge --no-edit upstream/master
+          git rebase upstream/master
 
       - name: Decide whether a release is due
         id: version
