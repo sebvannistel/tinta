@@ -31,6 +31,18 @@ jobs:
         with:
           ref: master
           fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check sync credentials
+        if: ${{ !inputs.build_only }}
+        shell: bash
+        env:
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          if [ -z "$SYNC_TOKEN" ]; then
+            echo "Add a SYNC_TOKEN Actions secret with Contents, Workflows and Pull requests write permissions before syncing."
+            exit 1
+          fi
 
       - name: Prepare upstream merge
         if: ${{ !inputs.build_only }}
@@ -52,6 +64,23 @@ jobs:
             echo "base=$(git rev-parse origin/master)" >> "$GITHUB_OUTPUT"
           fi
 
+      # Push before building so permission errors fail without wasting a build.
+      - name: Open sync pull request
+        if: steps.sync.outputs.needed == 'true'
+        id: pr
+        shell: bash
+        env:
+          SYNC_BRANCH: ${{ steps.sync.outputs.branch }}
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          set -euo pipefail
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          git -c "http.extraheader=AUTHORIZATION: basic $auth" push origin "HEAD:refs/heads/$SYNC_BRANCH"
+          pr=$(gh pr create --base master --head "$SYNC_BRANCH" \
+            --title "Sync upstream master" \
+            --body "Automatically merge upstream into this fork after the Release build and tests pass.")
+          echo "url=$pr" >> "$GITHUB_OUTPUT"
+
       - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release
         env:
@@ -64,25 +93,21 @@ jobs:
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
 
-      # Publish only after testing. The pull request belongs to this fork.
-      - name: Open and merge sync pull request
+      - name: Merge tested sync pull request
         if: steps.sync.outputs.needed == 'true'
         shell: bash
         env:
-          SYNC_BRANCH: ${{ steps.sync.outputs.branch }}
           EXPECTED_BASE: ${{ steps.sync.outputs.base }}
+          PR_URL: ${{ steps.pr.outputs.url }}
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
         run: |
           set -euo pipefail
-          git push origin "HEAD:refs/heads/$SYNC_BRANCH"
-          pr=$(gh pr create --base master --head "$SYNC_BRANCH" \
-            --title "Sync upstream master" \
-            --body "Automatically merge upstream into this fork after the Release build and tests pass.")
           git fetch origin master
           if [ "$(git rev-parse origin/master)" != "$EXPECTED_BASE" ]; then
             echo "Fork master changed during testing; leaving the pull request for review."
             exit 1
           fi
-          gh pr merge "$pr" --merge --match-head-commit "$(git rev-parse HEAD)" --delete-branch
+          gh pr merge "$PR_URL" --merge --match-head-commit "$(git rev-parse HEAD)" --delete-branch
 
       # Check out the actual merged commit and rebuild it, so the release tag
       # identifies exactly the source used to produce the executable.
