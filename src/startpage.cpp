@@ -10,6 +10,7 @@
 #include "document.h"
 #include "i18n.h"
 #include "settings.h"
+#include "sheet_ui.h"
 #include "tabs.h"
 #include "utils.h"
 
@@ -533,9 +534,13 @@ void renderStartPage(App& app) {
     spDraw(app, tag, x0, tagY, withA(text, 0.56f));
     if (tag) tag->Release();
 
-    // --- Action buttons: Open a file (accent), New document, Browse
+    // --- Action buttons, two by two and as wide as the column: opening
+    // what exists (Open a file, the accent, and Browse) over making
+    // something new (New document, New sheet). One column when two would
+    // not fit side by side.
     float btnY = tagY + tagM.height + dpi(app, 26.0f);
     float btnH = dpi(app, 38.0f);
+    float btnGap = dpi(app, 8.0f);
     struct Btn {
         const char* label;
         std::wstring key;
@@ -543,28 +548,33 @@ void renderStartPage(App& app) {
         int id;
     };
     // The chips show the user's actual bindings, not hardcoded defaults
-    Btn btns[3] = {
+    Btn btns[4] = {
         {"start.open", L"Ctrl+O", true, 1},
-        {"start.new", keyLabel(app.keymap[KA_NEWFILE]), false, 2},
         {"start.browse", keyLabel(app.keymap[KA_BROWSE]), false, 3},
+        {"start.new", keyLabel(app.keymap[KA_NEWFILE]), false, 2},
+        {"start.new_sheet", L"S", false, 6},
     };
-    float bx = x0;
-    for (const Btn& b : btns) {
-        IDWriteTextLayout* label = spLayout(
-            app, tr(app, b.label), 13.0f,
-            b.primary ? DWRITE_FONT_WEIGHT_SEMI_BOLD
-                      : DWRITE_FONT_WEIGHT_NORMAL,
-            4096.0f);
-        DWRITE_TEXT_METRICS lm = spMetrics(label);
-        IDWriteTextLayout* keyL = spLayout(app, b.key, 11.0f,
+    IDWriteTextLayout* labels[4] = {};
+    float widest = 0.0f;
+    for (int i = 0; i < 4; ++i) {
+        labels[i] = spLayout(app, tr(app, btns[i].label), 13.0f,
+                             btns[i].primary ? DWRITE_FONT_WEIGHT_SEMI_BOLD
+                                             : DWRITE_FONT_WEIGHT_NORMAL,
+                             4096.0f);
+        IDWriteTextLayout* keyL = spLayout(app, btns[i].key, 11.0f,
                                            DWRITE_FONT_WEIGHT_NORMAL,
                                            4096.0f);
-        DWRITE_TEXT_METRICS km = spMetrics(keyL);
+        float keyW = btns[i].key.empty() ? 0.0f : spMetrics(keyL).width + dpi(app, 14.0f) + dpi(app, 12.0f);
         if (keyL) keyL->Release();
-        float chipW = km.width + dpi(app, 14.0f);
-        float w = dpi(app, 14.0f) + lm.width + dpi(app, 9.0f) + chipW +
-                  dpi(app, 14.0f);
-        D2D1_RECT_F r = D2D1::RectF(bx, btnY, bx + w, btnY + btnH);
+        widest = std::max(widest, dpi(app, 14.0f) + spMetrics(labels[i]).width + keyW + dpi(app, 14.0f));
+    }
+    int cols = widest * 2.0f + btnGap <= leftW ? 2 : 1;
+    float btnW = cols == 2 ? (leftW - btnGap) * 0.5f : leftW;
+    for (int i = 0; i < 4; ++i) {
+        const Btn& b = btns[i];
+        float bx = x0 + (float)(i % cols) * (btnW + btnGap);
+        float by = btnY + (float)(i / cols) * (btnH + btnGap);
+        D2D1_RECT_F r = D2D1::RectF(bx, by, bx + btnW, by + btnH);
         D2D1_ROUNDED_RECT rr =
             D2D1::RoundedRect(r, dpi(app, 8.0f), dpi(app, 8.0f));
         bool hov = app.startPageHover == b.id;
@@ -588,17 +598,18 @@ void renderStartPage(App& app) {
             app.brush->SetColor(surfaceBorder);
             app.renderTarget->DrawRoundedRectangle(rr, app.brush, 1.0f);
         }
-        float tx = bx + dpi(app, 14.0f);
-        spDraw(app, label, tx, btnY + (btnH - lm.height) * 0.5f,
+        DWRITE_TEXT_METRICS lm = spMetrics(labels[i]);
+        spDraw(app, labels[i], bx + dpi(app, 14.0f), by + (btnH - lm.height) * 0.5f,
                b.primary ? onAccent : text);
-        if (label) label->Release();
+        if (labels[i]) labels[i]->Release();
         D2D1_COLOR_F kBg = b.primary ? withA(onAccent, 0.14f) : chipBg;
         D2D1_COLOR_F kFg = b.primary ? withA(onAccent, 0.75f) : chipFg;
-        spChip(app, b.key, tx + lm.width + dpi(app, 9.0f),
-               btnY + btnH * 0.5f, kBg, kFg);
+        if (!b.key.empty())
+            spChip(app, b.key, r.right - dpi(app, 12.0f), by + btnH * 0.5f,
+                   kBg, kFg, true);
         addHit(r.left, r.top, r.right, r.bottom, b.id);
-        bx += w + dpi(app, 8.0f);
     }
+    btnY += (float)((4 + cols - 1) / cols - 1) * (btnH + btnGap);
 
     // --- RECENT
     float recY = btnY + btnH + dpi(app, 34.0f);
@@ -653,15 +664,26 @@ void renderStartPage(App& app) {
                     dpi(app, 2.0f), dpi(app, 2.0f)),
                 app.brush);
         }
-        // Little page glyph
+        // Little page glyph, or four cards for a sheet
         float gx = x0;
         float gy = top + (rowH - dpi(app, 15.0f)) * 0.5f;
         app.brush->SetColor(withA(text, 0.5f));
-        app.renderTarget->DrawRoundedRectangle(
-            D2D1::RoundedRect(D2D1::RectF(gx, gy, gx + dpi(app, 12.0f),
-                                          gy + dpi(app, 15.0f)),
-                              dpi(app, 2.0f), dpi(app, 2.0f)),
-            app.brush, 1.0f);
+        if (isSheetPath(rd.path)) {
+            float c = dpi(app, 5.5f), g = dpi(app, 2.0f);
+            for (int k = 0; k < 4; ++k) {
+                float cx = gx + (k % 2) * (c + g) - dpi(app, 0.5f);
+                float cy = gy + dpi(app, 1.5f) + (k / 2) * (c + g);
+                app.renderTarget->DrawRoundedRectangle(
+                    D2D1::RoundedRect(D2D1::RectF(cx, cy, cx + c, cy + c), dpi(app, 1.2f), dpi(app, 1.2f)),
+                    app.brush, 1.0f);
+            }
+        } else {
+            app.renderTarget->DrawRoundedRectangle(
+                D2D1::RoundedRect(D2D1::RectF(gx, gy, gx + dpi(app, 12.0f),
+                                              gy + dpi(app, 15.0f)),
+                                  dpi(app, 2.0f), dpi(app, 2.0f)),
+                app.brush, 1.0f);
+        }
 
         std::string pathUtf8 = rd.path;
         size_t slash = pathUtf8.find_last_of("/\\");
@@ -711,7 +733,8 @@ void renderStartPage(App& app) {
     // --- LEARN column
     if (twoCols) {
         float x1 = x0 + leftW + colGap;
-        float ly = y0 + dpi(app, 118.0f);
+        // Level with the top of the page: its heading beside the icon
+        float ly = y0 + (heroH - iconSize) * 0.5f;
         IDWriteTextLayout* learnH = spLayout(
             app, tr(app, "start.learn"), 11.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD,
             4096.0f, false, false, 1.5f);
@@ -725,12 +748,13 @@ void renderStartPage(App& app) {
             const char* title;
             const char* desc;
         };
-        Card cards[3] = {
+        Card cards[4] = {
             {L"\u270E", "start.learn_sample", "start.learn_sample_d"},
             {L"\u25C8", "start.learn_mermaid", "start.learn_mermaid_d"},
             {L"\u2318", "start.learn_md", "start.learn_md_d"},
+            {L"\u29C9", "start.learn_sheet", "start.learn_sheet_d"},
         };
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < 4; i++) {
             float padX = dpi(app, 16.0f);
             float padY = dpi(app, 14.0f);
             IDWriteTextLayout* title = spLayout(app, tr(app, cards[i].title),

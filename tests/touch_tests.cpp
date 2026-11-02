@@ -5,12 +5,16 @@
 // unchanged.
 #include "d2d_init.h"
 #include "editor.h"
+#include "editrail.h"
 #include "input.h"
+#include "keystroke.h"
 #include "overlays.h"
 #include "render.h"
 #include "selection.h"
 #include "settings.h"
+#include "sidepanels.h"
 #include "touch.h"
+#include "tableedit.h"
 #include "utils.h"
 
 #include <algorithm>
@@ -69,6 +73,89 @@ void editFrame(App& app) {
     renderEditor(app, editorPaneWidth(app));
     check(SUCCEEDED(app.renderTarget->EndDraw()), "the editor paints");
     syncPreviewToEditor(app);
+}
+
+void controlRoutingScenario(App& app) {
+    PanelList list;
+    app.showSearch = app.searchReplaceMode = true;
+    for (float animation : {0.4f, 1.0f}) {
+        app.searchAnimation = animation;
+        app.renderTarget->BeginDraw();
+        renderSearchOverlay(app);
+        check(SUCCEEDED(app.renderTarget->EndDraw()), "replace bar paints");
+        check(!app.searchReplaceHits.empty(), "replace controls have painted hit regions");
+        for (const auto& hit : app.searchReplaceHits) {
+            const auto& r = hit.first;
+            POINT p{(LONG)((r.left + r.right) / 2), (LONG)((r.top + r.bottom) / 2)};
+            check(touchTargetAt(app, p, list) == TouchTarget::None,
+                  "every painted replace control keeps mouse emulation, including stacked buttons");
+        }
+    }
+    app.showSearch = app.searchReplaceMode = false;
+    const POINT preview{(LONG)(documentViewportX(app) + dpi(app, 12)), app.height / 2};
+    openEditCtxMenu(app, app.hwnd, (float)preview.x, (float)preview.y);
+    app.renderTarget->BeginDraw();
+    renderEditCtxMenu(app);
+    check(SUCCEEDED(app.renderTarget->EndDraw()), "editor menu paints across the pane boundary");
+    POINT submenu{-1, -1};
+    for (const auto& hit : app.editCtxHits) {
+        if (hit.second == 110) submenu = {(LONG)((hit.first.left + hit.first.right) / 2),
+                                        (LONG)((hit.first.top + hit.first.bottom) / 2)};
+    }
+    check(submenu.x >= documentViewportX(app), "the table menu entry is over the preview");
+    check(!touchDown(app, app.hwnd, 60, submenu, ms += 1000), "an editor menu touch goes to mouse emulation");
+    const auto source = app.editorText;
+    const auto caret = app.editorCursorPos;
+    handleMouseMove(app, app.hwnd, MAKELPARAM(submenu.x, submenu.y));
+    handleMouseDown(app, app.hwnd, MK_LBUTTON, MAKELPARAM(submenu.x, submenu.y));
+    handleMouseUp(app, app.hwnd, 0, MAKELPARAM(submenu.x, submenu.y));
+    check(app.editCtxOpen && app.editCtxSub == 1 && app.editorText == source && app.editorCursorPos == caret,
+          "the menu opens its submenu over the preview without changing source or caret");
+    const POINT outside{app.width - (LONG)dpi(app, 24), (LONG)(chromeTopHeight(app) + dpi(app, 20))};
+    handleMouseDown(app, app.hwnd, MK_LBUTTON, MAKELPARAM(outside.x, outside.y));
+    handleMouseUp(app, app.hwnd, 0, MAKELPARAM(outside.x, outside.y));
+    check(!app.editCtxOpen && !app.selecting && app.editorText == source && app.editorCursorPos == caret,
+          "dismissing the editor menu consumes the click over the preview");
+}
+
+void editorHoldScenario(App& app) {
+    app.editorScrollY = 0;
+    editFrame(app);
+    const auto original = app.editorText;
+    const bool dirty = app.editorDirty;
+    auto point = [&](const std::wstring& word) {
+        const size_t at = app.editorText.find(word);
+        check(at != std::wstring::npos, "editor hold fixture word exists");
+        app.editorCursorPos = at + 1;
+        D2D1_POINT_2F p{};
+        check(editorCaretPoint(app, p), "editor hold word has a screen position");
+        return POINT{(LONG)(p.x + dpi(app, 1)), (LONG)(p.y + dpi(app, 6))};
+    };
+    const POINT alpha = point(L"alpha"), beta = point(L"beta"), gamma = point(L"gamma");
+    const POINT chinese = point(L"\u4e2d\u6587\u9009\u62e9\u6d4b\u8bd5");
+    auto selection = [&]() {
+        return app.editorText.substr(app.editorSelStart, app.editorSelEnd - app.editorSelStart);
+    };
+    check(touchDown(app, app.hwnd, 50, beta, ms += 1000), "editor held press is taken");
+    touchHold(app, app.hwnd);
+    check(selection() == L"beta" && !app.editorTextDrag.armed, "editor hold selects a word without arming text drag");
+    touchMove(app, app.hwnd, 50, gamma, ms += 100);
+    check(selection() == L"beta gamma", "editor hold grows forward by whole words");
+    touchMove(app, app.hwnd, 50, alpha, ms += 100);
+    check(selection() == L"alpha beta", "editor hold reverses around its original word");
+    touchMove(app, app.hwnd, 50, chinese, ms += 100);
+    check(selection() == L"beta gamma\n\u4e2d\u6587\u9009\u62e9\u6d4b\u8bd5", "editor hold extends across lines and CJK runs");
+    const auto grown = selection();
+    touchUp(app, app.hwnd, 50, chinese, ms += 50, false);
+    check(app.editCtxOpen && selection() == grown && !app.editorSelecting,
+          "editor lift opens its menu and preserves the expanded selection");
+    closeEditCtxMenu(app);
+    check(touchDown(app, app.hwnd, 51, beta, ms += 1000), "a hold on selected source is taken");
+    touchHold(app, app.hwnd);
+    touchCancel(app, app.hwnd);
+    check(!app.editCtxOpen && selection() == L"beta" && !app.editorTextDrag.armed,
+          "canceling an editor hold keeps its word without moving text or opening a menu");
+    check(app.editorText == original && app.editorDirty == dirty, "touch selection never edits the source");
 }
 
 void scenario(App& app, const char* path, int width, float scale) {
@@ -149,6 +236,24 @@ void scenario(App& app, const char* path, int width, float scale) {
 
     // A tap follows a link, and leaves no hover behind
     app.scrollY = app.targetScrollY = 0;
+    swipe(app, 52, low, 0, -10, 2, 10, 5);
+    check(app.touch.flinging, "the page is flinging before a braking tap");
+    const POINT brakeLink = wordPoint(app, L"jump to the end");
+    const float brakeY = app.scrollY;
+    touchDown(app, app.hwnd, 53, brakeLink, ms += 16);
+    touchHold(app, app.hwnd); // even a queued timer must not select
+    touchUp(app, app.hwnd, 53, brakeLink, ms += 600, false);
+    check(!app.touch.flinging && app.scrollY == brakeY && !app.hasSelection && !app.showContextMenu,
+          "catching a fling over a link only stops it, even if held");
+    tapAt(app, 54, brakeLink);
+    check(app.scrollY > maxY - dpi(app, 400), "the next deliberate tap follows the link");
+    app.scrollY = app.targetScrollY = 0;
+    swipe(app, 55, low, 0, -20, 4, 10, 5);
+    const float beforeDrag = app.scrollY;
+    swipe(app, 56, middle, 0, -20, 4, 16, 200);
+    check(!app.touch.flinging && std::fabs(app.scrollY - beforeDrag - 80) < 1,
+          "a braking press can continue directly into another pan");
+    app.scrollY = app.targetScrollY = 0;
     tapAt(app, 6, wordPoint(app, L"jump to the end"));
     check(app.scrollY > maxY - dpi(app, 400) && !app.hasSelection && app.mouseX == -1 && app.hoveredLink.empty(),
           "a tap follows a link" + where + ": " + std::to_string(app.scrollY));
@@ -222,6 +327,14 @@ void scenario(App& app, const char* path, int width, float scale) {
     app.tocFilter.clear();
     app.tocSpyOverride = -1;
     const D2D1_RECT_F rows = tocListRect(app);
+    const bool wasLeft = app.tocOnLeft;
+    for (bool left : {false, true}) {
+        app.tocOnLeft = left;
+        const POINT edge{(LONG)sidePanelResizeEdge(app, SidePanel::Contents), app.height / 2};
+        check(touchTargetAt(app, edge, list) == TouchTarget::None,
+              "both Contents resize edges keep mouse emulation instead of panning the list");
+    }
+    app.tocOnLeft = wasLeft;
     const POINT inList{(LONG)(rows.left + dpi(app, 40)), (LONG)(rows.bottom - dpi(app, 60))};
     check(touchTargetAt(app, inList, list) == TouchTarget::List && list == PanelList::Contents,
           "a finger on the Contents drives its list" + where);
@@ -234,6 +347,60 @@ void scenario(App& app, const char* path, int width, float scale) {
           "a tap on a Contents row opens its section" + where);
     app.showToc = false;
 
+    // Adjacent rows can be closer than the forgiving text double-tap radius.
+    // Each list tap must still use the finger's actual landing point.
+    app.showToc = true;
+    app.tocAnimation = 1;
+    app.tocScroll = 0;
+    const auto listRect = tocListRect(app);
+    const LONG rowX = (LONG)(listRect.left + dpi(app, 40));
+    bool adjacent = false;
+    for (LONG y = (LONG)listRect.top + 1; y < listRect.bottom - 1; ++y) {
+        const int first = tocItemIndexAt(app, (float)rowX, (float)y);
+        const int second = tocItemIndexAt(app, (float)rowX, (float)(y + 1));
+        if (first < 0 || second <= first) continue;
+        tapAt(app, 61, POINT{rowX, y});
+        app.showToc = true;
+        app.tocAnimation = 1;
+        app.tocScroll = 0;
+        touchDown(app, app.hwnd, 62, POINT{rowX, y + 1}, ms += 30);
+        touchUp(app, app.hwnd, 62, POINT{rowX, y + 1}, ms += 40, false);
+        check(app.tocSpyOverride == second, "nearby taps on adjacent rows activate the actual second row");
+        adjacent = true;
+        break;
+    }
+    check(adjacent, "the Contents has adjacent rows to test");
+    app.showToc = false;
+
+    app.scrollY = app.targetScrollY = 0;
+    const POINT freshWord = wordPoint(app, L"marigold");
+    tapAt(app, 63, freshWord);
+    touchDown(app, app.hwnd, 64, freshWord, ms += 10);
+    touchMove(app, app.hwnd, 64, shifted(freshWord, 0, (int)dpi(app, 20)), ms += 20);
+    touchUp(app, app.hwnd, 64, shifted(freshWord, 0, (int)dpi(app, 20)), ms += 100, false);
+    touchDown(app, app.hwnd, 65, freshWord, ms += 10);
+    touchUp(app, app.hwnd, 65, freshWord, ms += 30, false);
+    check(!app.hasSelection, "a tap after a pan starts a new click chain");
+    touchDown(app, app.hwnd, 66, freshWord, ms += 10);
+    touchUp(app, app.hwnd, 66, freshWord, ms += 30, true);
+    touchDown(app, app.hwnd, 67, freshWord, ms += 10);
+    touchUp(app, app.hwnd, 67, freshWord, ms += 30, false);
+    check(!app.hasSelection, "a canceled contact resets the text tap chain");
+
+    touchDown(app, app.hwnd, 68, freshWord, ms += 10);
+    enterEditMode(app);
+    touchHold(app, app.hwnd);
+    check(!app.touch.active && !app.editorHasSelection && !app.editCtxOpen,
+          "a delayed hold cannot select text after changing mode");
+    exitEditMode(app);
+    ensureLayoutComplete(app);
+    swipe(app, 69, low, 0, -20, 4, 10, 5);
+    check(app.touch.flinging && !app.touch.active, "a released gesture can still be flinging");
+    const float idleY = app.scrollY;
+    touchCancel(app, app.hwnd);
+    touchFlingStep(app, app.hwnd, ms += 100);
+    check(!app.touch.flinging && app.scrollY == idleY, "canceling without an active finger stops inertia too");
+
     // A mouse drag still selects
     app.scrollY = app.targetScrollY = 0;
     app.hasSelection = false;
@@ -244,6 +411,33 @@ void scenario(App& app, const char* path, int width, float scale) {
     handleMouseUp(app, app.hwnd, 0, MAKELPARAM(to.x, to.y));
     check(app.hasSelection && selected(app).size() > 20 && app.scrollY == 0, "a mouse drag still selects text" + where);
     app.hasSelection = false;
+
+    const float pageBeforeHelp = app.scrollY;
+    app.showHelp = true;
+    app.helpAnimation = 1;
+    app.helpScroll = 0;
+    app.renderTarget->BeginDraw();
+    renderHelpOverlay(app);
+    check(SUCCEEDED(app.renderTarget->EndDraw()), "help paints at the current width and scale");
+    const auto help = helpPanelRect(app);
+    const POINT helpPoint{(LONG)((help.left + help.right) / 2),
+                          (LONG)(app.helpScrollbarTop + app.helpVisibleHeight - dpi(app, 40))};
+    check(touchTargetAt(app, helpPoint, list) == TouchTarget::Help, "help text owns its touch scrolling");
+    swipe(app, 73, helpPoint, 0, -20, 8, 16, 200);
+    check(app.helpScroll > 0 && app.scrollY == pageBeforeHelp && app.showHelp,
+          "help scrolls without moving or closing the document");
+    swipe(app, 74, helpPoint, 0, -10, 3, 10, 5);
+    check(app.touch.flinging, "help supports inertial scrolling");
+    for (bool right : {false, true}) {
+        app.showHelp = true;
+        app.helpAnimation = 1;
+        const POINT outside{(LONG)(right ? help.right + dpi(app, 8) : help.left - dpi(app, 8)), app.height / 2};
+        check(!touchDown(app, app.hwnd, 75, outside, ms += 1000), "help backdrop leaves its tap to mouse emulation");
+        handleMouseDown(app, app.hwnd, MK_LBUTTON, MAKELPARAM(outside.x, outside.y));
+        handleMouseUp(app, app.hwnd, 0, MAKELPARAM(outside.x, outside.y));
+        check(!app.showHelp && !app.touch.flinging && app.scrollY == pageBeforeHelp,
+              "either side closes help and consumes the click");
+    }
 
     // Edit mode: the editor's text pans, a tap places the caret, and a pan
     // on the preview takes the editor along
@@ -273,7 +467,85 @@ void scenario(App& app, const char* path, int width, float scale) {
     check(app.editorScrollY > 0 && std::fabs(app.scrollY - 300) <= dpi(app, 90),
           "a pan on the preview takes the editor along" + where + ": page " + std::to_string(app.scrollY) +
               ", editor " + std::to_string(app.editorScrollY));
-    exitEditMode(app);
+    // A preview link must survive the following frames' source-to-preview sync.
+    app.editorScrollY = 0;
+    editFrame(app);
+    const auto sourceBeforeJump = app.editorText;
+    const bool dirtyBeforeJump = app.editorDirty;
+    const size_t caretBeforeJump = app.editorCursorPos;
+    tapAt(app, 70, wordPoint(app, L"jump to the end"));
+    check(app.editorScrollY > 0, "a preview anchor jump also moves the source viewport" + where);
+    editFrame(app);
+    editFrame(app);
+    check(app.scrollY > app.height && app.editorScrollY > 0,
+          "a preview anchor jump stays at its destination after repaint" + where);
+    check(app.editorText == sourceBeforeJump && app.editorDirty == dirtyBeforeJump &&
+              app.editorCursorPos == caretBeforeJump,
+          "preview link navigation does not edit source or move its caret" + where);
+    controlRoutingScenario(app);
+    editorHoldScenario(app);
+    app.editorScrollY = 0;
+    editFrame(app);
+    const auto sourceBeforeHold = app.editorText;
+    const POINT previewFrom = wordPoint(app, L"lavender"), previewTo = wordPoint(app, L"rosemary");
+    touchDown(app, app.hwnd, 71, previewFrom, ms += 1000);
+    touchHold(app, app.hwnd);
+    check(selected(app) == L"lavender", "split-preview hold selects rendered text");
+    touchMove(app, app.hwnd, 71, previewTo, ms += 100);
+    const auto previewSelection = selected(app);
+    check(previewSelection.find(L"lavender") == 0 && previewSelection.find(L"rosemary") != std::wstring::npos,
+          "split-preview hold extends through whole words");
+    touchUp(app, app.hwnd, 71, previewTo, ms += 100, false);
+    check(app.showContextMenu && !app.editCtxOpen && !app.selecting && selected(app) == previewSelection,
+          "preview lift opens its copy menu and keeps the selection");
+    check(contextMenuItemEnabled(app, CTX_COPY) && app.editorText == sourceBeforeHold,
+          "preview copy is enabled without modifying source");
+    closeContextMenu(app);
+    check(!app.tableCellRects.empty(), "preview hold fixture contains table cells");
+    if (!app.tableCellRects.empty()) {
+        const auto cell = app.tableCellRects.front();
+        app.scrollY = app.targetScrollY = cell.rect.top - chromeTopHeight(app) - dpi(app, 80);
+        const POINT p{(LONG)(documentViewportX(app) + cell.rect.left + dpi(app, 12)),
+                      (LONG)(cell.rect.top - app.scrollY + dpi(app, 12))};
+        touchDown(app, app.hwnd, 72, p, ms += 1000);
+        touchHold(app, app.hwnd);
+        check(!app.tableEditActive && app.selecting, "holding a preview cell selects instead of opening its editor");
+        touchUp(app, app.hwnd, 72, p, ms += 100, false);
+        check(app.showContextMenu && !app.tableEditActive, "table hold opens the preview copy menu");
+        closeContextMenu(app);
+    }
+    // The existing application menu provides a touch exit without bypassing
+    // the same unsaved-changes guard used by Esc.
+    auto exitThroughMenu = [&] {
+        openContextMenu(app, dpi(app, 4), chromeTopHeight(app), true);
+        const auto& entries = contextMenuEntries(app);
+        int row = -1;
+        for (int i = 0; i < (int)entries.size(); ++i)
+            if (entries[i].action == CTX_END_EDIT) row = i;
+        check(row >= 0, "editing application menu offers Exit editing");
+        if (row < 0) return;
+        const int x = (int)(app.contextMenuX + dpi(app, 20));
+        const int y = (int)(app.contextMenuY + contextMenuItemTop(app, row) + contextMenuItemHeight(app) / 2);
+        handleMouseDown(app, app.hwnd, MK_LBUTTON, MAKELPARAM(x, y));
+        handleMouseUp(app, app.hwnd, 0, MAKELPARAM(x, y));
+    };
+    const auto pathBeforeExit = app.currentFile;
+    keystroke(app, 'X', {}, L'x');
+    const auto changedText = app.editorText;
+    check(app.editorDirty, "the exit-menu fixture has an unsaved edit");
+    exitThroughMenu();
+    check(app.editMode && app.confirmExitPending && app.editorText == changedText,
+          "Exit editing asks before discarding unsaved source");
+    confirmExitAction(app, app.hwnd, 3);
+    check(app.editMode && app.editorDirty && !app.confirmExitPending,
+          "Keep editing cancels the menu exit");
+    exitThroughMenu();
+    confirmExitAction(app, app.hwnd, 2);
+    check(!app.editMode && app.currentFile == pathBeforeExit, "discard returns to the same document's reader");
+    enterEditMode(app);
+    exitThroughMenu();
+    check(!app.editMode && !app.confirmExitPending && app.currentFile == pathBeforeExit,
+          "a clean editor closes directly from the application menu");
 }
 }  // namespace
 

@@ -1,5 +1,7 @@
 #include "frontmatter_ui.h"
 #include "editor.h"
+#include "live_editor.h"
+#include "live_text.h"
 #include "document.h"
 #include "drafts.h"
 #include "signals.h"
@@ -16,8 +18,10 @@
 #include "i18n.h"
 #include "input.h"
 #include "sidepanels.h"
+#include "source_style.h"
 
 #include "export.h"
+#include "sheet_ui.h"
 
 #include <filesystem>
 #include <fstream>
@@ -112,6 +116,8 @@ static IDWriteTextLayout* cachedEditorLineLayout(App& app, size_t lineStart, siz
         app.editorLineLayoutCache.erase(it);
     }
     IDWriteTextLayout* layout = createEditorLineLayout(app, lineStart, lineLen);
+    // Drawn lines in colour (#268); hit tests lay lines out plain, at the same widths
+    sourceHighlightLine(app, layout, lineStart, lineLen);
     app.editorLineLayoutCache[lineStart] = {
         layout, lineLen, ++app.editorLayoutUseClock};
 
@@ -208,6 +214,7 @@ static void rebuildEditorRowMetrics(App& app);
 
 void rebuildLineStarts(App& app) {
     app.editorCaretUpstreamPos = std::wstring::npos;
+    ++app.editorTextRevision;
     app.clearEditorLineLayoutCache();
     app.editorLineStarts.clear();
     app.editorLineStarts.push_back(0);
@@ -255,7 +262,7 @@ static void rebuildEditorRowMetrics(App& app) {
     app.editorRowStarts.clear();
     app.editorTotalRows = 0;
     app.editorRowMetricsWidth = -1.0f;
-    if (!editorWrapOn(app) || !app.editMode) return;
+    if (!editorWrapOn(app) || !app.editMode || editorLiveOn(app)) return;
 
     float maxTextWidth = editorTextMaxWidth(app);
     app.editorRowMetricsWidth = maxTextWidth;
@@ -323,9 +330,9 @@ size_t editorTopVisibleLine(App& app) {
 // The other way round from syncPreviewToEditor: the editor scrolls to the
 // source line at the preview's top, and the next sync keeps the preview
 // there. A drag on the preview's scrollbar moves both panes (#280), as the
-// wheel over the preview does.
+// wheel over the preview does. Live's page has no source beside it.
 void editorFollowPreview(App& app) {
-    if (!editorPreviewVisible(app) || app.editorReadingPreview || app.scrollAnchors.empty() ||
+    if (!editSplitPreview(app) || app.scrollAnchors.empty() ||
         app.editorLineByteOffsets.empty() || app.editorLineStarts.empty()) {
         return;
     }
@@ -382,10 +389,12 @@ void editorFollowPreview(App& app) {
 
 // The edit-mode preview follows the editor: the editor's top line maps
 // through the source-offset scroll anchors the layout records to a
-// preview scroll position (#77, #85). Called once per frame.
+// preview scroll position (#77, #85). Called once per frame. Live's page
+// scrolls on its own: following the source, whose height a visit to it
+// had measured, held the page still under the wheel and pulled it back
+// from the caret (#307)
 void syncPreviewToEditor(App& app) {
-    if (editorPreviewVisible(app) && !app.editorReadingPreview && !app.scrollAnchors.empty() &&
-        !app.editorLineByteOffsets.empty()) {
+    if (editSplitPreview(app) && !app.scrollAnchors.empty() && !app.editorLineByteOffsets.empty()) {
         // Find the editor's top visible line (row-aware in wrap mode)
         int topLine = (int)editorTopVisibleLine(app);
         topLine = std::max(0, std::min(topLine, (int)app.editorLineByteOffsets.size() - 1));
@@ -625,6 +634,36 @@ void editorReplaceRangeExternal(App& app, size_t start, size_t end,
     app.editorRowMetricsWidth = -1.0f;
 }
 
+static void scheduleReparse(App& app);
+
+void editorApplyLiveEdits(App& app, const std::vector<LiveText::Change>& changes, size_t caret, size_t anchor) {
+    if (!changes.empty()) {
+        const size_t before = app.editorCursorPos;
+        const LiveText::Change& first = changes.front();
+        if (changes.size() == 1 && !first.removed && first.inserted.size() == 1) {
+            app.editorText.insert(first.at, first.inserted);
+            pushUndo(app, App::EditAction::Insert, first.at, first.inserted, before, caret);
+        } else {
+            UndoGroupScope group(app);
+            for (const LiveText::Change& c : changes) {
+                size_t at = std::min(c.at, app.editorText.size());
+                size_t removed = std::min(c.removed, app.editorText.size() - at);
+                pushReplaceUndo(app, at, app.editorText.substr(at, removed), c.inserted, before, caret);
+                app.editorText.replace(at, removed, c.inserted);
+            }
+        }
+        app.editorExtraCarets.clear();
+        rebuildLineStarts(app);
+        scheduleReparse(app);
+    }
+    app.editorCursorPos = std::min(caret, app.editorText.size());
+    app.editorSelStart = std::min(anchor, app.editorText.size());
+    app.editorSelEnd = app.editorCursorPos;
+    app.editorHasSelection = app.editorSelStart != app.editorSelEnd;
+    app.editorCaretUpstreamPos = std::wstring::npos;
+    app.editorDesiredCol = -1;
+}
+
 // Pad a markdown table for insertion at pos: a table cannot interrupt a
 // paragraph, so a blank line must separate it on both sides (#181)
 static std::wstring padTableForInsert(const App& app,
@@ -665,6 +704,21 @@ static void editorUndo(App& app) {
     rebuildLineStarts(app);
     app.editorHasSelection = false;
     app.editorDesiredCol = -1;
+}
+
+static void editorRedo(App& app);
+
+static void editorEnsureCursorVisible(App& app);
+
+void editorRevealCaret(App& app) {
+    rebuildEditorRowMetrics(app);
+    editorEnsureCursorVisible(app);
+}
+
+void editorUndoRedo(App& app, bool redo) {
+    if (redo) editorRedo(app);
+    else editorUndo(app);
+    scheduleReparse(app);
 }
 
 static void editorRedo(App& app) {
@@ -1388,7 +1442,7 @@ static void scheduleReparse(App& app) {
     }
     // No preview pane and no word count — nothing to keep in sync until
     // one of them is shown again
-    if (!app.editorShowPreview && !app.showWordCount) return;
+    if (!app.editorShowPreview && !app.showWordCount && !editorLiveOn(app)) return;
     // Debounce: coalesce rapid typing into one reparse per pause. WM_TIMER
     // calls editorReparse, which kills the timer. 300ms so brief pauses
     // mid-typing (common with IME input) don't trigger a full preview
@@ -1432,6 +1486,7 @@ void editorReparse(App& app, bool force) {
         app.root = result.root;
         app.parseTimeUs = result.parseTimeUs;
         app.layoutDirty = true;
+        liveTextParsed(app);
         InvalidateRect(app.hwnd, nullptr, FALSE);
     }
     if (app.showWordCount) editorRefreshDocCounts(app, result.success ? result.root : nullptr);
@@ -1470,6 +1525,8 @@ static void editHintSessionBegin(App& app) {
 static void enterEditModeWithContent(App& app, const std::string& content,
                                      bool intro = true) {
     app.editorReadingPreview = false;
+    app.editorRawDocument = isPlainTextDocumentPath(app.currentFile) || isMermaidDocumentPath(app.currentFile) ||
+                            isPlantUmlDocumentPath(app.currentFile);
     // The unified editor owns the whole layout: side panels close on
     // entry, pinned or not (#156) - the pin survives for the next open
     app.showToc = false;
@@ -1487,7 +1544,11 @@ static void enterEditModeWithContent(App& app, const std::string& content,
     app.editorExtraCarets.clear();
     app.editorDocCountsStale = true;
     app.editorSelCountsKey.clear();
-    app.editorText = fromUtf8(content);
+    // A byte order mark belongs to the file, not the text: nothing typed
+    // can land ahead of it, and writeEditorFile puts it back. The walks
+    // below still count its bytes, as the reading view's offsets do.
+    app.editorBom = startsWithUtf8Bom(content);
+    app.editorText = fromUtf8(content.substr(app.editorBom ? UTF8_BOM.size() : 0));
     // Normalize \r\n to \n
     std::wstring normalized;
     normalized.reserve(app.editorText.size());
@@ -1609,8 +1670,10 @@ void editorScrollToSourceOffset(App& app, size_t byteOffset) {
 }
 
 void restoreEditBuffer(App& app, const std::wstring& text, bool dirty,
-                       float scrollY, size_t cursor) {
-    enterEditModeWithContent(app, toUtf8(text), false);
+                       float scrollY, size_t cursor, bool bom) {
+    std::string content = toUtf8(text);
+    if (bom) content.insert(0, UTF8_BOM);
+    enterEditModeWithContent(app, content, false);
     app.editorDirty = dirty;
     app.editorCursorPos = std::min(cursor, app.editorText.size());
     app.editorScrollY = std::max(0.0f, scrollY);
@@ -1622,6 +1685,8 @@ void restoreEditBuffer(App& app, const std::wstring& text, bool dirty,
 
 void enterEditMode(App& app) {
     if (app.editMode) { setEditorReadingPreview(app, false); return; }
+    // A sheet saves before its own text opens in the editor
+    if (sheetActive(app)) sheetLeave(app);
     if (app.currentFile.empty()) {
         if (app.startPageEmbeddedOpen) {
             // Learn documents have no backing file. Edit an untitled copy;
@@ -1721,6 +1786,7 @@ void exitEditMode(App& app) {
     app.clearEditorLineLayoutCache();
     app.editorText.clear();
     app.editorLineStarts.clear();
+    ++app.editorTextRevision;
     app.editorExtraCarets.clear();
     app.undoStack.clear();
     app.redoStack.clear();
@@ -1795,16 +1861,24 @@ void setEditorReadingPreview(App& app, bool reading) {
     InvalidateRect(app.hwnd, nullptr, FALSE);
 }
 
-// The pill names its shortcut, so it grows to fit its label: Read carries
-// Ctrl+Shift+E since Esc leaves edit mode again (#242). It never sits over
-// the text for good (#245): see editorReadingButtonShown.
+// The pill names its shortcut: Read carries Ctrl+Shift+E since Esc leaves
+// edit mode again (#242), and Ctrl+E in Live, where that reads (#308)
+std::wstring editorReadingButtonLabel(const App& app) {
+    std::wstring label = tr(app, app.editorReadingPreview ? "editor.resume" : "editor.read");
+    size_t at = label.find(L"Ctrl+Shift+E");
+    if (editorLiveOn(app) && at != std::wstring::npos) label.replace(at, 12, L"Ctrl+E");
+    return label;
+}
+
+// The pill grows to fit its label. It never sits over the text for good
+// (#245): see editorReadingButtonShown.
 D2D1_RECT_F editorReadingButtonRect(const App& app) {
     float width = dpi(app, 132);
     if (app.dwriteFactory && app.codeFormat) {
-        const wchar_t* label = tr(app, app.editorReadingPreview ? "editor.resume" : "editor.read");
+        const std::wstring label = editorReadingButtonLabel(app);
         Microsoft::WRL::ComPtr<IDWriteTextLayout> layout;
         DWRITE_TEXT_METRICS metrics{};
-        if (SUCCEEDED(app.dwriteFactory->CreateTextLayout(label, static_cast<UINT32>(wcslen(label)),
+        if (SUCCEEDED(app.dwriteFactory->CreateTextLayout(label.c_str(), static_cast<UINT32>(label.size()),
                 app.codeFormat, 4096.0f, 256.0f, layout.GetAddressOf()))) {
             useUiFontFallback(app, layout.Get());
             if (SUCCEEDED(layout->GetMetrics(&metrics)))
@@ -1879,9 +1953,9 @@ void renderEditorReadingButton(App& app) {
     D2D1_COLOR_F ink = app.theme.accent;
     ink.a *= alpha;
     app.brush->SetColor(ink);
-    auto label=tr(app,app.editorReadingPreview ? "editor.resume" : "editor.read");
+    const std::wstring label=editorReadingButtonLabel(app);
     Microsoft::WRL::ComPtr<IDWriteTextLayout> layout;
-    if (SUCCEEDED(app.dwriteFactory->CreateTextLayout(label,static_cast<UINT32>(wcslen(label)),app.codeFormat,r.right-r.left,r.bottom-r.top,layout.GetAddressOf()))) {
+    if (SUCCEEDED(app.dwriteFactory->CreateTextLayout(label.c_str(),static_cast<UINT32>(label.size()),app.codeFormat,r.right-r.left,r.bottom-r.top,layout.GetAddressOf()))) {
         useUiFontFallback(app, layout.Get());
         layout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
         layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
@@ -1936,9 +2010,10 @@ void openFileDialog(App& app, HWND hwnd) {
     OPENFILENAMEW ofn = {};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = hwnd;
-    ofn.lpstrFilter = L"Documents (*.md;*.mmd;*.txt;*.json;*.yaml;...)\0"
-                      L"*.md;*.markdown;*.mmd;*.txt;*.json;*.yaml;*.yml;*.toml;"
+    ofn.lpstrFilter = L"Documents (*.md;*.mmd;*.smd;*.txt;*.json;*.yaml;...)\0"
+                      L"*.md;*.markdown;*.mmd;*.smd;*.canvas;*.txt;*.json;*.yaml;*.yml;*.toml;"
                       L"*.ini;*.csv;*.log;*.puml;*.plantuml\0"
+                      L"Sheets (*.smd;*.canvas)\0*.smd;*.canvas\0"
                       L"Markdown / Mermaid (*.md;*.markdown;*.mmd)\0"
                       L"*.md;*.markdown;*.mmd;*.puml;*.plantuml\0"
                       L"All files (*.*)\0*.*\0";
@@ -1965,6 +2040,8 @@ void openFileDialog(App& app, HWND hwnd) {
 }
 
 void renderQuickNoteEmptyState(App& app) {
+    app.quickNoteButtonRect = {};
+    app.quickNoteSheetRect = {};
     if (!quickNoteEmptyStateActive(app) || !app.editorShowPreview) return;
     IDWriteTextFormat* format = app.folderBrowserFormat;
     if (!format || !app.renderTarget || !app.brush || !app.dwriteFactory)
@@ -1974,108 +2051,161 @@ void renderQuickNoteEmptyState(App& app) {
     float paneW = documentViewportWidth(app);
     if (paneW < dpi(app, 180.0f)) return;  // pane too narrow to bother
 
-    const wchar_t* label = tr(app, "empty.open_button");
+    // Two buttons: Open a file with its Ctrl+O keycap, and New sheet
+    const wchar_t* labels[2] = { tr(app, "empty.open_button"),
+                                 tr(app, "start.new_sheet") };
     const wchar_t* chip = L"Ctrl+O";
 
-    IDWriteTextLayout* labelLayout = nullptr;
+    IDWriteTextLayout* labelLayouts[2] = {};
     IDWriteTextLayout* chipLayout = nullptr;
-    app.dwriteFactory->CreateTextLayout(label, (UINT32)wcslen(label), format,
-                                        2000.0f, 100.0f, &labelLayout);
+    for (int i = 0; i < 2; i++)
+        app.dwriteFactory->CreateTextLayout(labels[i], (UINT32)wcslen(labels[i]),
+                                            format, 2000.0f, 100.0f,
+                                            &labelLayouts[i]);
     app.dwriteFactory->CreateTextLayout(chip, (UINT32)wcslen(chip), format,
                                         2000.0f, 100.0f, &chipLayout);
-    if (!labelLayout || !chipLayout) {
-        if (labelLayout) labelLayout->Release();
+    if (!labelLayouts[0] || !labelLayouts[1] || !chipLayout) {
+        for (IDWriteTextLayout* layout : labelLayouts)
+            if (layout) layout->Release();
         if (chipLayout) chipLayout->Release();
         return;
     }
-    DWRITE_TEXT_METRICS lm{}, cm{};
-    labelLayout->GetMetrics(&lm);
+    DWRITE_TEXT_METRICS lm[2] = {}, cm{};
+    labelLayouts[0]->GetMetrics(&lm[0]);
+    labelLayouts[1]->GetMetrics(&lm[1]);
     chipLayout->GetMetrics(&cm);
 
-    // Button geometry: folder icon, label, and a Ctrl+O keycap chip
+    // Button geometry: an icon, the label, and for Open its keycap chip;
+    // side by side when the pane has room, else one over the other
     float iconW = dpi(app, 20.0f);
     float chipW = cm.width + dpi(app, 16.0f);
-    float btnW = dpi(app, 18.0f) + iconW + dpi(app, 10.0f) + lm.width +
-                 dpi(app, 12.0f) + chipW + dpi(app, 14.0f);
+    float widths[2] = {
+        dpi(app, 18.0f) + iconW + dpi(app, 10.0f) + lm[0].width +
+            dpi(app, 12.0f) + chipW + dpi(app, 14.0f),
+        dpi(app, 18.0f) + iconW + dpi(app, 10.0f) + lm[1].width +
+            dpi(app, 18.0f) };
     float btnH = dpi(app, 44.0f);
+    float gap = dpi(app, 10.0f);
     float chromeTop = chromeTopHeight(app);
     float cx = paneX + paneW * 0.5f;
     float cy = chromeTop + ((float)app.height - chromeTop) * 0.5f -
                dpi(app, 40.0f);
-    D2D1_RECT_F btn = D2D1::RectF(cx - btnW * 0.5f, cy - btnH * 0.5f,
-                                  cx + btnW * 0.5f, cy + btnH * 0.5f);
-    app.quickNoteButtonRect = btn;
+    D2D1_RECT_F rects[2];
+    if (widths[0] + gap + widths[1] <= paneW - dpi(app, 32.0f)) {
+        float left = cx - (widths[0] + gap + widths[1]) * 0.5f;
+        rects[0] = D2D1::RectF(left, cy - btnH * 0.5f, left + widths[0],
+                               cy + btnH * 0.5f);
+        rects[1] = D2D1::RectF(rects[0].right + gap, rects[0].top,
+                               rects[0].right + gap + widths[1],
+                               rects[0].bottom);
+    } else {
+        float w = std::max(widths[0], widths[1]);
+        rects[0] = D2D1::RectF(cx - w * 0.5f, cy - btnH - gap * 0.5f,
+                               cx + w * 0.5f, cy - gap * 0.5f);
+        rects[1] = D2D1::RectF(rects[0].left, cy + gap * 0.5f,
+                               rects[0].right, cy + btnH + gap * 0.5f);
+    }
+    app.quickNoteButtonRect = rects[0];
+    app.quickNoteSheetRect = rects[1];
 
-    // Raised card over the empty pane; a touch stronger under the cursor
-    D2D1_COLOR_F fill = app.theme.text;
-    fill.a = app.quickNoteButtonHover ? 0.10f : 0.06f;
-    app.brush->SetColor(fill);
-    app.renderTarget->FillRoundedRectangle(
-        D2D1::RoundedRect(btn, dpi(app, 8.0f), dpi(app, 8.0f)), app.brush);
-    D2D1_COLOR_F border = app.theme.text;
-    border.a = 0.12f;
-    app.brush->SetColor(border);
-    app.renderTarget->DrawRoundedRectangle(
-        D2D1::RoundedRect(btn, dpi(app, 8.0f), dpi(app, 8.0f)), app.brush,
-        1.0f);
+    bool hover[2] = { app.quickNoteButtonHover, app.quickNoteSheetHover };
+    for (int i = 0; i < 2; i++) {
+        const D2D1_RECT_F& btn = rects[i];
+        float my = (btn.top + btn.bottom) * 0.5f;
+        // Raised card over the empty pane; a touch stronger under the cursor
+        D2D1_COLOR_F fill = app.theme.text;
+        fill.a = hover[i] ? 0.10f : 0.06f;
+        app.brush->SetColor(fill);
+        app.renderTarget->FillRoundedRectangle(
+            D2D1::RoundedRect(btn, dpi(app, 8.0f), dpi(app, 8.0f)), app.brush);
+        D2D1_COLOR_F border = app.theme.text;
+        border.a = 0.12f;
+        app.brush->SetColor(border);
+        app.renderTarget->DrawRoundedRectangle(
+            D2D1::RoundedRect(btn, dpi(app, 8.0f), dpi(app, 8.0f)), app.brush,
+            1.0f);
 
-    // Folder icon: tab flap over a rounded body, in the accent color
-    float ix = btn.left + dpi(app, 18.0f);
-    float iy = cy - dpi(app, 7.5f);
-    app.brush->SetColor(app.theme.accent);
-    app.renderTarget->FillRoundedRectangle(
-        D2D1::RoundedRect(D2D1::RectF(ix, iy, ix + dpi(app, 9.0f),
-                                      iy + dpi(app, 6.0f)),
-                          dpi(app, 1.5f), dpi(app, 1.5f)),
-        app.brush);
-    app.renderTarget->FillRoundedRectangle(
-        D2D1::RoundedRect(D2D1::RectF(ix, iy + dpi(app, 2.5f), ix + iconW,
-                                      iy + dpi(app, 15.0f)),
-                          dpi(app, 2.0f), dpi(app, 2.0f)),
-        app.brush);
+        float ix = btn.left + dpi(app, 18.0f);
+        float iy = my - dpi(app, 7.5f);
+        app.brush->SetColor(app.theme.accent);
+        if (i == 0) {
+            // Folder icon: tab flap over a rounded body
+            app.renderTarget->FillRoundedRectangle(
+                D2D1::RoundedRect(D2D1::RectF(ix, iy, ix + dpi(app, 9.0f),
+                                              iy + dpi(app, 6.0f)),
+                                  dpi(app, 1.5f), dpi(app, 1.5f)),
+                app.brush);
+            app.renderTarget->FillRoundedRectangle(
+                D2D1::RoundedRect(D2D1::RectF(ix, iy + dpi(app, 2.5f),
+                                              ix + iconW, iy + dpi(app, 15.0f)),
+                                  dpi(app, 2.0f), dpi(app, 2.0f)),
+                app.brush);
+        } else {
+            // Sheet icon: four cards, as the start page lists a sheet
+            float card = dpi(app, 8.0f), cardGap = dpi(app, 3.0f);
+            for (int k = 0; k < 4; k++) {
+                float kx = ix + dpi(app, 0.5f) + (float)(k % 2) * (card + cardGap);
+                float ky = my - card - cardGap * 0.5f + (float)(k / 2) * (card + cardGap);
+                app.renderTarget->FillRoundedRectangle(
+                    D2D1::RoundedRect(D2D1::RectF(kx, ky, kx + card, ky + card),
+                                      dpi(app, 1.5f), dpi(app, 1.5f)),
+                    app.brush);
+            }
+        }
 
-    // Label
-    float labelX = ix + iconW + dpi(app, 10.0f);
-    app.brush->SetColor(app.theme.text);
-    app.renderTarget->DrawTextLayout(
-        D2D1::Point2F(labelX, cy - lm.height * 0.5f), labelLayout, app.brush);
+        // Label
+        float labelX = ix + iconW + dpi(app, 10.0f);
+        app.brush->SetColor(app.theme.text);
+        app.renderTarget->DrawTextLayout(
+            D2D1::Point2F(labelX, my - lm[i].height * 0.5f), labelLayouts[i],
+            app.brush);
+        if (i != 0) continue;
 
-    // Ctrl+O keycap chip
-    float chipX = labelX + lm.width + dpi(app, 12.0f);
-    float chipH = dpi(app, 22.0f);
-    D2D1_RECT_F chipRect = D2D1::RectF(chipX, cy - chipH * 0.5f,
-                                       chipX + chipW, cy + chipH * 0.5f);
-    D2D1_COLOR_F chipBg = app.theme.text;
-    chipBg.a = 0.08f;
-    app.brush->SetColor(chipBg);
-    app.renderTarget->FillRoundedRectangle(
-        D2D1::RoundedRect(chipRect, dpi(app, 4.0f), dpi(app, 4.0f)),
-        app.brush);
-    D2D1_COLOR_F chipText = app.theme.text;
-    chipText.a = 0.55f;
-    app.brush->SetColor(chipText);
-    app.renderTarget->DrawTextLayout(
-        D2D1::Point2F(chipX + dpi(app, 8.0f), cy - cm.height * 0.5f),
-        chipLayout, app.brush);
-    labelLayout->Release();
+        // Ctrl+O keycap chip
+        float chipX = labelX + lm[0].width + dpi(app, 12.0f);
+        float chipH = dpi(app, 22.0f);
+        D2D1_RECT_F chipRect = D2D1::RectF(chipX, my - chipH * 0.5f,
+                                           chipX + chipW, my + chipH * 0.5f);
+        D2D1_COLOR_F chipBg = app.theme.text;
+        chipBg.a = 0.08f;
+        app.brush->SetColor(chipBg);
+        app.renderTarget->FillRoundedRectangle(
+            D2D1::RoundedRect(chipRect, dpi(app, 4.0f), dpi(app, 4.0f)),
+            app.brush);
+        D2D1_COLOR_F chipText = app.theme.text;
+        chipText.a = 0.55f;
+        app.brush->SetColor(chipText);
+        app.renderTarget->DrawTextLayout(
+            D2D1::Point2F(chipX + dpi(app, 8.0f), my - cm.height * 0.5f),
+            chipLayout, app.brush);
+    }
+    labelLayouts[0]->Release();
+    labelLayouts[1]->Release();
     chipLayout->Release();
 
-    // Hint lines, centered under the button
+    // Hint lines, centered under the buttons, wrapping in a narrow pane.
+    // Live's page says how to begin on its own first line instead.
     const char* hintKeys[2] = { "empty.hint1", "empty.hint2" };
-    float hintY = btn.bottom + dpi(app, 18.0f);
+    float hintY = rects[1].bottom + dpi(app, 18.0f);
+    float hintW = paneW - dpi(app, 32.0f);
     for (const char* key : hintKeys) {
+        if (editorLiveOn(app)) break;
         const wchar_t* hint = tr(app, key);
         IDWriteTextLayout* layout = nullptr;
         app.dwriteFactory->CreateTextLayout(hint, (UINT32)wcslen(hint),
-                                            format, 2000.0f, 100.0f, &layout);
+                                            format, hintW, 1000.0f, &layout);
         if (layout) {
+            layout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            layout->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+            DWRITE_TRIMMING noTrim = { DWRITE_TRIMMING_GRANULARITY_NONE, 0, 0 };
+            layout->SetTrimming(&noTrim, nullptr);
             DWRITE_TEXT_METRICS hm{};
             layout->GetMetrics(&hm);
             D2D1_COLOR_F muted = app.theme.text;
             muted.a = 0.5f;
             app.brush->SetColor(muted);
             app.renderTarget->DrawTextLayout(
-                D2D1::Point2F(cx - hm.width * 0.5f, hintY), layout,
+                D2D1::Point2F(cx - hintW * 0.5f, hintY), layout,
                 app.brush);
             hintY += hm.height + dpi(app, 4.0f);
             layout->Release();
@@ -2127,6 +2257,8 @@ static void writeEditorFile(App& app, HWND hwnd) {
         }
         utf8 = std::move(crlf);
     }
+    // The byte order mark the file was opened with goes back in front
+    if (app.editorBom) utf8.insert(0, UTF8_BOM);
 
     std::ofstream out(widePath, std::ios::binary);
     if (out) {
@@ -2596,6 +2728,8 @@ static void editorNavigate(App& app, WPARAM key, bool ctrl, bool shift) {
     }
 }
 
+static void editorInsertLink(App& app, HWND hwnd);
+
 void handleEditorKeyDown(App& app, HWND hwnd, WPARAM wParam) {
     if (!shortcutModifiersAllowed(static_cast<unsigned>(wParam))) return;
     bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
@@ -2783,69 +2917,9 @@ void handleEditorKeyDown(App& app, HWND hwnd, WPARAM wParam) {
                     InvalidateRect(hwnd, nullptr, FALSE);
                 }
                 return;
-            case 'V': {
-                if (!app.editorExtraCarets.empty()) {
-                    editorPasteAtCarets(app, hwnd, editorGetClipboard(hwnd));
-                    return;
-                }
-                std::wstring paste = editorGetClipboard(hwnd);
-                // A bitmap without text (a screenshot) saves as PNG beside
-                // the document and pastes as its markdown link
-                if (paste.empty() && !app.currentFile.empty() &&
-                    IsClipboardFormatAvailable(CF_BITMAP)) {
-                    namespace fs = std::filesystem;
-                    fs::path doc(toWide(app.currentFile));
-                    std::wstring stem = doc.stem().wstring();
-                    std::wstring name;
-                    fs::path target;
-                    for (int i = 1; i < 100; i++) {
-                        wchar_t suffix[24];
-                        swprintf_s(suffix, _countof(suffix),
-                                   L"-img-%02d.png", i);
-                        std::wstring candidate = stem + suffix;
-                        fs::path p = doc.parent_path() / candidate;
-                        std::error_code ec;
-                        if (!fs::exists(p, ec)) {
-                            name = candidate;
-                            target = p;
-                            break;
-                        }
-                    }
-                    if (!name.empty() &&
-                        clipboardImageToPngFile(app, hwnd,
-                                                target.wstring())) {
-                        std::wstring linkName = name;
-                        size_t sp = 0;  // spaces break the link target
-                        while ((sp = linkName.find(L' ', sp)) !=
-                               std::wstring::npos) {
-                            linkName.replace(sp, 1, L"%20");
-                            sp += 3;
-                        }
-                        paste = L"![image](" + linkName + L")";
-                    }
-                }
-                if (!paste.empty()) {
-                    if (app.editorHasSelection) editorDeleteSelection(app);
-                    // Excel range copies arrive as TSV: paste them as a
-                    // markdown table (#181). Ctrl+Shift+V pastes raw.
-                    if (!(GetKeyState(VK_SHIFT) & 0x8000) &&
-                        tsvLooksLikeTable(paste)) {
-                        paste = padTableForInsert(
-                            app, tsvToMarkdownTable(paste), app.editorCursorPos);
-                        signalPushKey(app, SIG_SUCCESS, SIGI_CHECK,
-                                      "toast.paste_table");
-                    }
-                    size_t before = app.editorCursorPos;
-                    app.editorText.insert(app.editorCursorPos, paste);
-                    app.editorCursorPos += paste.size();
-                    pushUndo(app, App::EditAction::Insert, before, paste, before, app.editorCursorPos);
-                    rebuildLineStarts(app);
-                    scheduleReparse(app);
-                    editorEnsureCursorVisible(app);
-                    InvalidateRect(hwnd, nullptr, FALSE);
-                }
+            case 'V':
+                editorPasteClipboard(app, hwnd, (GetKeyState(VK_SHIFT) & 0x8000) != 0);
                 return;
-            }
             case 'P':
                 // Print preview of the document as currently edited, saved
                 // or not (openPrintPreview re-parses; Ctrl+E is the pane)
@@ -2890,6 +2964,14 @@ void handleEditorKeyDown(App& app, HWND hwnd, WPARAM wParam) {
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return;
             }
+            case 'K':
+                // The rail's Link button's shortcut
+                editorInsertLink(app, hwnd);
+                return;
+            case VK_OEM_2:
+                // Ctrl+/ switches to Live (docs/live-editor.md)
+                setEditorLive(app, hwnd, true);
+                return;
             case 'D':
                 // Select the word, then add its next occurrence (#251)
                 editorSelectNextOccurrence(app);
@@ -2927,12 +3009,14 @@ void handleEditorKeyDown(App& app, HWND hwnd, WPARAM wParam) {
 bool editorAltArrowKey(App& app, HWND hwnd, WPARAM wParam) {
     if (wParam != VK_UP && wParam != VK_DOWN) return false;
     if (!(GetKeyState(VK_MENU) & 0x8000) || (GetKeyState(VK_SHIFT) & 0x8000)) return false;
-    if (!sourceEditorHasFocus(app) || app.confirmExitPending || app.createRefPending ||
+    const bool live = editorLiveOn(app) && !(app.showSearch && app.searchActive) && !app.tableEditActive;
+    if ((!live && !sourceEditorHasFocus(app)) || app.confirmExitPending || app.createRefPending ||
         app.editCtxOpen || app.showSettings || app.showHelp || app.showThemeChooser ||
         app.showThemeEditor || app.showShortcutEditor || app.showPrintPreview ||
         app.showContextMenu || app.showTabMenu || app.showTabSwitcher) {
         return false;
     }
+    if (live) return liveAltArrow(app, hwnd, wParam);
     const bool down = wParam == VK_DOWN;
     if (GetKeyState(VK_CONTROL) & 0x8000) {
         editorAddCaretVertical(app, down);
@@ -3067,29 +3151,58 @@ static void editorToggleInlineMark(App& app, HWND hwnd,
 
 // --- Edit rail actions (design t8) --------------------------------------
 
-// Toggle a prefix ("- ", "> ", "- [ ] ") at the caret line's start
-static void editorToggleLinePrefix(App& app, HWND hwnd,
-                                   const std::wstring& prefix) {
-    size_t line = getLineFromPos(app, app.editorCursorPos);
-    size_t ls = app.editorLineStarts[line];
-    bool has = app.editorText.size() >= ls + prefix.size() &&
-               app.editorText.compare(ls, prefix.size(), prefix) == 0;
-    size_t before = app.editorCursorPos;
-    if (has) {
-        std::wstring removed = app.editorText.substr(ls, prefix.size());
-        app.editorText.erase(ls, prefix.size());
-        app.editorCursorPos =
-            before >= ls + prefix.size() ? before - prefix.size() : ls;
-        pushUndo(app, App::EditAction::Delete, ls, removed, before,
-                 app.editorCursorPos);
-    } else {
-        app.editorText.insert(ls, prefix);
-        app.editorCursorPos = before + prefix.size();
-        pushUndo(app, App::EditAction::Insert, ls, prefix, before,
-                 app.editorCursorPos);
+// A list or quote mark on every line a caret is on or a selection takes in
+// (#251, #306), or off them all when they all have it, as Live's rail makes
+// it: one undo step, the carets keeping to the text after the marks
+static void editorToggleLineMarks(App& app, HWND hwnd, live::LineMark::Kind kind) {
+    std::vector<App::EditorCaret> carets = editorAllCarets(app);
+    const std::wstring& t = app.editorText;
+    auto blankLine = [&](size_t line) {
+        size_t ls = app.editorLineStarts[line], le = t.find(L'\n', ls);
+        for (size_t i = ls; i < std::min(le, t.size()); ++i) {
+            if (t[i] != L' ' && t[i] != L'\t') return false;
+        }
+        return true;
+    };
+    // Each caret's lines; a selection ending at a line's start leaves it out
+    std::vector<std::pair<size_t, size_t>> spans;
+    size_t top = (size_t)-1, bottom = 0;
+    for (const auto& caret : carets) {
+        size_t a = caretStart(caret), b = caretEnd(caret);
+        size_t first = getLineFromPos(app, a), last = getLineFromPos(app, b);
+        if (b > a && last > first && app.editorLineStarts[last] == b) --last;
+        spans.push_back({first, last});
+        top = std::min(top, first);
+        bottom = std::max(bottom, last);
     }
+    // A blank line inside a selection of several lines is passed over; a
+    // caret's own line takes the mark even when blank
+    std::vector<char> take(bottom - top + 1, 0);  // 1: unless blank, 2: always
+    for (const auto& [first, last] : spans) {
+        for (size_t line = first; line <= last; ++line) {
+            take[line - top] = std::max(take[line - top], first != last ? (char)1 : (char)2);
+        }
+    }
+    std::vector<size_t> starts;
+    for (size_t line = top; line <= bottom; ++line) {
+        const char want = take[line - top];
+        if (want == 2 || (want == 1 && !blankLine(line))) starts.push_back(app.editorLineStarts[line]);
+    }
+    const std::vector<live::MarkEdit> edits = live::lineMarkEdits(t, starts, kind);
+    if (edits.empty()) return;
+    // One replace over the lines, however many
+    const size_t primary = carets.size() - 1, before = app.editorCursorPos;
+    for (auto& caret : carets) {
+        caret.pos = live::throughMarks(caret.pos, edits);
+        caret.anchor = live::throughMarks(caret.anchor, edits);
+        caret.desiredCol = -1;
+    }
+    const size_t from = edits.front().at, to = edits.back().at + edits.back().removed;
+    const std::wstring marked = live::markedSpan(t, edits);
+    pushReplaceUndo(app, from, t.substr(from, to - from), marked, before, carets[primary].pos);
+    app.editorText.replace(from, to - from, marked);
+    editorStoreCarets(app, std::move(carets), primary);
     rebuildLineStarts(app);
-    app.editorDesiredCol = -1;
     scheduleReparse(app);
     editorEnsureCursorVisible(app);
     InvalidateRect(hwnd, nullptr, FALSE);
@@ -3203,7 +3316,29 @@ static bool editorSelectionContainsPoint(App& app, size_t line, float x, float y
     return false;
 }
 
+void editorTouchSelection(App& app, int x, int y, bool begin) {
+    if (begin) {
+        focusSourceEditor(app);
+        app.editorExtraCarets.clear();
+    }
+    size_t first, last;
+    editorWordAt(app, editorPosFromClick(app, x, y), first, last);
+    auto& t = app.touch;
+    if (begin) {
+        t.editorWordStart = first;
+        t.editorWordEnd = last;
+    }
+    app.editorSelStart = std::min(first, t.editorWordStart);
+    app.editorSelEnd = std::max(last, t.editorWordEnd);
+    app.editorCursorPos = first < t.editorWordStart ? app.editorSelStart : app.editorSelEnd;
+    app.editorHasSelection = app.editorSelStart != app.editorSelEnd;
+    app.editorCaretUpstreamPos = std::wstring::npos;
+    app.editorDesiredCol = -1;
+    InvalidateRect(app.hwnd, nullptr, FALSE);
+}
+
 void editorPrepareContextMenuAt(App& app, int x, int y) {
+    if (editorLiveOn(app)) return;  // Live placed its caret already
     focusSourceEditor(app);
     size_t affinity = app.editorCaretUpstreamPos;
     size_t position = editorPosFromClick(app, x, y);
@@ -3235,7 +3370,7 @@ void editorInsertTableGrid(App& app, HWND hwnd, int cols, int rows) {
     editorInsertSnippet(app, hwnd, snippet, 2);
 }
 
-void editorInsertDiagramTemplate(App& app, HWND hwnd, int kind) {
+const wchar_t* diagramTemplate(int kind) {
     static const wchar_t* kTemplates[] = {
         // 0 flowchart
         L"```mermaid\nflowchart TD\n    A[Start] --> B{Decide}\n"
@@ -3269,10 +3404,16 @@ void editorInsertDiagramTemplate(App& app, HWND hwnd, int kind) {
         L"```plantuml\n@startuml\nstart\nif (Edited?) then (yes)\n"
         L"    :Save file;\nelse (no)\n    :Keep editing;\n"
         L"endif\nstop\n@enduml\n```\n",
+        // 10 mind map
+        L"```mermaid\nmindmap\n  root((Idea))\n    First\n    Second\n```\n",
     };
+    return kind >= 0 && kind <= 10 ? kTemplates[kind] : L"";
+}
+
+void editorInsertDiagramTemplate(App& app, HWND hwnd, int kind) {
     if (kind < 0 || kind > 9) return;
     // PlantUML fences are one char wider: caret lands inside the body
-    editorInsertSnippet(app, hwnd, kTemplates[kind], kind >= 7 ? 12 : 11);
+    editorInsertSnippet(app, hwnd, diagramTemplate(kind), kind >= 7 ? 12 : 11);
 }
 
 void editorInsertSnippetPublic(App& app, HWND hwnd,
@@ -3304,6 +3445,72 @@ void editorClipboardCopy(App& app, HWND hwnd) {
     }
 }
 
+void editorPasteClipboard(App& app, HWND hwnd, bool raw) {
+    if (!app.editorExtraCarets.empty()) {
+        editorPasteAtCarets(app, hwnd, editorGetClipboard(hwnd));
+        return;
+    }
+    std::wstring paste = editorGetClipboard(hwnd);
+    // A bitmap without text (a screenshot) saves as PNG beside
+    // the document and pastes as its markdown link
+    if (paste.empty() && !app.currentFile.empty() &&
+        IsClipboardFormatAvailable(CF_BITMAP)) {
+        namespace fs = std::filesystem;
+        fs::path doc(toWide(app.currentFile));
+        std::wstring stem = doc.stem().wstring();
+        std::wstring name;
+        fs::path target;
+        for (int i = 1; i < 100; i++) {
+            wchar_t suffix[24];
+            swprintf_s(suffix, _countof(suffix),
+                       L"-img-%02d.png", i);
+            std::wstring candidate = stem + suffix;
+            fs::path p = doc.parent_path() / candidate;
+            std::error_code ec;
+            if (!fs::exists(p, ec)) {
+                name = candidate;
+                target = p;
+                break;
+            }
+        }
+        if (!name.empty() &&
+            clipboardImageToPngFile(app, hwnd,
+                                    target.wstring())) {
+            std::wstring linkName = name;
+            size_t sp = 0;  // spaces break the link target
+            while ((sp = linkName.find(L' ', sp)) !=
+                   std::wstring::npos) {
+                linkName.replace(sp, 1, L"%20");
+                sp += 3;
+            }
+            paste = L"![image](" + linkName + L")";
+        }
+    }
+    if (paste.empty()) return;
+    if (app.editorHasSelection) editorDeleteSelection(app);
+    // Excel range copies arrive as TSV: paste them as a
+    // markdown table (#181). Ctrl+Shift+V pastes raw.
+    if (!raw && tsvLooksLikeTable(paste)) {
+        paste = padTableForInsert(
+            app, tsvToMarkdownTable(paste), app.editorCursorPos);
+        signalPushKey(app, SIG_SUCCESS, SIGI_CHECK,
+                      "toast.paste_table");
+    } else if (!raw && app.editorAssists) {
+        // Lines pasted on a list item are its items, as Enter makes them,
+        // and lines pasted in a quote its lines (#305)
+        paste = live::pasteMarks(app.editorText, app.editorCursorPos,
+                                 app.editorCursorPos, paste);
+    }
+    size_t before = app.editorCursorPos;
+    app.editorText.insert(app.editorCursorPos, paste);
+    app.editorCursorPos += paste.size();
+    pushUndo(app, App::EditAction::Insert, before, paste, before, app.editorCursorPos);
+    rebuildLineStarts(app);
+    scheduleReparse(app);
+    editorEnsureCursorVisible(app);
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
 void editorClipboardPaste(App& app, HWND hwnd) {
     std::wstring paste = editorGetClipboard(hwnd);
     if (paste.empty()) return;
@@ -3318,6 +3525,9 @@ void editorClipboardPaste(App& app, HWND hwnd) {
         paste = padTableForInsert(app, tsvToMarkdownTable(paste),
                                   app.editorCursorPos);
         signalPushKey(app, SIG_SUCCESS, SIGI_CHECK, "toast.paste_table");
+    } else if (app.editorAssists) {
+        paste = live::pasteMarks(app.editorText, app.editorCursorPos,
+                                 app.editorCursorPos, paste);  // #305
     }
     size_t before = app.editorCursorPos;
     app.editorText.insert(app.editorCursorPos, paste);
@@ -3331,14 +3541,16 @@ void editorClipboardPaste(App& app, HWND hwnd) {
 }
 
 void editRailInvoke(App& app, HWND hwnd, int id) {
-    // Marks act at every caret and line prefixes on every caret line
-    // (#251); links, snippets and flyouts work at the primary caret
+    if (id == 30 || id == 31) {
+        setEditorLive(app, hwnd, id == 31);
+        return;
+    }
+    if (editorLiveOn(app) && liveRailCommand(app, hwnd, id)) return;
+    // Marks act at every caret, and list and quote marks on every line the
+    // carets and the selections take in (#251, #306); links, snippets and
+    // flyouts work at the primary caret
     auto mark = [&](const wchar_t* text) {
         editorEditAtCarets(app, [&](size_t) { editorToggleInlineMark(app, hwnd, text); });
-    };
-    auto prefix = [&](const wchar_t* text) {
-        editorOneCaretPerLine(app);
-        editorEditAtCarets(app, [&](size_t) { editorToggleLinePrefix(app, hwnd, text); });
     };
     switch (id) {
         case 1: mark(L"**"); break;
@@ -3346,9 +3558,10 @@ void editRailInvoke(App& app, HWND hwnd, int id) {
         case 3: mark(L"~~"); break;
         case 4: mark(L"`"); break;
         case 5: editorInsertLink(app, hwnd); break;
-        case 10: prefix(L"- "); break;
-        case 11: prefix(L"- [ ] "); break;
-        case 12: prefix(L"> "); break;
+        case 10: editorToggleLineMarks(app, hwnd, live::LineMark::Bullet); break;
+        case 13: editorToggleLineMarks(app, hwnd, live::LineMark::Number); break;
+        case 11: editorToggleLineMarks(app, hwnd, live::LineMark::Task); break;
+        case 12: editorToggleLineMarks(app, hwnd, live::LineMark::Quote); break;
         case 20: openEditRailFlyout(app, hwnd, 1); break;  // size grid
         case 21: openEditRailFlyout(app, hwnd, 2); break;  // templates
         case 23: openEditRailFlyout(app, hwnd, 3); break;  // pandoc
@@ -3609,7 +3822,14 @@ void editorPositionImeWindow(App& app, HWND hwnd) {
     }
 
     D2D1_POINT_2F point{};
-    if (editorCaretPoint(app, point)) {
+    float liveHeight = 0;
+    if (liveCaretClientPoint(app, point, liveHeight)) {
+        // The Live page's caret
+        COMPOSITIONFORM cf{};
+        cf.dwStyle = CFS_POINT;
+        cf.ptCurrentPos = {(LONG)point.x, (LONG)(point.y + liveHeight)};
+        ImmSetCompositionWindow(himc, &cf);
+    } else if (editorCaretPoint(app, point)) {
         float lineHeight = app.editorTextFormat->GetFontSize() * 1.5f;
         COMPOSITIONFORM cf{};
         cf.dwStyle = CFS_POINT;
@@ -4147,7 +4367,7 @@ static void editorFillRangeRects(App& app, IDWriteTextLayout* layout,
 static void editorFillExtraSelections(App& app, IDWriteTextLayout* layout,
                                       float originX, float lineY, size_t lineStart,
                                       size_t lineLen, float lineHeight, float charWidth) {
-    const D2D1_COLOR_F color = D2D1::ColorF(0.2f, 0.4f, 0.9f, 0.35f);
+    const D2D1_COLOR_F color = themeSelectionColor(app.theme, D2D1::ColorF(0.2f, 0.4f, 0.9f, 0.35f));
     for (const auto& caret : app.editorExtraCarets) {
         if (!caret.hasSelection) continue;
         const size_t start = caretStart(caret), end = caretEnd(caret);
@@ -4266,7 +4486,7 @@ static void renderEditorWrapped(App& app, float editorWidth) {
         if (app.editorHasSelection && selMax > lineStart && selMin < lineStart + lineLen + 1) {
             size_t hlStart = (selMin > lineStart) ? selMin - lineStart : 0;
             size_t hlEnd = std::min(selMax - lineStart, lineLen);
-            D2D1_COLOR_F selColor = D2D1::ColorF(0.2f, 0.4f, 0.9f, 0.35f);
+            D2D1_COLOR_F selColor = themeSelectionColor(app.theme, D2D1::ColorF(0.2f, 0.4f, 0.9f, 0.35f));
             editorFillRangeRects(app, lineLayout, textX, lineY, hlStart, hlEnd - hlStart, selColor);
             if (selMax > lineStart + lineLen && selMin <= lineStart + lineLen) {
                 // Newline included: mark one cell past the end of the last row
@@ -4342,6 +4562,7 @@ static void renderEditorWrapped(App& app, float editorWidth) {
 
 void renderEditor(App& app, float editorWidth) {
     if (!app.editorTextFormat || app.editorLineStarts.empty()) return;
+    sourceHighlightFrame(app);
 
     if (editorWrapOn(app)) {
         renderEditorWrapped(app, editorWidth);
@@ -4423,7 +4644,7 @@ void renderEditor(App& app, float editorWidth) {
             } else {
                 hlX2 = textBase + editorColToX(app, lineLayout, hlEnd);
             }
-            app.brush->SetColor(D2D1::ColorF(0.2f, 0.4f, 0.9f, 0.35f));
+            app.brush->SetColor(themeSelectionColor(app.theme, D2D1::ColorF(0.2f, 0.4f, 0.9f, 0.35f)));
             app.renderTarget->FillRectangle(
                 D2D1::RectF(hlX1, lineY, hlX2, lineY + lineHeight), app.brush);
         }

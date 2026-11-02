@@ -1,4 +1,5 @@
 #include "drafts.h"
+#include "document.h"
 #include "i18n.h"
 #include "settings.h"
 #include "signals.h"
@@ -34,15 +35,18 @@ static std::wstring draftFileFor(const App& app, int tabId) {
 
 // A draft is the buffer prefixed with one comment line naming the file it
 // belongs to ('>' cannot appear in a Windows path, so the terminator is
-// unambiguous); an untitled quick note stores an empty path
+// unambiguous); an untitled quick note stores an empty path. The file's
+// byte order mark comes back in front of the text, so the recovered
+// buffer saves with it.
 static void writeDraft(const std::wstring& draftPath,
                        const std::string& origPath,
-                       const std::wstring& text) {
+                       const std::wstring& text, bool bom) {
     if (draftPath.empty()) return;
     std::ofstream out(draftPath, std::ios::binary);
     if (!out) return;
     std::string header = "<!-- tinta-draft:" + origPath + " -->\n";
     std::string body = toUtf8(text);
+    if (bom) body.insert(0, UTF8_BOM);
     out.write(header.data(), header.size());
     out.write(body.data(), body.size());
 }
@@ -58,7 +62,8 @@ void draftsSweep(App& app) {
         if (draftPath.empty()) continue;
         if (dirty) {
             writeDraft(draftPath, active ? app.currentFile : tab.path,
-                       active ? app.editorText : tab.editorText);
+                       active ? app.editorText : tab.editorText,
+                       active ? app.editorBom : tab.editorBom);
         } else {
             DeleteFileW(draftPath.c_str());
         }

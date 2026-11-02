@@ -128,8 +128,22 @@ void parserTests(App& app) {
            "HtmlBlock[Paragraph['Formula a b and ' Underline['c'] ' end']]");
     expect(app, "<p><ins>a <b>b</ins> c</b></p>\n",
            "HtmlBlock[Paragraph[Underline['a ' Strong['b']] ' c']]");
+    // Omitted </li> tags close siblings; a nested list still belongs to its item.
     expect(app, "<ul><li>a<li>b</ul>\n<p>after</p>\n",
-           "HtmlBlock[List[ListItem['a' ListItem['b']]] Paragraph['after']]");
+           "HtmlBlock[List[ListItem['a'] ListItem['b']] Paragraph['after']]");
+    expect(app, "<ol><li><b>a<li><i>b</ol>\n<p>after</p>\n",
+           "HtmlBlock[List[ListItem[Strong['a']] ListItem[Emphasis['b']]] Paragraph['after']]");
+    expect(app, "<ul><li>a<ul><li>b<li>c</ul><li>d</ul>\n",
+           "HtmlBlock[List[ListItem['a' List[ListItem['b'] ListItem['c']]] ListItem['d']]]");
+    expect(app, "<ul><li>a</li><li>b</li></ul>\n",
+           "HtmlBlock[List[ListItem['a'] ListItem['b']]]");
+    // Markdown list HTML has an extra wrapper; raw HTML list children do not.
+    expect(app, "- <h3>Title</h3>\n", "List[ListItem[HtmlBlock[Heading['Title']]]]");
+    expect(app, "1. <h3>Title</h3>\n", "List[ListItem[HtmlBlock[Heading['Title']]]]");
+    expect(app, "<ul><li><a id=\"target\"></a><h3>Title</h3></li></ul>\n",
+           "HtmlBlock[List[ListItem[Anchor Heading['Title']]]]");
+    expect(app, "<ol><li><a id=\"target\"></a><h3>Title</h3></li></ol>\n",
+           "HtmlBlock[List[ListItem[Anchor Heading['Title']]]]");
     // Inside <pre> and <code> the tags go and the text stays
     expect(app, "<p><code>H<sub>2</sub>O</code> and text</p>\n",
            "HtmlBlock[Paragraph[Code['H2O'] ' and text']]");
@@ -263,6 +277,50 @@ void checkNoUnderline(const App& app, Range r, const std::string& what) {
             bool under = line.p1.y > baseline && line.p1.y < run->bounds.bottom + 1.0f &&
                          line.p1.x < run->bounds.right - 1.0f && line.p2.x > run->bounds.left + 1.0f;
             check(!under, what + ": stays without an underline");
+        }
+    }
+}
+
+// A rule through the middle of a run: above its baseline, across its ink
+bool struck(const App& app, const App::LayoutTextRun& run) {
+    for (const auto& line : app.layoutLines) {
+        if (horizontal(line) && line.p1.y > run.bounds.top && line.p1.y < runBaseline(run) &&
+            line.p1.x <= run.bounds.left + 0.5f && line.p2.x >= run.bounds.right - 0.5f) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// <del> and ~~ strike a code chip inside them as they strike text
+void strikeTests(App& app) {
+    auto doc = app.parser.parse("Struck ~~`struck_code()`~~ and <del>`del_code()`</del> beside "
+                                "~~plain struck~~ and `plain_code()` words.\n");
+    check(doc.success, "the strike document parses");
+    if (!doc.success) return;
+    app.height = 700;
+    app.readingWidthPct = 100;
+    for (int theme : {0, 5}) {
+        applyTheme(app, theme);
+        for (float scale : {1.0f, 1.5f}) {
+            app.contentScale = scale;
+            updateTextFormats(app);
+            for (int width : {1050, 650}) {
+                app.width = width;
+                app.root = doc.root;
+                layoutDocument(app);
+                ensureLayoutComplete(app);
+                for (const wchar_t* words : {L"struck_code()", L"del_code()", L"plain struck"}) {
+                    auto runs = runsIn(app, findText(app, words));
+                    check(!runs.empty(), "struck text is drawn");
+                    for (const auto* run : runs) {
+                        check(struck(app, *run), "a code chip or text inside ~~ or <del> is struck through");
+                    }
+                }
+                for (const auto* run : runsIn(app, findText(app, L"plain_code()"))) {
+                    check(!struck(app, *run), "a code chip outside them is not");
+                }
+            }
         }
     }
 }
@@ -468,6 +526,54 @@ void exportTests(App& app, const ElementPtr& root) {
     check(zip.find("&lt;ins&gt;") != std::string::npos, "Word keeps the fence literal");
     check(zip.find("alt with H2O (missing-263.png)") != std::string::npos, "Word keeps the words of an alt <sub>");
 }
+
+// ~~ and == around bold, italic, code and links export as they draw: HTML
+// nests the spans, Word gives each run both properties, and the words the
+// fixture keeps literal stay plain
+void markedEmphasisExportTests(App& app) {
+    namespace fs = std::filesystem;
+    auto doc = parseDocument(app.parser, read(TINTA_MARKED_EMPHASIS_FIXTURE), "struck-and-marked-emphasis.md");
+    check(doc.success, "the struck and marked emphasis fixture parses");
+    if (!doc.success) return;
+    fs::path output = fs::current_path() / "html-span-test-output";
+    fs::create_directories(output);
+    applyTheme(app, 0);
+    app.contentScale = 1.0f;
+    updateTextFormats(app);
+    app.width = 1050;
+    app.root = doc.root;
+    layoutDocument(app);
+    check(exportHtmlFile(app, (output / "marked.html").wstring()), "the fixture's HTML export succeeds");
+    std::string html = read(output / "marked.html");
+    for (const char* nested : {
+             "<del><strong>Struck_bold</strong></del> text after it",
+             "<mark><em>Marked_italic</em></mark>",
+             "<del><code>struck_code()</code></del>",
+             "<mark><a href=\"#around-emphasis\">Marked_link</a></mark>",
+             "<del><mark><strong>Struck_marked_bold</strong></mark></del>",
+             "<mark><del><em>Marked_struck_italic</em></del></mark>",
+             "<del>Struck_claim<sup id=\"tinta-fnref-1-1\">"}) {
+        check(html.find(nested) != std::string::npos, std::string("HTML nests ") + nested);
+    }
+    for (const char* literal : {
+             "~~ <strong>Spaced_struck</strong> ~~",
+             "<strong>Compared_left</strong> == <strong>Compared_right</strong>",
+             "~~a <strong>Crossing_struck~~ c</strong>",
+             "~~<strong>Escaped_struck</strong>~~"}) {
+        check(html.find(literal) != std::string::npos, std::string("HTML keeps ") + literal);
+    }
+
+    check(exportDocxFile(app, (output / "marked.docx").wstring()), "the fixture's Word export succeeds");
+    std::string zip = read(output / "marked.docx");
+    check(zip.find("<w:b/><w:strike/></w:rPr><w:t xml:space=\"preserve\">Struck_bold</w:t>") != std::string::npos,
+          "Word strikes the bold run");
+    check(zip.find("<w:i/><w:highlight w:val=\"yellow\"/></w:rPr><w:t xml:space=\"preserve\">Marked_italic</w:t>") !=
+              std::string::npos, "Word marks the italic run");
+    check(zip.find("<w:b/><w:strike/><w:highlight w:val=\"yellow\"/></w:rPr><w:t xml:space=\"preserve\">"
+                   "Struck_marked_bold</w:t>") != std::string::npos, "Word strikes and marks the bold run");
+    check(zip.find("<w:b/></w:rPr><w:t xml:space=\"preserve\">Escaped_struck</w:t>") != std::string::npos,
+          "Word keeps an escaped pair's bold plain");
+}
 }  // namespace
 
 int main() {
@@ -482,6 +588,8 @@ int main() {
         layoutTests(app, doc.root);
         exportTests(app, doc.root);
     }
+    strikeTests(app);
+    markedEmphasisExportTests(app);
     std::cout << "HTML spans: " << failures << " failures\n";
     return failures ? 1 : 0;
 }

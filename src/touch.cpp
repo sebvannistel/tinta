@@ -3,9 +3,15 @@
 #include "touch.h"
 
 #include "editor.h"
+#include "editrail.h"
 #include "input.h"
+#include "live_editor.h"
 #include "overlays.h"
+#include "render.h"
+#include "selection.h"
+#include "sheet_ui.h"
 #include "sidepanels.h"
+#include "tableedit.h"
 #include "startpage.h"
 #include "tabs.h"
 
@@ -24,18 +30,42 @@ using Phase = App::TouchGesture::Phase;
 // Movement under this is still a tap or a hold
 float slop(const App& app) { return dpi(app, 10.0f); }
 
+// A held finger selects text, and on a sheet opens its menu where it
+// lifts; a list's row and Help take it as a slow tap
+bool holds(TouchTarget target) { return target != TouchTarget::List && target != TouchTarget::Help; }
+
+bool sameContext(const App& app) {
+    const auto& t = app.touch;
+    return app.activeTab == t.contextTab && app.currentFile == t.contextFile &&
+           app.editMode == t.contextEdit;
+}
+
+void resetTap(App& app) {
+    app.touch.tapMs = 0;
+    app.touch.tapTarget = TouchTarget::None;
+    app.lastClickTime = {};
+    app.clickCount = 0;
+}
+
 bool isExtra(const App::TouchGesture& t, UINT32 pointer) {
     return std::find(t.extra.begin(), t.extra.end(), pointer) != t.extra.end();
+}
+
+// A sheet's menu, or the text menu of a card being typed in
+bool sheetMenuUp(const App& app) {
+    const SheetDoc* doc = activeSheet(const_cast<App&>(app));
+    return doc && (doc->menuOpen || doc->edit.menu.open);
 }
 
 // Menus, dialogs and overlays own their touches through the mouse
 bool overlayUp(const App& app) {
     return app.showSettings || app.showThemeEditor || app.showShortcutEditor ||
-           app.showThemeChooser || app.showHelp || app.showPrintPreview || app.showLightbox ||
-           app.showContextMenu || app.showTabMenu || app.showTabSwitcher ||
+           app.showThemeChooser || app.showPrintPreview || app.showLightbox ||
+           app.showContextMenu || app.editCtxOpen || app.showTabMenu || app.showTabSwitcher ||
+           liveMenuOpen(app) || sheetMenuUp(app) ||
            app.confirmExitPending || app.createRefPending ||
            (app.annotEditorOpen && !app.editMode) || app.signalTrayOpen || app.gotoLineOpen ||
-           app.appMenuPressed || startPageActive(app);
+           app.appMenuPressed || (startPageActive(app) && !app.showHelp);
 }
 
 bool onSidePanel(const App& app, float x) {
@@ -54,9 +84,9 @@ bool onSidePanel(const App& app, float x) {
 
 bool onSearchBar(const App& app, float x, float y) {
     if (!app.showSearch) return false;
-    D2D1_RECT_F bar = searchBarRect(app);
+    D2D1_RECT_F bar = searchBarDrawRect(app);
     // The replace row sits under the find row
-    if (app.searchReplaceMode) bar.bottom += bar.bottom - bar.top;
+    if (app.editMode && app.searchReplaceMode) bar.bottom = searchReplaceRowRect(app).bottom;
     const float margin = dpi(app, 8.0f);
     return x >= bar.left - margin && x <= bar.right + margin && y >= bar.top - margin &&
            y <= bar.bottom + margin;
@@ -68,6 +98,14 @@ void scrollOf(const App& app, TouchTarget target, PanelList list, float& x, floa
     switch (target) {
         case TouchTarget::Document: x = app.scrollX; y = app.scrollY; break;
         case TouchTarget::Editor: y = app.editorScrollY; break;
+        case TouchTarget::Sheet:
+            // A sheet's camera, in pixels so a finger's travel moves it
+            if (SheetDoc* doc = activeSheet(const_cast<App&>(app))) {
+                x = doc->camX * sheetui::scale(app, *doc);
+                y = doc->camY * sheetui::scale(app, *doc);
+            }
+            break;
+        case TouchTarget::Help: y = app.helpScroll; break;
         case TouchTarget::List: {
             PanelListView view;
             if (panelListView(app, list, view)) y = view.scroll;
@@ -80,6 +118,9 @@ void scrollOf(const App& app, TouchTarget target, PanelList list, float& x, floa
 void scrollRange(const App& app, TouchTarget target, PanelList list, float& maxX, float& maxY) {
     maxX = maxY = 0;
     switch (target) {
+        case TouchTarget::Help:
+            maxY = app.showHelp ? std::max(0.0f, app.helpContentHeight - app.helpVisibleHeight) : 0;
+            break;
         case TouchTarget::Document:
             maxX = std::max(0.0f, app.contentWidth - documentViewportWidth(app));
             maxY = std::max(0.0f, app.contentHeight - static_cast<float>(app.height));
@@ -88,6 +129,10 @@ void scrollRange(const App& app, TouchTarget target, PanelList list, float& maxX
             // Unwrapped lines have no right end to stop at; the editor
             // pans down and up only
             maxY = std::max(0.0f, app.editorContentHeight - static_cast<float>(app.height));
+            break;
+        case TouchTarget::Sheet:
+            // A sheet has no edges
+            maxX = maxY = 1e9f;
             break;
         case TouchTarget::List: {
             PanelListView view;
@@ -104,8 +149,10 @@ bool scrollTo(App& app, TouchTarget target, PanelList list, float& x, float& y) 
     float maxX, maxY, oldX, oldY;
     scrollRange(app, target, list, maxX, maxY);
     scrollOf(app, target, list, oldX, oldY);
-    x = std::clamp(x, 0.0f, maxX);
-    y = std::clamp(y, 0.0f, maxY);
+    if (target != TouchTarget::Sheet) {
+        x = std::clamp(x, 0.0f, maxX);
+        y = std::clamp(y, 0.0f, maxY);
+    }
     if (std::fabs(x - oldX) < 0.01f && std::fabs(y - oldY) < 0.01f) return false;
     switch (target) {
         case TouchTarget::Document:
@@ -116,7 +163,17 @@ bool scrollTo(App& app, TouchTarget target, PanelList list, float& x, float& y) 
             if (app.editMode) editorFollowPreview(app);
             break;
         case TouchTarget::Editor: app.editorScrollY = y; break;
+        case TouchTarget::Help: app.helpScroll = y; break;
         case TouchTarget::List: setPanelListScroll(app, list, y); break;
+        case TouchTarget::Sheet:
+            if (SheetDoc* doc = activeSheet(app)) {
+                float s = sheetui::scale(app, *doc);
+                doc->camX = x / s;
+                doc->camY = y / s;
+                doc->flight.active = false;
+                doc->placed = true;
+            }
+            break;
         default: break;
     }
     InvalidateRect(app.hwnd, nullptr, FALSE);
@@ -124,6 +181,7 @@ bool scrollTo(App& app, TouchTarget target, PanelList list, float& x, float& y) 
 }
 
 bool pansAcross(const App& app, TouchTarget target) {
+    if (target == TouchTarget::Sheet) return true;
     return target == TouchTarget::Document && app.contentWidth > documentViewportWidth(app);
 }
 
@@ -132,6 +190,37 @@ void pointerAway(App& app, HWND hwnd) {
     handleMouseMove(app, hwnd, MAKELPARAM(-1, -1));
     app.mouseX = app.mouseY = -1;
     InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+// A finger held on the split preview selects its rendered words itself.
+// Live's page is the document viewport too, but Live owns its text: a hold
+// there goes through its press like any other
+bool previewHolds(const App& app, TouchTarget target) {
+    return target == TouchTarget::Document && app.editMode && !editorLiveOn(app);
+}
+
+// A preview hold selects rendered text directly. Synthesizing a mouse
+// press here would open an inline table cell instead of selecting it.
+void previewHoldSelection(App& app, POINT pt, bool begin) {
+    if (begin && app.tableEditActive) {
+        tableEditCommit(app);
+        editorReparse(app, true);
+    }
+    ensureLayoutComplete(app);
+    const size_t at = selectionOffsetAtPoint(app, pt.x - documentViewportX(app) + app.scrollX,
+                                             pt.y + app.scrollY);
+    size_t first, last;
+    selectionWordRange(app, at, first, last);
+    if (begin) {
+        app.selAnchorRangeStart = first;
+        app.selAnchorRangeEnd = last;
+        app.selectionMode = App::SelectionMode::Word;
+    }
+    app.selAnchor = std::min(first, app.selAnchorRangeStart);
+    app.selFocus = std::max(last, app.selAnchorRangeEnd);
+    app.selecting = true;
+    app.hasSelection = app.selAnchor != app.selFocus;
+    InvalidateRect(app.hwnd, nullptr, FALSE);
 }
 
 // A tap is a click at the point, through the mouse handlers, so links,
@@ -146,14 +235,20 @@ void click(App& app, HWND hwnd, POINT at) {
 
 void tap(App& app, HWND hwnd, POINT pt, double ms, TouchTarget target) {
     auto& t = app.touch;
-    const bool again = t.tapMs > 0 && ms - t.tapMs <= GetDoubleClickTime() && t.tapTarget == target &&
+    // A list's rows lie closer together than a second tap strays, so each
+    // tap there is its own; text and a sheet take double taps
+    const bool doubles = target != TouchTarget::List;
+    const bool again = doubles && t.tapMs > 0 && ms >= t.tapMs &&
+                       ms - t.tapMs <= GetDoubleClickTime() && t.tapTarget == target &&
                        std::hypot(float(pt.x - t.tapPoint.x), float(pt.y - t.tapPoint.y)) <=
                            dpi(app, 24.0f);
     // A finger's second tap lands a little off the first: it clicks where
     // the first did, so the click handlers count the double-click it is
     const POINT at = again ? t.tapPoint : pt;
+    if (!again) resetTap(app);
+    else app.lastClickTime = std::chrono::steady_clock::now();
     t.tapPoint = at;
-    t.tapMs = ms;
+    t.tapMs = doubles ? ms : 0;
     t.tapTarget = target;
     click(app, hwnd, at);
 }
@@ -195,6 +290,7 @@ void startFling(App& app, HWND hwnd, float vx, float vy, double ms) {
     t.flingMs = ms;
     t.flingTab = app.activeTab;
     t.flingFile = app.currentFile;
+    t.flingEdit = app.editMode;
     SetTimer(hwnd, TIMER_TOUCH_FLING, 16, nullptr);
 }
 
@@ -202,6 +298,7 @@ void endGesture(App::TouchGesture& t) {
     t.active = false;
     t.phase = Phase::Idle;
     t.multi = false;
+    t.braking = false;
     t.samples.clear();
 }
 
@@ -223,6 +320,13 @@ TouchTarget touchTargetAt(const App& app, POINT pt, PanelList& list) {
     const float x = static_cast<float>(pt.x), y = static_cast<float>(pt.y);
     if (overlayUp(app) || x < 0 || y < chromeTopHeight(app) || x >= app.width || y >= app.height)
         return TouchTarget::None;
+    if (app.showHelp) {
+        const auto panel = helpPanelRect(app);
+        return x >= panel.left && x < panel.right - dpi(app, 16) &&
+               y >= app.helpScrollbarTop && y < app.helpScrollbarTop + app.helpVisibleHeight
+                   ? TouchTarget::Help : TouchTarget::None;
+    }
+    if (sidePanelResizeAt(app, x, y) != SidePanel::None) return TouchTarget::None;
     // A side panel's list; its scrollbar drags as with the mouse
     for (PanelList which : {PanelList::Search, PanelList::Contents, PanelList::Browser}) {
         PanelListView view;
@@ -235,6 +339,8 @@ TouchTarget touchTargetAt(const App& app, POINT pt, PanelList& list) {
     // A panel's header, buttons and footer, and the search bar, take clicks
     if (onSidePanel(app, x) || onSearchBar(app, x, y)) return TouchTarget::None;
     const float left = documentViewportX(app);
+    // A sheet's canvas pans under the finger; taps reach its buttons
+    if (sheetActive(app) && x >= left) return TouchTarget::Sheet;
     if (app.editMode && x < left) {
         // The editor's text, short of the rail, its scrollbar and the seam
         return x >= editRailWidth(app) && x < editorPaneWidth(app) - dpi(app, 16.0f)
@@ -256,30 +362,44 @@ bool touchDown(App& app, HWND hwnd, UINT32 pointer, POINT pt, double ms) {
         // or holds
         if (!isExtra(t, pointer)) t.extra.push_back(pointer);
         t.multi = true;
+        resetTap(app);
         KillTimer(hwnd, TIMER_TOUCH_HOLD);
         return true;
     }
-    touchStopFling(app, hwnd);
     PanelList list = PanelList::None;
     const TouchTarget target = touchTargetAt(app, pt, list);
+    const bool braking = t.flinging && target != TouchTarget::None &&
+                         target == t.flingTarget && list == t.flingList &&
+                         app.activeTab == t.flingTab && app.currentFile == t.flingFile &&
+                         app.editMode == t.flingEdit;
+    touchStopFling(app, hwnd);
+    if (!sameContext(app) || target == TouchTarget::None) resetTap(app);
     if (target == TouchTarget::None) return false;
     endGesture(t);
     t.active = true;
+    t.braking = braking;
+    if (braking) {
+        t.tapMs = 0;
+        app.lastClickTime = {};
+    }
     t.pointer = pointer;
     t.phase = Phase::Pending;
     t.target = target;
     t.list = list;
     t.start = t.last = pt;
+    t.contextTab = app.activeTab;
+    t.contextFile = app.currentFile;
+    t.contextEdit = app.editMode;
     t.axis = 0;
     t.samples.push_back({ms, static_cast<float>(pt.x), static_cast<float>(pt.y)});
-    // A held row is a slow tap: only text selects
-    if (target != TouchTarget::List) SetTimer(hwnd, TIMER_TOUCH_HOLD, kHoldMs, nullptr);
+    if (holds(target) && !braking) SetTimer(hwnd, TIMER_TOUCH_HOLD, kHoldMs, nullptr);
     return true;
 }
 
 bool touchMove(App& app, HWND hwnd, UINT32 pointer, POINT pt, double ms) {
     auto& t = app.touch;
     if (!t.active || pointer != t.pointer) return isExtra(t, pointer);
+    if (!sameContext(app)) { touchCancel(app, hwnd); return true; }
     t.samples.push_back({ms, static_cast<float>(pt.x), static_cast<float>(pt.y)});
     while (t.samples.size() > 2 && ms - t.samples[1].ms > kSpeedWindowMs * 2)
         t.samples.erase(t.samples.begin());
@@ -290,18 +410,23 @@ bool touchMove(App& app, HWND hwnd, UINT32 pointer, POINT pt, double ms) {
         // also pans across
         KillTimer(hwnd, TIMER_TOUCH_HOLD);
         t.phase = Phase::Panning;
-        t.axis = std::fabs(dx) > std::fabs(dy) && pansAcross(app, t.target) ? 2 : 1;
+        resetTap(app);
+        // A sheet pans every way at once
+        t.axis = t.target == TouchTarget::Sheet ? 3
+                 : std::fabs(dx) > std::fabs(dy) && pansAcross(app, t.target) ? 2 : 1;
         scrollOf(app, t.target, t.list, t.originX, t.originY);
         tabHoverCardDismiss(app, hwnd);
     }
     if (t.phase == Phase::Panning) {
         // The content moves with the finger from where the pan began
-        float x = t.originX - (t.axis == 2 ? dx : 0.0f);
-        float y = t.originY - (t.axis == 1 ? dy : 0.0f);
+        float x = t.originX - (t.axis >= 2 ? dx : 0.0f);
+        float y = t.originY - (t.axis != 2 ? dy : 0.0f);
         scrollTo(app, t.target, t.list, x, y);
     } else if (t.phase == Phase::Holding) {
         // The selection grows word by word, as a double-click's drag does
-        handleMouseMove(app, hwnd, MAKELPARAM(pt.x, pt.y));
+        if (t.target == TouchTarget::Editor) editorTouchSelection(app, pt.x, pt.y, false);
+        else if (previewHolds(app, t.target)) previewHoldSelection(app, pt, false);
+        else handleMouseMove(app, hwnd, MAKELPARAM(pt.x, pt.y));
     }
     t.last = pt;
     return true;
@@ -315,6 +440,7 @@ bool touchUp(App& app, HWND hwnd, UINT32 pointer, POINT pt, double ms, bool canc
         t.extra.erase(it);
         return true;
     }
+    if (canceled || !sameContext(app)) { touchCancel(app, hwnd); return true; }
     KillTimer(hwnd, TIMER_TOUCH_HOLD);
     const Phase phase = t.phase;
     const TouchTarget target = t.target;
@@ -323,9 +449,19 @@ bool touchUp(App& app, HWND hwnd, UINT32 pointer, POINT pt, double ms, bool canc
         // The selection ends where the finger lifts, and the menu opens
         // there (in the editor, its own menu)
         const LPARAM point = MAKELPARAM(pt.x, pt.y);
-        handleMouseMove(app, hwnd, point);
-        handleMouseUp(app, hwnd, 0, point);
-        if (!canceled) {
+        if (target == TouchTarget::Editor) {
+            if (!canceled) {
+                editorTouchSelection(app, pt.x, pt.y, false);
+                openEditCtxMenu(app, hwnd, (float)pt.x, (float)pt.y, true);
+            }
+        } else if (previewHolds(app, target)) {
+            if (!canceled) previewHoldSelection(app, pt, false);
+            app.selecting = false;
+        } else {
+            handleMouseMove(app, hwnd, point);
+            handleMouseUp(app, hwnd, 0, point);
+        }
+        if (!canceled && target != TouchTarget::Editor) {
             POINT screen = pt;
             ClientToScreen(hwnd, &screen);
             handleContextMenu(app, hwnd, MAKELPARAM(screen.x, screen.y));
@@ -335,7 +471,7 @@ bool touchUp(App& app, HWND hwnd, UINT32 pointer, POINT pt, double ms, bool canc
         float vx, vy;
         releaseSpeed(t, ms, vx, vy);
         startFling(app, hwnd, vx, vy, ms);
-    } else if (!canceled && phase == Phase::Pending && !multi) {
+    } else if (!canceled && phase == Phase::Pending && !multi && !t.braking) {
         tap(app, hwnd, pt, ms, target);
     }
     endGesture(t);
@@ -345,8 +481,24 @@ bool touchUp(App& app, HWND hwnd, UINT32 pointer, POINT pt, double ms, bool canc
 void touchHold(App& app, HWND hwnd) {
     KillTimer(hwnd, TIMER_TOUCH_HOLD);
     auto& t = app.touch;
-    if (!t.active || t.phase != Phase::Pending || t.multi) return;
+    if (!t.active || t.phase != Phase::Pending || t.multi || t.braking) return;
+    if (!holds(t.target)) return;
+    if (!sameContext(app)) { touchCancel(app, hwnd); return; }
+    resetTap(app);
     t.phase = Phase::Holding;
+    if (t.target == TouchTarget::Editor) {
+        editorTouchSelection(app, t.start.x, t.start.y, true);
+        return;
+    }
+    if (previewHolds(app, t.target)) {
+        previewHoldSelection(app, t.start, true);
+        return;
+    }
+    // Live's page and a sheet's text box take the held word themselves,
+    // without a click's capture, whose loss would end their drag
+    if ((t.target == TouchTarget::Document && liveTouchHold(app, hwnd, t.start.x, t.start.y)) ||
+        (t.target == TouchTarget::Sheet && sheetTouchHold(app, hwnd, t.start.x, t.start.y)))
+        return;
     // The word under the finger, selected as a double-click selects it:
     // the click handlers see a second click at the same place
     const LPARAM point = MAKELPARAM(t.start.x, t.start.y);
@@ -365,8 +517,12 @@ void touchHold(App& app, HWND hwnd) {
 bool touchFlingStep(App& app, HWND hwnd, double ms) {
     auto& t = app.touch;
     if (!t.flinging) return false;
+    if (t.flingTarget == TouchTarget::Help && !app.showHelp) {
+        touchStopFling(app, hwnd);
+        return false;
+    }
     // The document under it changed: the fling belonged to the other one
-    if (app.activeTab != t.flingTab || app.currentFile != t.flingFile) {
+    if (app.activeTab != t.flingTab || app.currentFile != t.flingFile || app.editMode != t.flingEdit) {
         touchStopFling(app, hwnd);
         return false;
     }
@@ -396,11 +552,19 @@ void touchStopFling(App& app, HWND hwnd) {
 
 void touchCancel(App& app, HWND hwnd) {
     auto& t = app.touch;
-    if (!t.active) return;
     KillTimer(hwnd, TIMER_TOUCH_HOLD);
+    touchStopFling(app, hwnd);
+    resetTap(app);
     // A selection under way keeps what it has, without the menu
-    if (t.phase == Phase::Holding) {
-        handleMouseUp(app, hwnd, 0, MAKELPARAM(t.last.x, t.last.y));
+    if (t.active && t.phase == Phase::Holding) {
+        // Cancel the owned selection directly; a new modal must not receive
+        // a synthetic release that could activate one of its controls.
+        if (t.target == TouchTarget::Editor) handleEditorMouseUp(app, hwnd, t.last.x, t.last.y);
+        else if (t.target == TouchTarget::Sheet) sheetCaptureLost(app, hwnd);
+        else {
+            app.selecting = false;
+            liveCaptureLost(app);
+        }
         pointerAway(app, hwnd);
     }
     endGesture(t);

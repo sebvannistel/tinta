@@ -1,5 +1,6 @@
 #include "inline_style.h"
 #include "link_target.h"
+#include "network_path.h"
 
 #include <cctype>
 #include <filesystem>
@@ -45,23 +46,28 @@ bool isLocalFileRefUrl(const std::string& url) {
 }
 
 // Resolves against the current file's folder and checks the disk, cached
-// per resolved path until the next full relayout
+// per resolved path until the next full relayout. A target on another
+// computer's share is not checked, which would sign in to its server
+// (network_path.h): it badges as missing.
 bool resolveFileRef(App& app, const std::string& raw, std::string& absOut) {
     namespace fs = std::filesystem;
     std::error_code ec;
     fs::path path(refToWide(raw));
+    fs::path folder;
+    if (!app.currentFile.empty()) folder = fs::path(refToWide(app.currentFile)).parent_path();
     if (path.is_relative()) {
-        if (app.currentFile.empty()) {
+        if (folder.empty()) {
             absOut = raw;
             return false;  // unsaved buffer: nothing to resolve against
         }
-        path = fs::path(refToWide(app.currentFile)).parent_path() / path;
+        path = folder / path;
     }
     path = path.lexically_normal();
     absOut = refToUtf8(path.wstring());
     auto found = app.fileRefCache.find(absOut);
     if (found != app.fileRefCache.end()) return found->second;
-    bool exists = fs::exists(path, ec) && !fs::is_directory(path, ec);
+    bool exists = qmd::mayOpenFromDocument(path.wstring(), folder.wstring()) &&
+                  fs::exists(path, ec) && !fs::is_directory(path, ec);
     app.fileRefCache[absOut] = exists;
     return exists;
 }
@@ -127,6 +133,8 @@ void flattenInline(App& app, const std::vector<ElementPtr>& elements,
                 st.bold = st.bold || elem->type == ElementType::Strong;
                 st.italic = st.italic || elem->type == ElementType::Emphasis;
                 if (!st.fixedSize) st.format = emphasisFormat(app, st.format, st.bold, st.italic);
+                // The theme's bold and italic colours (#310); a link keeps its own
+                if (auto color = themeEmphasisColor(app.theme, st.bold, st.italic); color && !st.isLink) st.color = *color;
                 break;
 
             case ElementType::Strikethrough:

@@ -3,6 +3,10 @@
 #include <algorithm>
 
 const std::vector<ContextMenuEntry>& contextMenuEntries(const App& app) {
+    static const std::vector<ContextMenuEntry> preview = {
+        {CTX_COPY, "ctx.copy", L"Ctrl+C", false},
+        {CTX_SELECT_ALL, "ctx.select_all", L"Ctrl+A", false},
+    };
     static const std::vector<ContextMenuEntry> document = {
         {CTX_COPY, "ctx.copy", L"Ctrl+C", false},
         {CTX_SELECT_ALL, "ctx.select_all", L"Ctrl+A", false},
@@ -10,6 +14,7 @@ const std::vector<ContextMenuEntry>& contextMenuEntries(const App& app) {
         {CTX_NEW, "ctx.new", L"", false},
         {CTX_PRINT, "ctx.print", L"Ctrl+P", false},
         {CTX_EXPORT, "ctx.export", L"", false},
+        {CTX_AS_SHEET, "ctx.as_sheet", L"", false},
         {CTX_EDIT, "ctx.edit", L"", false},
         {CTX_SEARCH, "ctx.search", L"", false},
         {CTX_TOC, "ctx.toc", L"", true},
@@ -32,7 +37,13 @@ const std::vector<ContextMenuEntry>& contextMenuEntries(const App& app) {
         {CTX_HELP, "ctx.help", L"", true},
         {CTX_EXIT, "ctx.exit", L"Alt+F4", false},
     };
-    return app.applicationMenu ? application : document;
+    static const std::vector<ContextMenuEntry> editingApplication = [] {
+        auto entries = application;
+        entries.insert(entries.begin() + 4, {CTX_END_EDIT, "ctx.end_edit", L"", true});
+        return entries;
+    }();
+    return app.applicationMenu ? (app.editMode ? editingApplication : application)
+                               : (app.editMode ? preview : document);
 }
 
 float contextMenuPadding(const App& app) { return dpi(app, 6.0f); }
@@ -78,11 +89,20 @@ bool contextMenuItemEnabled(const App& app, int item) {
             return !app.editMode && !app.currentFile.empty() &&
                    app.hasSelection && app.selAnchor != app.selFocus;
         case CTX_SAVE: return app.editMode;
+        case CTX_END_EDIT: return app.editMode;
         case CTX_SAVE_AS: return app.editMode || !app.currentFile.empty();
         case CTX_PRINT: case CTX_EXPORT: case CTX_EDIT:
         case CTX_SELECT_ALL: case CTX_SEARCH: case CTX_TOC:
             return document;
         case CTX_COPY_PATH: case CTX_REVEAL: return !app.currentFile.empty();
+        // A Markdown document, read here, can become a sheet of its sections
+        case CTX_AS_SHEET: {
+            if (app.editMode || app.currentFile.empty()) return false;
+            std::string lower = app.currentFile;
+            for (char& c : lower) c = (char)tolower((unsigned char)c);
+            return lower.size() > 3 && (lower.compare(lower.size() - 3, 3, ".md") == 0 ||
+                                        (lower.size() > 9 && lower.compare(lower.size() - 9, 9, ".markdown") == 0));
+        }
         default: return item >= 0 && item < CTX_ITEM_COUNT;
     }
 }

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(tinta VERSION 3.9.5 LANGUAGES C CXX)
+project(tinta VERSION 4.0.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -94,6 +94,16 @@ set(SOURCES
     src/plantuml_queue.cpp
     src/plantuml_app.cpp
     src/wordcount.cpp
+    src/sheet_model.cpp
+    src/sheet_doc.cpp
+    src/sheet_render.cpp
+    src/sheet_input.cpp
+    src/live_text.cpp
+    src/live_draw.cpp
+    src/live_menu.cpp
+    src/live_editor.cpp
+    src/source_style.cpp
+    src/ui_paint.cpp
 )
 
 set(HEADERS
@@ -126,6 +136,8 @@ set(HEADERS
     include/plantuml_queue.h
     include/plantuml_app.h
     include/wordcount.h
+    include/sheet.h
+    include/sheet_ui.h
 )
 
 # Windows resource file (icon)
@@ -178,7 +190,7 @@ if(BUILD_TESTING)
     # window, including layout-dependent character sequences (#195).
     set(INPUT_TEST_SOURCES ${SOURCES})
     list(REMOVE_ITEM INPUT_TEST_SOURCES src/main_d2d.cpp)
-    add_executable(input_tests tests/input_tests.cpp tests/deleted_tab_tests.cpp tests/table_input_tests.cpp tests/docked_preview_tests.cpp tests/table_layout_tests.cpp tests/highlight_layout_tests.cpp tests/window_drag_tests.cpp tests/tab_drop_tests.cpp tests/tab_hover_card_tests.cpp tests/search_panel_tests.cpp tests/superscript_tests.cpp tests/sidepanel_tests.cpp tests/image_tests.cpp tests/search_input_tests.cpp tests/wrapped_cursor_tests.cpp tests/file_fragment_tests.cpp tests/editor_context_tests.cpp tests/editor_features_tests.cpp tests/ui_font_tests.cpp tests/print_export_tests.cpp tests/scroll_sync_tests.cpp tests/notification_setting_tests.cpp tests/goto_line_tests.cpp tests/reading_position_tests.cpp tests/split_scrollbar_tests.cpp tests/touch_tests.cpp tests/editor_drag_tests.cpp ${INPUT_TEST_SOURCES})
+    add_executable(input_tests tests/input_tests.cpp tests/deleted_tab_tests.cpp tests/table_input_tests.cpp tests/docked_preview_tests.cpp tests/table_layout_tests.cpp tests/highlight_layout_tests.cpp tests/window_drag_tests.cpp tests/tab_drop_tests.cpp tests/tab_hover_card_tests.cpp tests/search_panel_tests.cpp tests/superscript_tests.cpp tests/sidepanel_tests.cpp tests/image_tests.cpp tests/search_input_tests.cpp tests/wrapped_cursor_tests.cpp tests/file_fragment_tests.cpp tests/editor_context_tests.cpp tests/editor_features_tests.cpp tests/ui_font_tests.cpp tests/print_export_tests.cpp tests/scroll_sync_tests.cpp tests/notification_setting_tests.cpp tests/goto_line_tests.cpp tests/reading_position_tests.cpp tests/split_scrollbar_tests.cpp tests/touch_tests.cpp tests/editor_drag_tests.cpp tests/byte_order_mark_tests.cpp tests/sheet_tests.cpp tests/live_tests.cpp tests/source_highlight_tests.cpp ${INPUT_TEST_SOURCES})
     target_include_directories(input_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
     target_link_libraries(input_tests PRIVATE $<TARGET_PROPERTY:tinta,LINK_LIBRARIES>)
     target_compile_definitions(input_tests PRIVATE $<TARGET_PROPERTY:tinta,COMPILE_DEFINITIONS>
@@ -191,6 +203,9 @@ if(BUILD_TESTING)
         TINTA_CODE_BASELINE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/inline-code-baseline-259.md"
         TINTA_PANEL_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/toc-browser-resize.md"
         TINTA_IMAGE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/image-cache-large.md"
+        TINTA_ENCODED_IMAGE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/encoded-images-293/index.md"
+        TINTA_SAME_IMAGE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/same-image-name"
+        TINTA_NETWORK_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/network-paths/index.md"
         TINTA_FIND_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/find-table-focus.md"
         TINTA_WRAP_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/wrapped-cursor-selection.md"
         TINTA_SEARCH_WRAP_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/search-word-wrap-260.md"
@@ -198,6 +213,7 @@ if(BUILD_TESTING)
         TINTA_FRAGMENT_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/file-fragments/index.md"
         TINTA_CONTEXT_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/editor-context-selection.md"
         TINTA_MULTICURSOR_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/editor-multicursor-251.md"
+        TINTA_LIST_MARKS_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/editor-list-marks-304-306.md"
         TINTA_PRINT_EXPORT_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/print-word-export-256.md"
         TINTA_PRINT_EXPORT_THEMES="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/print-word-export-themes.ini"
         TINTA_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
@@ -313,12 +329,35 @@ if(BUILD_TESTING)
         -DTEST_BINARY=$<TARGET_FILE:input_tests>
         -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/search-panel-test-$<CONFIG>
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_search_panel_tests.cmake)
+    add_test(NAME byte_order_mark COMMAND ${CMAKE_COMMAND}
+        -DTEST_BINARY=$<TARGET_FILE:input_tests>
+        -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/byte-order-mark-test-$<CONFIG>
+        -DTEST_DOC=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/byte-order-mark.md
+        -DTEST_DOC2=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/byte-order-mark-frontmatter.md
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_byte_order_mark_tests.cmake)
 
     add_executable(file_path_tests tests/file_path_tests.cpp ${INPUT_TEST_SOURCES})
     target_include_directories(file_path_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
     target_link_libraries(file_path_tests PRIVATE $<TARGET_PROPERTY:tinta,LINK_LIBRARIES>)
     target_compile_definitions(file_path_tests PRIVATE $<TARGET_PROPERTY:tinta,COMPILE_DEFINITIONS>)
     add_test(NAME copy_file_path COMMAND file_path_tests)
+
+    add_executable(list_layout_tests tests/list_layout_tests.cpp ${INPUT_TEST_SOURCES})
+    target_include_directories(list_layout_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
+    target_link_libraries(list_layout_tests PRIVATE $<TARGET_PROPERTY:tinta,LINK_LIBRARIES>)
+    target_compile_definitions(list_layout_tests PRIVATE $<TARGET_PROPERTY:tinta,COMPILE_DEFINITIONS>
+        TINTA_LIST_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/list-block-order.md")
+    add_test(NAME list_block_order COMMAND ${CMAKE_COMMAND}
+        -DTEST_BINARY=$<TARGET_FILE:list_layout_tests>
+        -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/list-layout-test-$<CONFIG>
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_portable_test.cmake)
+
+    add_executable(nesting_tests tests/nesting_tests.cpp ${INPUT_TEST_SOURCES})
+    target_include_directories(nesting_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
+    target_link_libraries(nesting_tests PRIVATE $<TARGET_PROPERTY:tinta,LINK_LIBRARIES>)
+    target_compile_definitions(nesting_tests PRIVATE $<TARGET_PROPERTY:tinta,COMPILE_DEFINITIONS>
+        TINTA_DEEP_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/deep-nesting.md")
+    add_test(NAME deep_nesting COMMAND nesting_tests)
 
     add_executable(code_block_layout_tests tests/code_block_layout_tests.cpp ${INPUT_TEST_SOURCES})
     target_include_directories(code_block_layout_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
@@ -368,7 +407,8 @@ if(BUILD_TESTING)
     target_include_directories(html_span_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
     target_link_libraries(html_span_tests PRIVATE $<TARGET_PROPERTY:tinta,LINK_LIBRARIES>)
     target_compile_definitions(html_span_tests PRIVATE $<TARGET_PROPERTY:tinta,COMPILE_DEFINITIONS>
-        TINTA_HTML_SPAN_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/html-inline-tags-263.md")
+        TINTA_HTML_SPAN_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/html-inline-tags-263.md"
+        TINTA_MARKED_EMPHASIS_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/struck-and-marked-emphasis.md")
     add_test(NAME html_spans COMMAND html_span_tests)
 
     add_executable(rich_copy_tests tests/rich_copy_tests.cpp ${INPUT_TEST_SOURCES})
@@ -382,7 +422,8 @@ if(BUILD_TESTING)
     target_include_directories(blockquote_layout_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
     target_link_libraries(blockquote_layout_tests PRIVATE $<TARGET_PROPERTY:tinta,LINK_LIBRARIES>)
     target_compile_definitions(blockquote_layout_tests PRIVATE $<TARGET_PROPERTY:tinta,COMPILE_DEFINITIONS>
-        TINTA_QUOTE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/blockquote-spacing.md")
+        TINTA_QUOTE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/blockquote-spacing.md"
+        TINTA_HTML_QUOTE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/html-blockquote-text.md")
     add_test(NAME blockquote_layout COMMAND blockquote_layout_tests)
 
     add_executable(theme_tests tests/theme_tests.cpp tests/theme_colour_tests.cpp ${INPUT_TEST_SOURCES})
@@ -444,6 +485,50 @@ if(BUILD_TESTING)
         TINTA_MERMAID_ASYMMETRIC_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/mermaid-asymmetric-shape.md")
     add_test(NAME mermaid_parser COMMAND mermaid_tests)
 
+    # Sheets: the JSON Canvas model, the .smd format and the layouts
+    add_executable(sheet_model_tests
+        tests/sheet_model_tests.cpp
+        src/sheet_model.cpp
+        src/frontmatter.cpp
+        src/mermaid.cpp
+        src/mermaid_ext.cpp
+        src/mermaid_seq.cpp
+        src/mermaid_pie.cpp
+        src/mermaid_uml.cpp
+        src/mermaid_git.cpp
+        src/mermaid_gantt.cpp
+        src/mermaid_charts.cpp
+        src/mermaid_narrative.cpp
+        src/mermaid_grid.cpp
+        src/mermaid_charts2.cpp
+        src/mermaid_block.cpp
+        src/mermaid_c4.cpp
+    )
+    target_include_directories(sheet_model_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_compile_definitions(sheet_model_tests PRIVATE
+        TINTA_SHEET_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/sheets")
+    add_test(NAME sheet_model COMMAND sheet_model_tests)
+    # Sheets in the window: the fixture sheet worked through the handlers
+    add_test(NAME sheet_canvas COMMAND ${CMAKE_COMMAND}
+        -DTEST_BINARY=$<TARGET_FILE:input_tests>
+        -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/sheet-test-$<CONFIG>
+        -DTEST_FIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/sheets
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_sheet_tests.cmake)
+    # Live: a document typed in where it reads, through the handlers
+    add_test(NAME live_editor COMMAND ${CMAKE_COMMAND}
+        -DTEST_BINARY=$<TARGET_FILE:input_tests>
+        -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/live-test-$<CONFIG>
+        -DTEST_FIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/live
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_live_tests.cmake)
+    # Markdown in the source editor in colour (#268): the fixture's drawn lines
+    add_test(NAME source_highlight COMMAND ${CMAKE_COMMAND}
+        -DTEST_BINARY=$<TARGET_FILE:input_tests>
+        -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/source-highlight-test-$<CONFIG>
+        -DTEST_FIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/editor-highlighting-268.md
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_source_highlight_tests.cmake)
+
     # PlantUML CLI test double (used by the plantuml suites; no Java needed).
     add_executable(fake_plantuml tests/fake_plantuml.cpp)
 
@@ -497,6 +582,10 @@ if(BUILD_TESTING)
         ${md4c_SOURCE_DIR}/src
     )
     target_link_libraries(document_tests PRIVATE md4c)
+    target_compile_definitions(document_tests PRIVATE
+        TINTA_BOM_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/byte-order-mark.md"
+        TINTA_BOM_FRONTMATTER_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/byte-order-mark-frontmatter.md"
+        TINTA_MARKED_EMPHASIS_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/struck-and-marked-emphasis.md")
     add_test(NAME document_types COMMAND document_tests)
 
     # Word and character counting (#240): plain text and parsed Markdown

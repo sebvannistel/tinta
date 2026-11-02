@@ -13,6 +13,7 @@
 #include "tabs.h"
 
 #include <algorithm>
+#include <iterator>
 #include <string>
 
 // --- Small helpers (same one-shot layout pattern as the start page) ----
@@ -105,6 +106,8 @@ static const RailBtn kTextBtns[] = {
 static const RailBtn kBlockBtns[] = {
     {10, L"\u2022\u2261", 12.0f, DWRITE_FONT_WEIGHT_NORMAL,
      DWRITE_FONT_STYLE_NORMAL, L"Segoe UI", false, "rail.bullets", L""},
+    {13, L"1\u2261", 12.0f, DWRITE_FONT_WEIGHT_NORMAL,
+     DWRITE_FONT_STYLE_NORMAL, L"Segoe UI", false, "rail.numbers", L""},
     {11, L"\u2611", 13.0f, DWRITE_FONT_WEIGHT_NORMAL,
      DWRITE_FONT_STYLE_NORMAL, L"Segoe UI", false, "rail.tasks", L""},
     {12, L"\u275D", 13.0f, DWRITE_FONT_WEIGHT_NORMAL,
@@ -118,6 +121,13 @@ static const RailBtn kInsertBtns[] = {
     {22, L"\U0001F5BC", 12.0f, DWRITE_FONT_WEIGHT_NORMAL,
      DWRITE_FONT_STYLE_NORMAL, L"Segoe UI", false, "rail.image", L""},
 };
+// Source | Live (docs/live-editor.md): the pill at the rail's top
+static const RailBtn kModeBtns[] = {
+    {30, L"#", 13.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL,
+     L"Consolas", false, "rail.source", L"Ctrl+/"},
+    {31, L"Aa", 11.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL,
+     L"Segoe UI", false, "rail.live", L"Ctrl+/"},
+};
 // Foot: pandoc export, shown only when an executable was found
 static const RailBtn kFootBtns[] = {
     {23, L"\u2912", 13.0f, DWRITE_FONT_WEIGHT_NORMAL,
@@ -125,6 +135,9 @@ static const RailBtn kFootBtns[] = {
 };
 
 static const RailBtn* railBtnById(int id) {
+    for (const RailBtn& b : kModeBtns) {
+        if (b.id == id) return &b;
+    }
     for (const RailBtn& b : kTextBtns) {
         if (b.id == id) return &b;
     }
@@ -212,12 +225,54 @@ void renderEditRail(App& app) {
     sep(y);
     y += dpi(app, 9.0f);
 
-    // Tool groups: text style, blocks, insert
-    float btn = dpi(app, 32.0f);
+    // Source | Live: a pill whose knob slides to the way the document is
+    // typed in, the source as written or the page as it reads. A file that
+    // is its own source (plain text, a diagram) has no Live side.
+    {
+        const bool liveAllowed = !app.editorRawDocument;
+        float target = app.editorLive && liveAllowed ? 1.0f : 0.0f;
+        if (app.editorLiveAnim != target) {
+            float step = 0.25f;
+            app.editorLiveAnim = target > app.editorLiveAnim ? std::min(target, app.editorLiveAnim + step)
+                                                             : std::max(target, app.editorLiveAnim - step);
+            InvalidateRect(app.hwnd, nullptr, FALSE);
+        }
+        float eased = app.editorLiveAnim * app.editorLiveAnim * (3.0f - 2.0f * app.editorLiveAnim);
+        float pw = dpi(app, 30.0f), seg = dpi(app, 26.0f), pad = dpi(app, 2.0f);
+        float px = (railW - pw) * 0.5f;
+        D2D1_RECT_F pill = D2D1::RectF(px, y, px + pw, y + seg * 2 + pad * 2);
+        app.brush->SetColor(railA(text, 0.08f));
+        app.renderTarget->FillRoundedRectangle(D2D1::RoundedRect(pill, pw * 0.5f, pw * 0.5f), app.brush);
+        float knobTop = y + pad + seg * eased;
+        D2D1_RECT_F knob = D2D1::RectF(px + pad, knobTop, px + pw - pad, knobTop + seg);
+        app.brush->SetColor(accent);
+        app.renderTarget->FillRoundedRectangle(
+            D2D1::RoundedRect(knob, (pw - pad * 2) * 0.5f, (pw - pad * 2) * 0.5f), app.brush);
+        for (int k = 0; k < 2; k++) {
+            const RailBtn& b = kModeBtns[k];
+            D2D1_RECT_F r = D2D1::RectF(px, y + pad + seg * k, px + pw, y + pad + seg * (k + 1));
+            bool on = (k == 1) == (eased > 0.5f);
+            bool hov = app.editRailHover == b.id;
+            bool off = k == 1 && !liveAllowed;
+            railGlyph(app, b.glyph, b.size, b.weight, b.style, b.family, r,
+                      on ? onAccent : railA(text, off ? 0.25f : hov ? 0.9f : 0.55f));
+            if (!off) addHit(r, b.id);
+        }
+        y = pill.bottom + dpi(app, 9.0f);
+        sep(y);
+        y += dpi(app, 9.0f);
+    }
+
+    // Tool groups: text style, blocks, insert. A window too short for them
+    // sets them closer, down to 26 DIP apart, so the last stays above the foot
+    const bool foot = pandocAvailable(app);
+    const float room = H - y - dpi(app, 30.0f) - dpi(app, foot ? 60.0f : 8.0f);
+    const size_t count = std::size(kTextBtns) + std::size(kBlockBtns) + std::size(kInsertBtns);
+    const float pitch = std::clamp(room / (float)count, dpi(app, 26.0f), dpi(app, 34.0f));
+    float btn = pitch - dpi(app, 2.0f);
     float bx = (railW - btn) * 0.5f;
-    auto group = [&](const RailBtn* btns, int count) {
-        for (int i = 0; i < count; i++) {
-            const RailBtn& b = btns[i];
+    auto group = [&](const auto& btns) {
+        for (const RailBtn& b : btns) {
             D2D1_RECT_F r = D2D1::RectF(bx, y, bx + btn, y + btn);
             bool hov = app.editRailHover == b.id;
             if (hov) {
@@ -233,19 +288,19 @@ void renderEditRail(App& app) {
             y += btn + dpi(app, 2.0f);
         }
     };
-    group(kTextBtns, 5);
+    group(kTextBtns);
     y += dpi(app, 7.0f);
     sep(y);
     y += dpi(app, 8.0f);
-    group(kBlockBtns, 3);
+    group(kBlockBtns);
     y += dpi(app, 7.0f);
     sep(y);
     y += dpi(app, 8.0f);
-    group(kInsertBtns, 3);
+    group(kInsertBtns);
 
     // Foot: the pandoc export button, pinned to the rail's bottom and
     // present only when an executable is available
-    if (pandocAvailable(app)) {
+    if (foot) {
         float fy = H - dpi(app, 12.0f) - btn;
         sep(fy - dpi(app, 8.0f));
         const RailBtn& b = kFootBtns[0];
@@ -261,8 +316,6 @@ void renderEditRail(App& app) {
                   hov ? railA(text, 0.95f) : railA(text, 0.8f), b.strike);
         addHit(r, b.id);
     }
-    (void)onAccent;
-    (void)accent;
 
     app.renderTarget->SetTransform(prev);
     app.renderTarget->PopAxisAlignedClip();
@@ -402,8 +455,8 @@ static const EDiagItem kEDiag[] = {
     {L"\u21AA", "ectx.d.puml_act", L"puml activity"},
 };
 
-void openEditCtxMenu(App& app, HWND hwnd, float x, float y) {
-    editorPrepareContextMenuAt(app, (int)x, (int)y);
+void openEditCtxMenu(App& app, HWND hwnd, float x, float y, bool preserveSelection) {
+    if (!preserveSelection) editorPrepareContextMenuAt(app, (int)x, (int)y);
     app.editCtxOpen = true;
     app.editCtxRailOnly = false;
     app.editCtxX = x;

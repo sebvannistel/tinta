@@ -23,7 +23,7 @@
 
 <br>
 
-Tinta is a **fast, lightweight Markdown and Mermaid viewer for Windows**, built with Direct2D and DirectWrite for hardware-accelerated rendering. A single native executable of about 2.5 MB that opens instantly — no Electron, no web engine, no installer.
+Tinta is a **fast, lightweight Markdown and Mermaid viewer for Windows**, built with Direct2D and DirectWrite for hardware-accelerated rendering. A single native executable of under 5 MB that opens instantly — no Electron, no web engine, no installer.
 
 <p align="center">
   <img src="https://tinta.cc/img/screenshots/paper.png" width="49%" alt="Tinta markdown viewer on Windows — Paper light theme">
@@ -56,7 +56,7 @@ Most markdown apps ship an entire browser to render text. Tinta uses the GPU-acc
 |  | Tinta | Typora | Obsidian | VS Code |
 |---|---|---|---|---|
 | Startup | **<100 ms** | ~1.5 s | ~3 s | ~2 s |
-| Install size | **~2.5 MB** | ~90 MB | ~250 MB | ~350 MB |
+| Install size | **<5 MB** | ~90 MB | ~250 MB | ~350 MB |
 | Runtime | **Native Direct2D** | Electron | Electron | Electron |
 
 It's a viewer first: perfect as the double-click default for `.md` and `.mmd` files, for reading documentation and diagrams — with an edit mode when you need it.
@@ -72,11 +72,13 @@ It's a viewer first: perfect as the double-click default for `.md` and `.mmd` fi
 - **Native Mermaid diagrams** - 22 diagram families, from flowcharts with subgraphs through sequence, class, state, ER, gantt, and pie to C4, sankey, kanban, and radar - rendered without a web engine
 - **Export as HTML, DOCX, or PDF** - Right-click and pick "Export as..." for a self-contained web page, a Word document that opens natively, or a vector PDF; diagrams and math come along in every format
 - **Pandoc export** - With [pandoc](https://pandoc.org) installed (or pointed at in settings), the editor offers EPUB, OpenDocument, PowerPoint, RTF and LaTeX too; rich formats convert from Tinta's own HTML export so diagrams and math survive as vector graphics
+- **Sheets** - An infinite canvas of notes, made from the start page (S), where a Sheet tour shows the moves: cards are Markdown files in the sheet's folder, joined by arrows and gathered in groups, zoomed from titles down to the rendered note. Arrow keys walk between cards and Tab grows a mind map; links written in the notes show as ghost lines; a group can be a lane that writes `status:` into the notes dropped in it; the sheet compiles into one document, presents along its arrows, tidies itself, and turns a pasted Mermaid flowchart into cards. A `.smd` is readable Markdown with a JSON Canvas block, and Obsidian `.canvas` files open too. See [Sheets](docs/sheets.md)
 - **Start page** - Bare launches land on a launcher with recent files, quick actions labeled with your actual key bindings, and built-in guides; closing the last tab returns there, and Ctrl+T opens it as a new tab
 - **Review annotations** - Select text and press `A` to attach a note, stored as an invisible HTML comment in the file itself. Annotated passages get a tint and a marker rail beside the scrollbar; hover previews, click edits, and a copy-for-agent button turns the whole review into a paste-ready task list for any coding agent - as the agent fixes items and deletes the comments, the marks vanish live
 - **File references** - Plain-text paths like `docs/plan.md` become real links: live targets open as tabs, missing ones render as faded ghosts. Mouse back/forward (or Alt+arrows) walks your jumps with exact scroll restore
 - **Link peek** - Rest the pointer on a local `.md` or wiki link and the target appears fully rendered in a panel beside it, no tab opened
 - **Image lightbox** - Click any inline image to view it full size: wheel zooms, drag pans, Esc closes
+- **Other computers' shares stay closed** - An image or file link on another computer's share (`\\server\share\...`) opens only in a document from that same server; anywhere else the image shows a note instead, since opening the share would sign in to it with your Windows credentials. A share mapped to a drive letter opens like any local folder
 - **Copy tables as TSV** - Hover a table for a copy button that pastes into Excel or Sheets as a real grid
 - **Copy diagrams as images** - Hover a diagram for an Image button that puts a crisp 2x PNG on the clipboard
 - **Paste screenshots** - Ctrl+V a bitmap in edit mode and it saves as a PNG beside the document with the link inserted
@@ -85,7 +87,7 @@ It's a viewer first: perfect as the double-click default for `.md` and `.mmd` fi
 - **Tabs** - Win11 Notepad-style tabs in the title bar: files opened from Explorer join the window as tabs, Ctrl+Tab or the mouse wheel over the strip cycles, Ctrl+W or Ctrl+F4 closes (Ctrl+F4 also while editing, where Ctrl+W is word wrap), middle-click closes, Ctrl+T opens the file browser into a new tab, unsaved buffers show a dot, resting the pointer on a tab shows its full name, its folder and what its dot means, and dragging reorders tabs. Right-click a tab for close operations (close, close all but this, close all to the left/right) plus copy path and reveal in Explorer. Pulling a tab out of the strip floats it as a card: drop it on open space for a new window (which keeps the tab row), or onto another Tinta window to move it there — and dropping a single-file window onto a tab strip merges it back. Single-file windows stay tabless; turn the Explorer behavior off with the "Open files in tabs" setting
 - **Folder browser** - Press B to browse and open Markdown or Mermaid files (Ctrl+click a file to open it in a new tab)
 - **Table of contents** - Press Tab to see document headings, click to jump; the panel follows your reading position, and typing filters the headings
-- **Unified editor** - Press `:` to edit: your raw Markdown on the left with the rendered page docked beside it. A slim line-number gutter, a soft accent wash on the caret's line and its rendered block, a tool rail with formatting controls plus table-size and diagram-template pickers, and Markdown assists (lists continue on Enter, Tab indents, Ctrl+B/I wrap, and a quote, bracket or `* ~ ^ = :` typed over a selection wraps it). Alt+↑/↓ moves lines, selected text drags to another place (Ctrl+drag leaves a copy), and several carets (Alt+click, Ctrl+Alt+↑/↓, Ctrl+D) type, delete and move together, handy for lining up tables. A word and character count sits beside the Read button, for the whole document or the selection. Search and find-replace work in the editor too
+- **Unified editor** - Press `:` to edit: your raw Markdown on the left with the rendered page docked beside it. A slim line-number gutter, a soft accent wash on the caret's line and its rendered block, a tool rail with formatting controls (its bullet, numbered, task and quote buttons mark every selected line) plus table-size and diagram-template pickers, and Markdown assists (lists continue on Enter and on a paste of several lines, Tab indents, Ctrl+B/I wrap, and a quote, bracket or `* ~ ^ = :` typed over a selection wraps it). Alt+↑/↓ moves lines, selected text drags to another place (Ctrl+drag leaves a copy), and several carets (Alt+click, Ctrl+Alt+↑/↓, Ctrl+D) type, delete and move together, handy for lining up tables. A word and character count sits beside the Read button, for the whole document or the selection. Search and find-replace work in the editor too. The source is in colour: headings, links and code stand out, Markdown's marks go faint, and fenced code and the properties take their language's colours ([details](docs/syntax-highlighting.md#markdown-in-the-source-editor); Settings → Editor turns it off)
 - **Emoji shortcodes** - `:rocket:` and friends render as real emoji
 - **Fit to width** - Wide tables and diagrams grow a Fit button that shrinks them to the reading column
 - **Draft recovery** - Unsaved quick notes are stashed continuously and offered back on the next launch. With **Close without asking** (Settings → Editor), closing Tinta skips the save prompt and keeps unsaved edits as drafts for the next launch
@@ -97,7 +99,7 @@ It's a viewer first: perfect as the double-click default for `.md` and `.mmd` fi
 - **Portable mode** - Create a `settings.ini` next to `tinta.exe` (an empty file works) and the whole configuration — settings, custom themes, languages, drafts — lives beside the executable and travels with it; without one, everything stays in `%APPDATA%\Tinta`
 - **Localized interface** - English, Simplified Chinese, Japanese, Korean, German, French, and Italian UI; follows Windows or a chosen language
 - **Text selection & copy** - Select text and copy to clipboard
-- **Touch** - On a touchscreen a finger scrolls the page, the editor and the side panels, and a flick carries on; a tap clicks, a double tap selects a word, and a press held on a word selects it, extends as the finger slides, and opens the context menu where it lifts. The mouse and pen work as before
+- **Touch** - On a touchscreen a finger scrolls the page, the editor, the side panels and Help, and a flick carries on until a finger catches it; a tap clicks, a double tap selects a word, and a press held on a word selects it, extends word by word as the finger slides, and opens the context menu where it lifts (in the preview beside the editor, Copy and Select all). The application menu has **Exit editing** for leaving the editor without a keyboard, and a tap beside Help closes it. The mouse and pen work as before
 - **Zoom support** - Ctrl+scroll to zoom in/out
 - **Drag & drop** - Drop any Markdown or Mermaid file to view it
 - **Minimal footprint** - Small binary, minimal dependencies
@@ -123,14 +125,14 @@ It's a viewer first: perfect as the double-click default for `.md` and `.mmd` fi
 | `Page Up/Down` | Page scroll |
 | `Home/End` | Jump to start/end |
 | `Ctrl+G` | Go to a line by its number, in the editor or the reading view |
-| `:` | Enter edit mode |
+| `:` / `Ctrl+E` | Enter edit mode |
 | `ESC` `ESC` | Exit edit mode |
 | `Ctrl+N` | New quick note — a fresh window, start typing right away; `Ctrl+S` names it via the save dialog. While the note is still empty, an **Open a file** button (`Ctrl+O`) in the preview pane picks an existing file instead |
 | `Ctrl+S` | Save (in edit mode) |
 | `Ctrl+Shift+S` | Save As: the editor writes the buffer to a new path, the viewer saves a copy, and the document continues under the new name |
 | `Ctrl+H` | Find and replace (in edit mode): Tab switches fields, Enter replaces, Ctrl+Enter replaces all |
 | `Ctrl+P` | Print / export to PDF; the preview picks the paper, orientation and margins |
-| `Ctrl+E` | Show/hide preview pane (in edit mode) |
+| `Ctrl+E` | In Source, show/hide the preview pane; in Live, read the page at full width, and `Ctrl+E` again to go back |
 | `Ctrl+Shift+E` | Read the unsaved edits at full width; `Esc` returns to the source (in edit mode) |
 | `Ctrl+W` | Toggle word wrap (in edit mode) |
 | `Alt+↑` / `Alt+↓` | Move the current line, or the selected lines, up or down (in edit mode) |
@@ -307,7 +309,7 @@ The [Frontmatter settings](docs/frontmatter.md) page controls property display a
 
 Named, repeated and multiline [footnotes](docs/footnotes.md) include native navigation and HTML/DOCX export.
 
-Individual H1-H6 and marked-text overrides are described in [Heading and highlight colours](docs/theme-colours.md).
+Individual H1-H6, marked-text, bold, italic, selection and rule colours are described in [Theme colours](docs/theme-colours.md).
 
 ## Dependencies
 
