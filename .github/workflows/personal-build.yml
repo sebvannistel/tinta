@@ -1,4 +1,3 @@
-# Update this fork weekly, test the combined code, and publish personal releases.
 name: Personal build
 
 on:
@@ -11,94 +10,133 @@ on:
         type: boolean
         default: false
 
-permissions:
-  contents: write
-  pull-requests: write
-
+permissions: {}
 concurrency:
   group: personal-build
   cancel-in-progress: false
 
 jobs:
-  build:
+  prepare:
     runs-on: windows-latest
-    env:
-      GH_REPO: ${{ github.repository }}
-      GH_TOKEN: ${{ github.token }}
+    permissions:
+      contents: read
+    outputs:
+      commit: ${{ steps.candidate.outputs.commit }}
+      base: ${{ steps.candidate.outputs.base }}
+      needed: ${{ steps.candidate.outputs.needed }}
+      pr: ${{ steps.pr.outputs.url }}
     steps:
-      - name: Checkout this fork
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v5
         with:
           ref: master
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Check sync credentials
-        if: ${{ !inputs.build_only }}
+      - name: Prepare candidate merge
+        id: candidate
         shell: bash
         env:
+          BUILD_ONLY: ${{ inputs.build_only }}
           SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
         run: |
-          if [ -z "$SYNC_TOKEN" ]; then
-            echo "Add a SYNC_TOKEN Actions secret with Contents, Workflows and Pull requests write permissions before syncing."
-            exit 1
-          fi
-
-      - name: Prepare upstream merge
-        if: ${{ !inputs.build_only }}
-        id: sync
-        shell: bash
-        run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898747+github-actions[bot]@users.noreply.github.com"
-          git remote add upstream https://github.com/oipoistar/tinta.git
-          git fetch upstream master
-          if git merge-base --is-ancestor upstream/master HEAD; then
-            echo "needed=false" >> "$GITHUB_OUTPUT"
-          else
-            git switch -c "sync-upstream-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-            git merge --no-ff --no-edit upstream/master
-            echo "needed=true" >> "$GITHUB_OUTPUT"
-            echo "branch=$(git branch --show-current)" >> "$GITHUB_OUTPUT"
-            echo "base=$(git rev-parse origin/master)" >> "$GITHUB_OUTPUT"
+          echo "base=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "needed=false" >> "$GITHUB_OUTPUT"
+          if [ "$BUILD_ONLY" != "true" ]; then
+            if [ -z "$SYNC_TOKEN" ]; then
+              echo "Add the SYNC_TOKEN repository secret before syncing."
+              exit 1
+            fi
+            git config user.name "github-actions[bot]"
+            git config user.email "41898747+github-actions[bot]@users.noreply.github.com"
+            git remote add upstream https://github.com/oipoistar/tinta.git
+            git fetch upstream master
+            if ! git merge-base --is-ancestor upstream/master HEAD; then
+              git switch -c "sync-upstream-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+              git merge --no-ff --no-edit upstream/master
+              echo "needed=true" >> "$GITHUB_OUTPUT"
+              echo "branch=$(git branch --show-current)" >> "$GITHUB_OUTPUT"
+            fi
           fi
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      # Push before building so permission errors fail without wasting a build.
-      - name: Open sync pull request
-        if: steps.sync.outputs.needed == 'true'
+      - name: Push candidate and open pull request
+        if: steps.candidate.outputs.needed == 'true'
         id: pr
         shell: bash
         env:
-          SYNC_BRANCH: ${{ steps.sync.outputs.branch }}
+          GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
+          SYNC_BRANCH: ${{ steps.candidate.outputs.branch }}
         run: |
           set -euo pipefail
           auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
           git -c "http.extraheader=AUTHORIZATION: basic $auth" push origin "HEAD:refs/heads/$SYNC_BRANCH"
           pr=$(gh pr create --base master --head "$SYNC_BRANCH" \
             --title "Sync upstream master" \
-            --body "Automatically merge upstream into this fork after the Release build and tests pass.")
+            --body "Sync upstream into this fork after the Release build and tests pass.")
           echo "url=$pr" >> "$GITHUB_OUTPUT"
 
+  build:
+    needs: prepare
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    outputs:
+      tree: ${{ steps.source.outputs.tree }}
+      version: ${{ steps.source.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          persist-credentials: false
+      - name: Record source
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "tree=$(git rev-parse HEAD^{tree})" >> "$GITHUB_OUTPUT"
+          version=$(sed -n 's/^project(tinta VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release
         env:
           CFLAGS: /MP
           CXXFLAGS: /MP
-
       - name: Build
         run: cmake --build build --config Release --parallel
-
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
+      - uses: actions/upload-artifact@v4
+        if: ${{ !inputs.build_only }}
+        with:
+          name: personal-executable
+          path: build/Release/tinta.exe
+          if-no-files-found: error
 
-      - name: Merge tested sync pull request
-        if: steps.sync.outputs.needed == 'true'
+  merge-and-release:
+    if: ${{ !inputs.build_only }}
+    needs: [prepare, build]
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      GH_REPO: ${{ github.repository }}
+    steps:
+      # This fresh runner never executes the candidate's code.
+      - uses: actions/checkout@v5
+        with:
+          ref: master
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Merge tested pull request
+        if: needs.prepare.outputs.needed == 'true'
         shell: bash
         env:
-          EXPECTED_BASE: ${{ steps.sync.outputs.base }}
-          PR_URL: ${{ steps.pr.outputs.url }}
+          EXPECTED_BASE: ${{ needs.prepare.outputs.base }}
+          EXPECTED_HEAD: ${{ needs.prepare.outputs.commit }}
+          PR_URL: ${{ needs.prepare.outputs.pr }}
           GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
         run: |
           set -euo pipefail
@@ -107,53 +145,44 @@ jobs:
             echo "Fork master changed during testing; leaving the pull request for review."
             exit 1
           fi
-          gh pr merge "$PR_URL" --merge --match-head-commit "$(git rev-parse HEAD)" --delete-branch
+          gh pr merge "$PR_URL" --merge --match-head-commit "$EXPECTED_HEAD" --delete-branch
 
-      # Check out the actual merged commit and rebuild it, so the release tag
-      # identifies exactly the source used to produce the executable.
-      - name: Checkout merged master
-        if: steps.sync.outputs.needed == 'true'
+      - name: Verify merged source matches the tested tree
+        id: source
         shell: bash
-        run: |
-          git fetch origin master
-          git checkout --detach origin/master
-          cmake -B build -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --config Release --parallel
-          ctest --test-dir build -C Release --output-on-failure
         env:
-          CFLAGS: /MP
-          CXXFLAGS: /MP
-
-      - name: Decide whether a release is due
-        if: ${{ !inputs.build_only }}
-        id: version
-        shell: bash
+          EXPECTED_TREE: ${{ needs.build.outputs.tree }}
         run: |
           set -euo pipefail
-          version=$(sed -n 's/^project(tinta VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
-          test -n "$version"
-          tag="v${version}-personal"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          if gh release view "$tag" > /dev/null 2>&1; then
-            echo "due=false" >> "$GITHUB_OUTPUT"
-            echo "$tag is already released; nothing to do."
-          else
-            echo "due=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Release
-        if: steps.version.outputs.due == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          tag="${{ steps.version.outputs.tag }}"
-          commit=$(git rev-parse HEAD)
-          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-            echo "Tag $tag already exists without a release; refusing to attach a build to an old commit."
+          git fetch origin master --tags
+          commit=$(git rev-parse origin/master)
+          if [ "$(git rev-parse "$commit^{tree}")" != "$EXPECTED_TREE" ]; then
+            echo "The merged source differs from the tested source; refusing to release."
             exit 1
           fi
-          gh release create "$tag" build/Release/tinta.exe \
-            --target "$commit" \
-            --title "Tinta ${{ steps.version.outputs.version }} (personal)" \
-            --notes "Built from this fork's master at $commit. Run tinta.exe and answer Yes to install it into Program Files."
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: personal-executable
+          path: release
+      - name: Publish personal release if due
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+          COMMIT: ${{ steps.source.outputs.commit }}
+        run: |
+          set -euo pipefail
+          tag="v${VERSION}-personal"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "$tag is already released; nothing to do."
+            exit 0
+          fi
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "Tag $tag already exists without a release; refusing to reuse it."
+            exit 1
+          fi
+          gh release create "$tag" release/tinta.exe --target "$COMMIT" \
+            --title "Tinta $VERSION (personal)" \
+            --notes "Built from this fork at $COMMIT. Run tinta.exe and answer Yes to install it into Program Files."
