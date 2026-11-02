@@ -1,9 +1,4 @@
-# Personal build: once a week (Mondays), replay this fork's own commits on
-# top of the owner's latest code (in the runner only, nothing is pushed),
-# build and test it, and publish tinta.exe as a release whenever the owner's
-# version number moves on. A conflict or a failing test publishes nothing;
-# GitHub emails the failed run. The installed Tinta updates itself from
-# these releases.
+# Update this fork weekly, test the combined code, and publish personal releases.
 name: Personal build
 
 on:
@@ -12,21 +7,24 @@ on:
   workflow_dispatch:
     inputs:
       build_only:
-        description: "Build and test even if this version is released, without releasing"
+        description: "Test the current fork without syncing or releasing"
         type: boolean
         default: false
 
 permissions:
   contents: write
-  actions: write
+  pull-requests: write
+
+concurrency:
+  group: personal-build
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: windows-latest
-    # gh would otherwise pick the "upstream" remote added below and aim
-    # its release calls at the owner's repository
     env:
       GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout this fork
         uses: actions/checkout@v5
@@ -34,74 +32,103 @@ jobs:
           ref: master
           fetch-depth: 0
 
-      # Scheduled runs pause after 60 days without repository activity;
-      # re-enabling the workflow resets that clock
-      - name: Keep the schedule alive
-        shell: bash
-        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/personal-build.yml/enable" || true
-        env:
-          GH_TOKEN: ${{ github.token }}
-
-      # A rebase, not a merge: it skips commits whose changes the owner
-      # already has, such as copies of merged pull requests, which a merge
-      # would set against the owner's later edits to the same lines
-      - name: Put this fork's commits on the owner's latest code
+      - name: Prepare upstream merge
+        if: ${{ !inputs.build_only }}
+        id: sync
         shell: bash
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898747+github-actions[bot]@users.noreply.github.com"
           git remote add upstream https://github.com/oipoistar/tinta.git
           git fetch upstream master
-          git rebase upstream/master
-
-      - name: Decide whether a release is due
-        id: version
-        shell: bash
-        run: |
-          version=$(sed -n 's/^project(tinta VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
-          tag="v${version}-personal"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          if [ "${{ inputs.build_only }}" = "true" ]; then
-            echo "build=true" >> "$GITHUB_OUTPUT"
-            echo "due=false" >> "$GITHUB_OUTPUT"
-            echo "Build only; nothing will be released."
-          elif gh release view "$tag" > /dev/null 2>&1; then
-            echo "due=false" >> "$GITHUB_OUTPUT"
-            echo "$tag is already released; nothing to do."
+          if git merge-base --is-ancestor upstream/master HEAD; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
           else
-            echo "build=true" >> "$GITHUB_OUTPUT"
-            echo "due=true" >> "$GITHUB_OUTPUT"
+            git switch -c "sync-upstream-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            git merge --no-ff --no-edit upstream/master
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+            echo "branch=$(git branch --show-current)" >> "$GITHUB_OUTPUT"
+            echo "base=$(git rev-parse origin/master)" >> "$GITHUB_OUTPUT"
           fi
-        env:
-          GH_TOKEN: ${{ github.token }}
 
-      # /MP compiles a target's files on all the runner's cores, and
-      # --parallel builds the targets side by side: one file at a time, the
-      # build took 36 minutes
       - name: Configure
-        if: steps.version.outputs.build == 'true'
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release
         env:
           CFLAGS: /MP
           CXXFLAGS: /MP
 
       - name: Build
-        if: steps.version.outputs.build == 'true'
         run: cmake --build build --config Release --parallel
 
       - name: Test
-        if: steps.version.outputs.build == 'true'
         run: ctest --test-dir build -C Release --output-on-failure
+
+      # Publish only after testing. The pull request belongs to this fork.
+      - name: Open and merge sync pull request
+        if: steps.sync.outputs.needed == 'true'
+        shell: bash
+        env:
+          SYNC_BRANCH: ${{ steps.sync.outputs.branch }}
+          EXPECTED_BASE: ${{ steps.sync.outputs.base }}
+        run: |
+          set -euo pipefail
+          git push origin "HEAD:refs/heads/$SYNC_BRANCH"
+          pr=$(gh pr create --base master --head "$SYNC_BRANCH" \
+            --title "Sync upstream master" \
+            --body "Automatically merge upstream into this fork after the Release build and tests pass.")
+          git fetch origin master
+          if [ "$(git rev-parse origin/master)" != "$EXPECTED_BASE" ]; then
+            echo "Fork master changed during testing; leaving the pull request for review."
+            exit 1
+          fi
+          gh pr merge "$pr" --merge --match-head-commit "$(git rev-parse HEAD)" --delete-branch
+
+      # Check out the actual merged commit and rebuild it, so the release tag
+      # identifies exactly the source used to produce the executable.
+      - name: Checkout merged master
+        if: steps.sync.outputs.needed == 'true'
+        shell: bash
+        run: |
+          git fetch origin master
+          git checkout --detach origin/master
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release --parallel
+          ctest --test-dir build -C Release --output-on-failure
+        env:
+          CFLAGS: /MP
+          CXXFLAGS: /MP
+
+      - name: Decide whether a release is due
+        if: ${{ !inputs.build_only }}
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^project(tinta VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          test -n "$version"
+          tag="v${version}-personal"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            echo "due=false" >> "$GITHUB_OUTPUT"
+            echo "$tag is already released; nothing to do."
+          else
+            echo "due=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Release
         if: steps.version.outputs.due == 'true'
         shell: bash
         run: |
-          upstream=$(git rev-parse --short upstream/master)
-          gh release create "${{ steps.version.outputs.tag }}" build/Release/tinta.exe \
-            --target "${{ github.sha }}" \
+          set -euo pipefail
+          tag="${{ steps.version.outputs.tag }}"
+          commit=$(git rev-parse HEAD)
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "Tag $tag already exists without a release; refusing to attach a build to an old commit."
+            exit 1
+          fi
+          gh release create "$tag" build/Release/tinta.exe \
+            --target "$commit" \
             --title "Tinta ${{ steps.version.outputs.version }} (personal)" \
-            --notes "Tinta ${{ steps.version.outputs.version }} with the personal changes from this fork's master, merged with the owner's code at ${upstream}. Run tinta.exe and answer Yes to install it into Program Files."
-        env:
-          GH_TOKEN: ${{ github.token }}
+            --notes "Built from this fork's master at $commit. Run tinta.exe and answer Yes to install it into Program Files."
