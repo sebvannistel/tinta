@@ -127,6 +127,15 @@ struct D2DTheme {
     std::optional<D2D1_COLOR_F> headingColors[6]{};
     std::optional<D2D1_COLOR_F> highlightBackground = std::nullopt;
     std::optional<D2D1_COLOR_F> highlightText = std::nullopt;
+    // Optional colours for bold, italic and text that is both (#310);
+    // missing keeps the colour around them
+    std::optional<D2D1_COLOR_F> boldText = std::nullopt;
+    std::optional<D2D1_COLOR_F> italicText = std::nullopt;
+    std::optional<D2D1_COLOR_F> boldItalicText = std::nullopt;
+    // The selection's hue, drawn as translucent as each view's own; and
+    // the horizontal rule's colour, else blockquoteBorder
+    std::optional<D2D1_COLOR_F> selection = std::nullopt;
+    std::optional<D2D1_COLOR_F> rule = std::nullopt;
 };
 
 inline D2D1_COLOR_F themeInlineCodeColor(const D2DTheme& theme) {
@@ -146,6 +155,26 @@ inline D2D1_COLOR_F themeHighlightBackground(const D2DTheme& theme) {
         ? D2D1::ColorF(0.98f, 0.80f, 0.25f, 0.28f)
         : D2D1::ColorF(1.00f, 0.88f, 0.20f, 0.45f));
 }
+// The colour of bold and/or italic text, if the theme sets one. Text that
+// is both takes bolditalic=, else bold=, else italic=
+inline std::optional<D2D1_COLOR_F> themeEmphasisColor(const D2DTheme& theme, bool bold, bool italic) {
+    if (bold && italic) {
+        if (theme.boldItalicText) return theme.boldItalicText;
+        return theme.boldText ? theme.boldText : theme.italicText;
+    }
+    return bold ? theme.boldText : italic ? theme.italicText : std::nullopt;
+}
+inline D2D1_COLOR_F themeRuleColor(const D2DTheme& theme) {
+    return theme.rule.value_or(theme.blockquoteBorder);
+}
+// A view's selection fill: the theme's selection= at the view's own
+// strength, or the view's own colour
+inline D2D1_COLOR_F themeSelectionColor(const D2DTheme& theme, D2D1_COLOR_F own) {
+    if (!theme.selection) return own;
+    D2D1_COLOR_F color = *theme.selection;
+    color.a = own.a;
+    return color;
+}
 
 // Helper to create color from hex
 inline D2D1_COLOR_F hexColor(uint32_t hex, float alpha = 1.0f) {
@@ -159,6 +188,8 @@ inline D2D1_COLOR_F hexColor(uint32_t hex, float alpha = 1.0f) {
 
 // Forward declare App for dpi() helper
 struct App;
+// A sheet open in a tab (sheet_ui.h)
+struct SheetDoc;
 
 // DPI scaling helper for UI chrome elements.
 // Scales by contentScale only (not zoomFactor) so UI chrome tracks monitor DPI.
@@ -204,7 +235,7 @@ enum class SidePanel { None, Contents, Browser };
 enum class PanelList { None, Contents, Browser, Search };
 // What a finger drives (#286): the page (the reader or the docked
 // preview), the editor's text, or a side panel's list
-enum class TouchTarget { None, Document, Editor, List };
+enum class TouchTarget { None, Document, Editor, List, Sheet, Help };
 
 struct Settings {
     int themeIndex = 5;          // Default to Midnight
@@ -285,6 +316,11 @@ struct Settings {
     // Editor markdown assists (list continuation, Tab indent, Ctrl+B/I)
     // master switch
     bool editorAssists = true;
+    // Markdown in the source editor in colour (#268, source_style.h)
+    bool editorHighlight = true;
+    // Live: the page typed in where it reads, instead of the source beside
+    // its preview (docs/live-editor.md)
+    bool editorLive = false;
     // Word and character count beside the editor's Read button (#240)
     bool showWordCount = true;
     // Closing a window with unsaved edits skips the dialog and leaves them
@@ -352,6 +388,7 @@ struct App {
         int height = 0;
         bool failed = false;
         bool pending = false;  // remote image download in flight
+        bool blocked = false;  // on another computer's share, left unopened
         size_t bytes = 0;      // estimated decoded bitmap memory
         unsigned long long lastUsed = 0;
     };
@@ -537,6 +574,7 @@ struct App {
         std::optional<std::string> viewerSource;
         FILETIME lastWrite{};      // for external-change conflicts (dirty tabs)
         std::wstring editorText;   // parked edit buffer (editMode only)
+        bool editorBom = false;    // its file starts with a byte order mark
         float editorScrollY = 0.0f;
         size_t editorCursor = 0;
         bool wordWrap = true;
@@ -636,6 +674,8 @@ struct App {
     // an untitled, still-empty buffer (rect refreshed by its renderer)
     D2D1_RECT_F quickNoteButtonRect = {};
     bool quickNoteButtonHover = false;
+    D2D1_RECT_F quickNoteSheetRect = {};  // New sheet, beside Open a file
+    bool quickNoteSheetHover = false;
     // Editor pane scrollbar dragging (#121)
     bool editorScrollbarDragging = false;
     float editorScrollbarDragStartY = 0.0f;
@@ -673,6 +713,13 @@ struct App {
     int startPageHover = 0;  // hit id under the mouse, 0 = none
     std::vector<std::pair<D2D1_RECT_F, int>> startPageHits;  // rebuilt each paint
     ID2D1Bitmap* startPageIconBitmap = nullptr;  // hero icon (device bitmap)
+
+    // Sheets (sheet_ui.h): each sheet file opened this session, by its
+    // lowercased path, keeps its camera, selection, undo and card drawings
+    // across tab switches
+    std::unordered_map<std::string, std::shared_ptr<SheetDoc>> sheetDocs;
+    // Counts render target recreations: bitmaps made for an older target are redrawn
+    unsigned renderTargetGeneration = 0;
 
     // Folder browser overlay
     bool showFolderBrowser = false;
@@ -915,10 +962,15 @@ struct App {
         UINT32 pointer = 0;
         std::vector<UINT32> extra;
         bool multi = false;  // another finger came down
+        bool braking = false;  // this press caught its target's fling
         TouchTarget target = TouchTarget::None;
         PanelList list = PanelList::None;
         POINT start{}, last{};
-        int axis = 0;  // while panning: 1 vertical, 2 horizontal
+        size_t editorWordStart = 0, editorWordEnd = 0;
+        int contextTab = -1;
+        std::string contextFile;
+        bool contextEdit = false;
+        int axis = 0;  // while panning: 1 vertical, 2 horizontal, 3 both (a sheet)
         float originX = 0, originY = 0;
         struct Sample { double ms; float x, y; };
         std::vector<Sample> samples;  // recent positions, for a flick's speed
@@ -934,6 +986,7 @@ struct App {
         double flingMs = 0;
         int flingTab = -1;
         std::string flingFile;
+        bool flingEdit = false;
     } touch;
     float tocAnimation = 0.0f;  // 0 to 1 slide-in from the chosen side
     // A clicked heading stays the active row even when the scroll cannot
@@ -1259,6 +1312,15 @@ struct App {
         float renderedY;
     };
     std::vector<ScrollAnchor> scrollAnchors;
+    // Every top-level block the layout placed, in order: its first source
+    // offset (SIZE_MAX when it has no text) and the stretch of the page it
+    // takes, its spacing included. Live finds its blocks on the page here.
+    struct BlockSpan {
+        size_t sourceOffset;
+        float top, bottom;
+    };
+    std::vector<BlockSpan> blockSpans;
+    unsigned layoutSerial = 0;  // counts layouts begun
     std::vector<size_t> editorLineByteOffsets;  // UTF-8 byte offset per editor line
 
     size_t searchMatchCursor = 0;
@@ -1398,6 +1460,7 @@ struct App {
     // Unified editor (design t11): one raw buffer, live render beside it;
     // the left tool rail slides in with edit mode carrying the controls
     bool editorAssists = true;
+    bool editorHighlight = true;     // #268
     bool showWordCount = true;       // #240
     bool closeKeepsDrafts = false;   // #252
     fm::Settings frontmatter;
@@ -1423,12 +1486,24 @@ struct App {
     // Editor document
     std::wstring editorText;
     bool editorDirty = false;
+    // The file starts with a UTF-8 byte order mark. The mark stays out of
+    // editorText, so the caret never sits before it, and saves write it back.
+    bool editorBom = false;
     std::vector<size_t> editorLineStarts;
+    // Counts every change to the source's text: what is worked out from it
+    // (the highlighting's line kinds) knows when to work it out again
+    unsigned long long editorTextRevision = 0;
     float editorScrollX = 0.0f;  // horizontal scroll, non-wrap mode only (#77)
 
     // Editor view options (persisted)
     bool editorShowPreview = true;
     bool editorWordWrap = false;
+    // Live (docs/live-editor.md): the page typed in where it reads; the
+    // rail's Source | Live pill slides its knob over editorLiveAnim
+    bool editorLive = false;
+    float editorLiveAnim = 0.0f;
+    // A plain-text, Mermaid or PlantUML file is its own source: no Live
+    bool editorRawDocument = false;
 
     // Soft-wrap metrics: cumulative visual rows before each logical line
     // (editorRowStarts.size() == lines + 1). Only maintained while
@@ -1543,6 +1618,8 @@ struct App {
         }
         layoutTextRuns.clear();
         layoutRects.clear();
+        blockSpans.clear();
+        ++layoutSerial;
         frontmatterOverflow.clear();
         layoutLines.clear();
         layoutShapes.clear();
@@ -1663,8 +1740,13 @@ inline float editSeamWidth(const App& app) {
     return dpi(app, 16.0f);
 }
 
+// Live (docs/live-editor.md): the page is typed in where it reads
+inline bool editorLiveOn(const App& app) {
+    return app.editMode && app.editorLive && !app.editorReadingPreview && !app.editorRawDocument;
+}
+
 inline float editorPaneWidth(const App& app) {
-    if (app.editorReadingPreview) return 0;
+    if (app.editorReadingPreview || editorLiveOn(app)) return 0;
     return app.editorShowPreview
         ? app.width * app.editorSplitRatio - editSeamWidth(app) * 0.5f
         : static_cast<float>(app.width);
@@ -1751,6 +1833,9 @@ inline float documentViewportX(const App& app) {
         }
         return x;
     }
+    // Live: the page beside the rail, at the rail's full width so sliding
+    // it in does not lay the page out again
+    if (editorLiveOn(app)) return dpi(app, 48.0f);
     // Preview hidden: zero-width viewport at the right edge — document
     // rendering flows through unchanged and clips to nothing
     if (!app.editorShowPreview) {
@@ -1760,7 +1845,7 @@ inline float documentViewportX(const App& app) {
 }
 
 inline bool editorPreviewVisible(const App& app) {
-    return app.editMode && (app.editorShowPreview || app.editorReadingPreview);
+    return app.editMode && (app.editorShowPreview || app.editorReadingPreview || editorLiveOn(app));
 }
 
 // The split editor is up: the source with the preview docked beside it,
@@ -1770,7 +1855,7 @@ inline bool editorPreviewVisible(const App& app) {
 // chrome (#242). The seam and the pane chrome ask this; document
 // rendering keeps asking editorPreviewVisible, which is true in both.
 inline bool editSplitPreview(const App& app) {
-    return app.editMode && app.editorShowPreview && !app.editorReadingPreview;
+    return app.editMode && app.editorShowPreview && !app.editorReadingPreview && !editorLiveOn(app);
 }
 
 // The Read / Edit pill floats over the bottom-left corner in edit mode

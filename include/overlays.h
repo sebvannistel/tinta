@@ -16,6 +16,7 @@ void renderThemeChooser(App& app);
 int themeChooserRows();
 void themeChooserCell(int themeIndex, int& col, int& row);
 void renderHelpOverlay(App& app);
+D2D1_RECT_F helpPanelRect(const App& app);
 // Full-frame print preview; render() short-circuits to this while it is open
 void renderPrintPreview(App& app);
 
@@ -26,7 +27,7 @@ enum SettingsAction {
     SET_SECTION_GENERAL, SET_SECTION_APPEARANCE, SET_SECTION_EDITOR, SET_SECTION_FRONTMATTER,
     SET_TOGGLE_FOLLOW, SET_TOGGLE_FOLDERSEARCH, SET_TOGGLE_BROWSEFOCUS,
     SET_TOGGLE_OPENTABS, SET_TOGGLE_KEEPDELETED, SET_TOGGLE_HEADRULES, SET_TOGGLE_NOTIFICATIONS,
-    SET_TOGGLE_WRAP, SET_TOGGLE_PREVIEW, SET_TOGGLE_ASSISTS,
+    SET_TOGGLE_WRAP, SET_TOGGLE_PREVIEW, SET_TOGGLE_ASSISTS, SET_TOGGLE_HIGHLIGHT,
     SET_TOGGLE_WORDCOUNT, SET_TOGGLE_CLOSE_DRAFTS,
     SET_LOCATE_PANDOC,
     SET_LOCATE_PLANTUML,
@@ -125,6 +126,8 @@ enum ContextMenuItem {
     CTX_SAVE_AS,
     CTX_EXIT,
     CTX_COPY_PATH,
+    CTX_AS_SHEET,
+    CTX_END_EDIT,
     CTX_ITEM_COUNT
 };
 struct ContextMenuEntry {
@@ -166,6 +169,9 @@ float promptKeycap(App& app, const wchar_t* label, float rightX, float cy);
 void panelFooterText(App& app, const wchar_t* text, const D2D1_RECT_F& rect);
 // The search bar's rect once slid in, and its results-panel button
 D2D1_RECT_F searchBarRect(const App& app);
+// Geometry at the current animation position, shared by paint and touch routing.
+D2D1_RECT_F searchBarDrawRect(const App& app);
+D2D1_RECT_F searchReplaceRowRect(const App& app);
 D2D1_RECT_F searchResultsButtonRect(const App& app);
 // Opens at (x, y) client coordinates, clamped so the menu stays on screen
 void openContextMenu(App& app, float x, float y, bool application = false);

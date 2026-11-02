@@ -185,6 +185,55 @@ void printMargins(App& app) {
     std::ofstream(ini, std::ios::binary) << saved;
 }
 
+// The body-sized marker can start above a small heading even when their
+// baselines align. A page break must keep both complete runs together.
+void listMarkerPagination(App& app) {
+    const auto fixture = std::filesystem::path(TINTA_PRINT_EXPORT_FIXTURE).parent_path() / "list-block-order.md";
+    const std::string source = read(fixture);
+    auto doc = app.parser.parse(source);
+    check(!source.empty() && doc.success, "list pagination fixture opens and parses");
+    if (!doc.success) return;
+    app.root = doc.root;
+    const float savedMargin = app.printMarginMm;
+    app.printPreviewPaper = 0;
+    app.printPreviewLandscape = false;
+    for (int theme : {0, 5}) {
+        applyTheme(app, theme);
+        for (float margin : {19.05f, 50.0f}) {
+            app.printMarginMm = margin;
+            openPrintPreview(app, app.hwnd);
+            check(app.showPrintPreview && app.printLayout && app.printPreviewBounds.size() > 1,
+                  "list fixture produces native print pages");
+            for (const wchar_t* title : {L"Ordered level six heading", L"Unordered level six heading"}) {
+                const std::string context = "theme " + std::to_string(theme) + ", margin " + std::to_string(margin) + ", " + utf8(title);
+                const size_t offset = app.docText.find(title);
+                const App::LayoutTextRun* heading = nullptr;
+                for (const auto& run : app.layoutTextRuns)
+                    if (offset != std::wstring::npos && run.docLength && run.docStart <= offset && offset < run.docStart + run.docLength)
+                        heading = &run;
+                const App::LayoutTextRun* marker = nullptr;
+                if (heading) for (const auto& run : app.layoutTextRuns)
+                    if (!run.docLength && run.pos.x < heading->pos.x &&
+                        run.bounds.top < heading->bounds.bottom && run.bounds.bottom > heading->bounds.top)
+                        marker = &run;
+                check(heading && marker, context + ": native heading and marker render");
+                if (!heading || !marker) continue;
+                int sharedPages = 0;
+                for (size_t i = 1; i < app.printPreviewBounds.size(); ++i) {
+                    const float top = app.printPreviewBounds[i - 1], bottom = app.printPreviewBounds[i];
+                    check(!(marker->bounds.top < bottom && bottom < marker->bounds.bottom),
+                          context + ": no page boundary slices the marker");
+                    if (top <= marker->bounds.top && marker->bounds.bottom <= bottom &&
+                        top <= heading->bounds.top && heading->bounds.bottom <= bottom) ++sharedPages;
+                }
+                check(sharedPages == 1, context + ": marker and first heading line belong wholly to one page");
+            }
+            closePrintPreview(app, app.hwnd);
+        }
+    }
+    app.printMarginMm = savedMargin;
+}
+
 // #256: Word names the faces the screen draws CJK in
 void wordFonts(App& app, const std::filesystem::path& dir) {
     const std::wstring bodyHan = facesOf(app, app.textFormat, kHan);
@@ -233,10 +282,11 @@ int runPrintExportTests() {
     app.width = 1050;
     app.height = 900;
     updateTextFormats(app);
+    listMarkerPagination(app);
     if (!installed(app, L"SimSun") || !installed(app, L"Courier New") ||
         !installed(app, L"Georgia") || !installed(app, L"Cambria")) {
-        std::cout << "Print and export: skipped, a fixture font is not installed\n";
-        return 0;
+        std::cout << "Print and export: font checks skipped (fixture font missing), " << failures << " failures\n";
+        return failures ? 1 : 0;
     }
 
     // The reporter's setup: a custom theme with a CJK body face and a

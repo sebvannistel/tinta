@@ -1,5 +1,13 @@
 # Touch gestures (#286)
 
+alpha beta gamma
+中文选择测试
+
+In the source editor, hold **beta**, slide to gamma or back to alpha,
+then lift: the whole words stay selected when the menu opens. Sliding
+down to the Chinese line extends across the line break. Canceling a
+hold keeps its selection and never moves the text.
+
 On a touchscreen a finger dragged across this page scrolls it instead of
 selecting text, and a flick carries the page on after the finger lifts.
 A tap follows a link: [jump to the end](#the-end). A double tap selects a
@@ -10,6 +18,56 @@ context menu opens where the finger lifts.
 > The Contents (**Tab**), the file browser (**B**) and the search results
 > (**Ctrl+Shift+F**) pan with a finger too. The mouse still selects text,
 > and the scrollbars still drag.
+
+Flick the page, then catch it with a finger over the [jump link](#the-end):
+the first press must only stop the page. A second deliberate tap follows
+the link. A catching finger can also continue straight into a new pan.
+The same braking rule applies to the source editor and scrolling lists;
+touching a different control still operates that control immediately.
+
+In split edit mode, tap **jump to the end** in the preview. Both panes
+should scroll, and the destination must remain visible on subsequent
+repaints. The source text, unsaved state and caret must remain unchanged.
+
+With split editing open, tap the wide table's **Fit** and **Copy TSV**
+buttons, including while a header cell is being edited. The buttons must
+remain on top and operate without opening the cell underneath. Ordinary
+cell taps should still open the inline editor.
+
+For control routing, enter **Edit** with split preview, open Find/Replace,
+and narrow the window until Replace / All move below the replacement
+field. Both buttons must remain tappable. Open the source context menu
+near the split: its table submenu must work over the preview, and tapping
+outside must only dismiss it. In reading mode, drag either Contents
+resize edge with a finger; the edge must resize rather than scroll.
+
+For tap cleanup, tap a word, pan, and quickly tap the same word again:
+it must start a fresh tap rather than select a word. In Contents, tap two
+adjacent rows near their shared boundary; each tap follows its own row.
+Switch focus or editing mode during a held press or fling: no delayed
+menu or scrolling should continue in the new context. Normal deliberate
+double and triple taps must still select words and lines.
+
+In split editing, hold lavender in the rendered preview and extend to
+rosemary. Lifting should open a copy menu and keep the selected words.
+Holding table text should select it too; a normal tap still edits a cell.
+
+Open Help from the application menu: swipe and flick its shortcut list.
+The document underneath must stay still. Tap the empty margin on either
+side to close Help; that tap must not activate the document underneath.
+
+To leave split editing without a keyboard, tap the top-left application
+logo and choose **Exit editing**. A clean document returns to reading
+immediately. With unsaved edits, test **Keep editing** first; then choose
+Save or Discard deliberately. The document tab must stay open.
+
+On a sheet, a double tap whose second tap lands a little off the first
+still writes a note there, and a finger held on the canvas opens the
+sheet's menu where it lifts. In a card being typed in, and on the page
+with **Live** on, a held finger selects the word under it and slides on by
+words, keeping that word if it slides back, and the menu opens over the
+words where it lifts. While that menu is up, a finger works it as the
+mouse does, and the page under it stays still.
 
 | Bed 1 | Bed 2 | Bed 3 | Bed 4 | Bed 5 | Bed 6 | Bed 7 | Bed 8 | Bed 9 | Bed 10 | Bed 11 | Bed 12 | Bed 13 | Bed 14 | Bed 15 | Bed 16 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|

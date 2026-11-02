@@ -1,6 +1,10 @@
 #include "frontmatter_ui.h"
 #include "input.h"
+#include "live_editor.h"
+#include "sheet_ui.h"
+#include "touch.h"
 #include "link_target.h"
+#include "network_path.h"
 #include "annotations.h"
 #include "drafts.h"
 #include "editrail.h"
@@ -41,6 +45,9 @@ static HCURSOR cursorArrow = LoadCursor(nullptr, IDC_ARROW);
 static HCURSOR cursorHand  = LoadCursor(nullptr, IDC_HAND);
 static HCURSOR cursorIBeam = LoadCursor(nullptr, IDC_IBEAM);
 static HCURSOR cursorSizeWE = LoadCursor(nullptr, IDC_SIZEWE);
+
+static bool tableCopyButtonAt(const App& app, int mouseX, int mouseY);
+static bool tableFitButtonAt(const App& app, int mouseX, int mouseY);
 
 static const App::TaskRect* taskRectAt(const App& app);
 static void startPageInvoke(App& app, HWND hwnd, int id);
@@ -748,6 +755,12 @@ static void settingsAction(App& app, HWND hwnd, int action) {
             app.editorAssists = !app.editorAssists;
             persistEditorMode(app);
             break;
+        case SET_TOGGLE_HIGHLIGHT:
+            // The source's lines are laid out again, in colour or plain (#268)
+            app.editorHighlight = !app.editorHighlight;
+            app.clearEditorLineLayoutCache();
+            persistEditorMode(app);
+            break;
         case SET_TOGGLE_WORDCOUNT:
             app.showWordCount = !app.showWordCount;
             app.editorDocCountsStale = true;
@@ -904,6 +917,9 @@ void handleMouseWheel(App& app, HWND hwnd, WPARAM wParam, LPARAM) {
         printPreviewSetPage(app, app.printPreviewPage + (delta < 0 ? 1 : -1));
         return;
     }
+    // A text menu goes with the page it was opened over
+    liveCloseMenu(app);
+    if (sheetActive(app)) sheetCloseTextMenu(app);
     // A turn that only closes a menu does nothing else over the tab strip
     const bool menuWasOpen = app.showContextMenu || app.showTabMenu;
     if (app.showContextMenu) {
@@ -946,10 +962,16 @@ void handleMouseWheel(App& app, HWND hwnd, WPARAM wParam, LPARAM) {
         return;
     }
 
+    // A sheet: the wheel pans, Ctrl+wheel zooms about the pointer
+    if (sheetActive(app) && !app.showThemeChooser &&
+        sheetMouseWheel(app, hwnd, (float)GET_WHEEL_DELTA_WPARAM(wParam), false, app.mouseX, app.mouseY)) {
+        return;
+    }
+
     // Edit mode: the wheel scrolls the editor from either pane — the preview
     // follows through the scroll-anchor sync, so the panes cannot drift
     // apart and both sides always respond (#77)
-    if (app.editMode && !app.editorReadingPreview) {
+    if (app.editMode && !app.editorReadingPreview && !editorLiveOn(app)) {
         float sepX = app.editorShowPreview
             ? app.width * app.editorSplitRatio
             : static_cast<float>(app.width);
@@ -1022,9 +1044,10 @@ void handleMouseWheel(App& app, HWND hwnd, WPARAM wParam, LPARAM) {
         app.targetScrollX = std::max(0.0f, std::min(app.targetScrollX, maxScrollX));
         app.scrollX = app.targetScrollX;
     } else {
-        // Normal scroll
+        // Normal scroll, as far as the scrollbar goes: Live's page grows
+        // with the block open in it
         app.targetScrollY -= delta * dpi(app, 60.0f);
-        float maxScroll = std::max(0.0f, app.contentHeight - app.height);
+        float maxScroll = std::max(0.0f, (editorLiveOn(app) ? livePageHeight(app) : app.contentHeight) - app.height);
         app.targetScrollY = std::max(0.0f, std::min(app.targetScrollY, maxScroll));
         app.scrollY = app.targetScrollY;
     }
@@ -1034,6 +1057,10 @@ void handleMouseWheel(App& app, HWND hwnd, WPARAM wParam, LPARAM) {
 
 void handleMouseHWheel(App& app, HWND hwnd, WPARAM wParam, LPARAM) {
     tabHoverCardDismiss(app, hwnd);
+    if (sheetActive(app) && !app.showThemeChooser && !app.showHelp && !app.showSettings &&
+        sheetMouseWheel(app, hwnd, (float)GET_WHEEL_DELTA_WPARAM(wParam), true, app.mouseX, app.mouseY)) {
+        return;
+    }
     // Horizontal scroll
     float delta = (float)GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA * dpi(app, 60.0f);
     app.targetScrollX += delta;
@@ -1044,6 +1071,71 @@ void handleMouseHWheel(App& app, HWND hwnd, WPARAM wParam, LPARAM) {
     app.scrollX = app.targetScrollX;
 
     InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+// The document's scrollbars at a point: the vertical bar's band at the
+// viewport's right edge, which a right-docked TOC pushes left of the
+// window's, and the horizontal bar's along the foot while the content is
+// wider than the viewport
+static void documentScrollbarsAt(const App& app, float x, float y, bool& vertical, bool& horizontal) {
+    const float band = dpi(app, 14.0f);  // hit area
+    const float left = documentViewportX(app);
+    const float width = documentViewportWidth(app);
+    vertical = app.verticalScrollbarVisible && x >= left + width - band && x <= left + width;
+    horizontal = app.contentWidth > width && y >= app.height - band && x >= left && x <= left + width;
+}
+
+// A press on a scrollbar takes its thumb; on the track, off the thumb, the
+// thumb is centred there first
+static void beginDocumentScrollbarDrag(App& app, HWND hwnd, bool vertical) {
+    if (vertical) {
+        app.scrollbarDragging = true;
+        app.scrollbarDragStartY = (float)app.mouseY;
+        app.scrollbarDragStartScroll = app.scrollY;
+        const ScrollbarGeometry bar = documentScrollbarV(app);
+        if (app.mouseY < bar.thumbStart || app.mouseY > bar.thumbStart + bar.thumbLength) {
+            app.scrollY = bar.scrollForThumb((float)app.mouseY - bar.thumbLength / 2);
+            app.targetScrollY = app.scrollY;
+            app.scrollbarDragStartScroll = app.scrollY;
+            if (app.editMode) editorFollowPreview(app);  // as for the drag (#280)
+        }
+    } else {
+        app.hScrollbarDragging = true;
+        app.hScrollbarDragStartX = (float)app.mouseX;
+        app.hScrollbarDragStartScroll = app.scrollX;
+        const ScrollbarGeometry bar = documentScrollbarH(app);
+        if (app.mouseX < bar.thumbStart || app.mouseX > bar.thumbStart + bar.thumbLength) {
+            app.scrollX = bar.scrollForThumb((float)app.mouseX - bar.thumbLength / 2);
+            app.targetScrollX = app.scrollX;
+            app.hScrollbarDragStartScroll = app.scrollX;
+        }
+    }
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+bool documentScrollbarHover(App& app, HWND hwnd, int x, int y) {
+    bool vertical = false, horizontal = false;
+    if ((float)y >= chromeTopHeight(app)) documentScrollbarsAt(app, (float)x, (float)y, vertical, horizontal);
+    if (vertical != app.scrollbarHovered || horizontal != app.hScrollbarHovered) {
+        app.scrollbarHovered = vertical;
+        app.hScrollbarHovered = horizontal;
+        InvalidateRect(hwnd, nullptr, FALSE);
+    }
+    if (!vertical && !horizontal) return false;
+    SetCursor(cursorArrow);
+    return true;
+}
+
+bool documentScrollbarPress(App& app, HWND hwnd, int x, int y) {
+    bool vertical = false, horizontal = false;
+    if ((float)y >= chromeTopHeight(app)) documentScrollbarsAt(app, (float)x, (float)y, vertical, horizontal);
+    if (!vertical && !horizontal) return false;
+    app.mouseDown = true;
+    app.mouseX = x;
+    app.mouseY = y;
+    SetCapture(hwnd);
+    beginDocumentScrollbarDrag(app, hwnd, vertical);
+    return true;
 }
 
 static bool moveDocumentScrollbarDrag(App& app, HWND hwnd) {
@@ -1131,6 +1223,16 @@ void handleMouseMove(App& app, HWND hwnd, LPARAM lParam) {
     bool mouseMoved = app.mouseX != GET_X_LPARAM(lParam) || app.mouseY != GET_Y_LPARAM(lParam);
     app.mouseX = GET_X_LPARAM(lParam);
     app.mouseY = GET_Y_LPARAM(lParam);
+    // An open text menu lights its rows and has the arrow wherever the pointer goes
+    if (liveMenuMouseMove(app, hwnd, app.mouseX, app.mouseY) ||
+        (sheetActive(app) && sheetTextMenuMouseMove(app, hwnd, app.mouseX, app.mouseY))) {
+        return;
+    }
+    // A press that began on a sheet keeps the pointer, over the strip too
+    if (sheetActive(app) && sheetPressed(app)) {
+        sheetMouseMove(app, hwnd, app.mouseX, app.mouseY);
+        return;
+    }
 
     if (app.showToc || app.showFolderBrowser) {
         TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, hwnd, 0};
@@ -1421,9 +1523,24 @@ void handleMouseMove(App& app, HWND hwnd, LPARAM lParam) {
         return;
     }
 
+    // A sheet: hover, cursor and its menu
+    if (sheetActive(app) && sheetMouseMove(app, hwnd, app.mouseX, app.mouseY)) return;
+
     // Edit mode: handle separator drag, editor selection, cursor shape
     if (app.editMode) {
+        // The rail's export flyout hangs over the page: it lights its rows first
+        if (app.editCtxOpen && editorLiveOn(app) && editCtxMouseMove(app, app.mouseX, app.mouseY)) {
+            SetCursor(cursorArrow);
+            return;
+        }
+        // A pointer gone from the rail to Live's page leaves no name behind
+        if (app.editRailHover && (float)app.mouseX >= editRailWidth(app)) {
+            app.editRailHover = 0;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        if (liveMouseMove(app, hwnd, app.mouseX, app.mouseY)) return;
         handleEditorMouseMove(app, hwnd, app.mouseX, app.mouseY);
+        if (app.editCtxOpen) return;
         // The Read button owns the pointer while it shows (#245)
         if (app.readButtonHover) return;
         // Replace-bar controls override the pane cursor: hand over the
@@ -1444,18 +1561,20 @@ void handleMouseMove(App& app, HWND hwnd, LPARAM lParam) {
         // If mouse is in the preview pane and not dragging separator, fall through for link hover etc.
         if ((float)app.mouseX < documentViewportX(app) ||
             app.draggingSeparator || app.editorSelecting || app.editorTextDrag.armed) return;
-        // Quick-note empty state: hover feedback for the Open button
+        // Quick-note empty state: hover feedback for Open and New sheet
         if (quickNoteEmptyStateActive(app) && app.editorShowPreview) {
-            const D2D1_RECT_F& r = app.quickNoteButtonRect;
-            bool over = (float)app.mouseX >= r.left &&
-                        (float)app.mouseX <= r.right &&
-                        (float)app.mouseY >= r.top &&
-                        (float)app.mouseY <= r.bottom;
-            if (over != app.quickNoteButtonHover) {
-                app.quickNoteButtonHover = over;
+            auto inside = [&](const D2D1_RECT_F& r) {
+                return (float)app.mouseX >= r.left && (float)app.mouseX <= r.right &&
+                       (float)app.mouseY >= r.top && (float)app.mouseY <= r.bottom;
+            };
+            bool overOpen = inside(app.quickNoteButtonRect);
+            bool overSheet = inside(app.quickNoteSheetRect);
+            if (overOpen != app.quickNoteButtonHover || overSheet != app.quickNoteSheetHover) {
+                app.quickNoteButtonHover = overOpen;
+                app.quickNoteSheetHover = overSheet;
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
-            if (over) {
+            if (overOpen || overSheet) {
                 SetCursor(cursorHand);
                 return;
             }
@@ -1511,31 +1630,11 @@ void handleMouseMove(App& app, HWND hwnd, LPARAM lParam) {
         return;
     }
 
-    // Check vertical scrollbar hover. The bar draws at the viewport's
-    // right edge, which a right-docked TOC pushes left of the window edge.
+    // Check scrollbar hover
     bool wasHovered = app.scrollbarHovered;
-    app.scrollbarHovered = false;
-    if (app.verticalScrollbarVisible) {
-        float sbWidth = dpi(app, 14.0f);  // hit area
-        float sbRight = documentViewportX(app) + documentViewportWidth(app);
-        if (app.mouseX >= sbRight - sbWidth && app.mouseX <= sbRight) {
-            app.scrollbarHovered = true;
-        }
-    }
-
-    // Check horizontal scrollbar hover
     bool wasHHovered = app.hScrollbarHovered;
-    app.hScrollbarHovered = false;
-    float viewportX = documentViewportX(app);
-    float viewportWidth = documentViewportWidth(app);
-    if (app.contentWidth > viewportWidth) {
-        float sbHeight = dpi(app, 14.0f);  // hit area
-        if (app.mouseY >= app.height - sbHeight &&
-            app.mouseX >= viewportX &&
-            app.mouseX <= viewportX + viewportWidth) {
-            app.hScrollbarHovered = true;
-        }
-    }
+    documentScrollbarsAt(app, (float)app.mouseX, (float)app.mouseY,
+                         app.scrollbarHovered, app.hScrollbarHovered);
 
     // Check link hover
     std::string prevHoveredLink = app.hoveredLink;
@@ -1749,6 +1848,10 @@ static void invokeContextMenuAction(App& app, HWND hwnd, int item) {
         case CTX_SAVE_AS:
             saveFileAs(app, hwnd);
             break;
+        case CTX_END_EDIT:
+            closeEditCtxMenu(app);
+            exitEditMode(app);
+            break;
         case CTX_EXIT:
             PostMessageW(hwnd, WM_CLOSE, 0, 0);
             break;
@@ -1797,6 +1900,9 @@ static void invokeContextMenuAction(App& app, HWND hwnd, int item) {
         case CTX_COPY_PATH:
             copyFilePath(app, hwnd, app.currentFile);
             break;
+        case CTX_AS_SHEET:
+            if (contextMenuItemEnabled(app, CTX_AS_SHEET)) sheetui::openDocumentAsSheet(app, hwnd, toWide(app.currentFile));
+            break;
         case CTX_REVEAL: {
             std::wstring fullPath = absoluteFilePath(app.currentFile);
             if (!fullPath.empty()) {
@@ -1840,6 +1946,11 @@ void handleContextMenu(App& app, HWND hwnd, LPARAM lParam) {
         ScreenToClient(hwnd, &pt);
     }
 
+    // A sheet has its own menu for its cards, arrows, groups and ground, and
+    // a card being typed in has the text's
+    if (sheetActive(app) && (fromKeyboard || (float)pt.y >= chromeTopHeight(app)) &&
+        sheetContextMenu(app, hwnd, pt.x, pt.y, fromKeyboard)) return;
+
     // A right-click on a tab opens the tab menu (works in edit mode and
     // above panels too — the strip stays interactive there)
     if (!fromKeyboard && !app.showPrintPreview && !app.confirmExitPending &&
@@ -1852,6 +1963,12 @@ void handleContextMenu(App& app, HWND hwnd, LPARAM lParam) {
         return;  // strip right-clicks never reach the document menu
     }
 
+    // Live has its own menu on the page: the formats, the clipboard, what is
+    // under the pointer, Turn into and Insert; the menu key opens it at the caret
+    if (editorLiveOn(app) && !app.confirmExitPending && (fromKeyboard || (float)pt.x >= documentViewportX(app))) {
+        liveContextMenu(app, hwnd, pt.x, pt.y, fromKeyboard);
+        return;
+    }
     // Preserve the selection on an inside right-click (#230); otherwise
     // move the caret so INSERT entries drop their Markdown at that point.
     if (app.editMode && !app.confirmExitPending &&
@@ -1862,10 +1979,14 @@ void handleContextMenu(App& app, HWND hwnd, LPARAM lParam) {
         return;
     }
 
-    // Document menu: viewer mode only, and never on top of a modal
+    // The rendered preview has its own selection/copy menu too. Never
+    // route a source-pane or modal press into the document beneath it.
+    const bool inPreview = app.editMode && editorPreviewVisible(app) &&
+                           pt.x >= documentViewportX(app) && pt.y >= chromeTopHeight(app);
+    // Document menu: viewer or preview, and never on top of a modal
     // overlay. The search bar is fine — it shares the viewport rather
     // than covering it.
-    if (app.editMode || app.showThemeChooser || app.showHelp ||
+    if ((app.editMode && !inPreview) || app.showThemeChooser || app.showHelp ||
         app.showPrintPreview || app.showSettings || app.showThemeEditor) {
         return;
     }
@@ -1933,6 +2054,12 @@ void handleMouseDown(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
         InvalidateRect(hwnd, nullptr, FALSE);
     }
     tabHoverCardDismiss(app, hwnd);
+    // An open text menu (Live's, or a sheet card's) takes the press: a row
+    // runs, and anywhere else puts the menu away
+    if (liveMenuMouseDown(app, hwnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)) ||
+        (sheetActive(app) && sheetTextMenuMouseDown(app, hwnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))) {
+        return;
+    }
     // Settings owns the entire click, including the title strip behind it.
     // Sliders drag from the press; dismissal and other actions use release.
     if (app.showSettings) {
@@ -2061,6 +2188,16 @@ void handleMouseDown(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
 
     // Help overlay: check scrollbar click
     if (app.showHelp) {
+        const auto panel = helpPanelRect(app);
+        const float x = (float)GET_X_LPARAM(lParam), y = (float)GET_Y_LPARAM(lParam);
+        if (!cursorPointInRect(x, y, panel)) {
+            app.showHelp = false;
+            app.helpAnimation = 0;
+            app.swallowNextMouseUp = true;
+            touchStopFling(app, hwnd);
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return;
+        }
         float maxScroll = std::max(0.0f, app.helpContentHeight - app.helpVisibleHeight);
         if (maxScroll > 0) {
             int clickX = GET_X_LPARAM(lParam);
@@ -2097,6 +2234,13 @@ void handleMouseDown(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
     // The chooser acts on release; do not place an editor caret under it.
     if (app.showThemeChooser) return;
 
+    // The editor menu can cross the pane boundary. Its action or dismissal
+    // consumes both halves of the click, including over preview content.
+    if (app.editMode && editCtxMouseDown(app, hwnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) {
+        app.swallowNextMouseUp = true;
+        return;
+    }
+
     // A side panel list's scrollbar drags like the document's (#287)
     if (panelScrollbarBegin(app, hwnd, static_cast<float>(GET_X_LPARAM(lParam)),
                             static_cast<float>(GET_Y_LPARAM(lParam)))) return;
@@ -2109,6 +2253,9 @@ void handleMouseDown(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
 
     if (sidePanelResizeBegin(app, hwnd, static_cast<float>(GET_X_LPARAM(lParam)),
                             static_cast<float>(GET_Y_LPARAM(lParam)))) return;
+
+    // A sheet takes presses on its canvas
+    if (sheetActive(app) && sheetMouseDown(app, hwnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) return;
 
     // Edit mode: route to editor or preview
     if (app.editMode) {
@@ -2135,6 +2282,10 @@ void handleMouseDown(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
             handleEditorMouseDown(app, hwnd, x, y);
             return;
         }
+        // The rail's export flyout hangs over the page: its rows come first
+        if (app.editCtxOpen && editorLiveOn(app) && editCtxMouseDown(app, hwnd, x, y)) return;
+        // Live: a press on the page puts the caret there
+        if (liveMouseDown(app, hwnd, x, y)) return;
         // Quick-note empty state: the Open button in the preview pane
         if (quickNoteEmptyStateActive(app) && app.editorShowPreview &&
             (float)x >= app.quickNoteButtonRect.left &&
@@ -2145,11 +2296,40 @@ void handleMouseDown(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
             openFileDialog(app, hwnd);
             return;
         }
+        // and New sheet beside it: a Save dialog names the sheet, which
+        // takes this empty tab's place
+        if (quickNoteEmptyStateActive(app) && app.editorShowPreview &&
+            (float)x >= app.quickNoteSheetRect.left &&
+            (float)x <= app.quickNoteSheetRect.right &&
+            (float)y >= app.quickNoteSheetRect.top &&
+            (float)y <= app.quickNoteSheetRect.bottom) {
+            app.swallowNextMouseUp = true;
+            sheetCreateInteractive(app, hwnd);
+            return;
+        }
         // In-place table editing (#148): cells and the + affordances
         // catch preview presses before selection handling
         if (app.editorShowPreview && !app.editorReadingPreview) {
             float docX = (float)x - documentViewportX(app) + app.scrollX;
             float docY = (float)y + app.scrollY;
+            // Table actions sit above cells. Resolve the press itself rather
+            // than relying on a hover frame, including a finger's first tap.
+            const int oldHover = app.hoveredTable;
+            bool tableAction = false;
+            for (int i = 0; i < (int)app.tableRects.size(); ++i) {
+                app.hoveredTable = i;
+                if (tableCopyButtonAt(app, x, y) || tableFitButtonAt(app, x, y)) {
+                    tableAction = true;
+                    break;
+                }
+            }
+            if (tableAction) {
+                tableEditCommit(app);
+                app.mouseX = x;
+                app.mouseY = y;
+                return; // the existing release handler invokes Fit / Copy
+            }
+            app.hoveredTable = oldHover;
             if (tableEditMouseDown(app, hwnd, docX, docY)) {
                 app.swallowNextMouseUp = true;
                 return;
@@ -2226,21 +2406,9 @@ void handleMouseDown(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
             // stale while the mouse is over a panel (its mousemove returns
             // before the hover update), and a stale true here turned panel
             // clicks into scrollbar drags bound to the mouse.
-            float viewportX = documentViewportX(app);
-            float viewportWidth = documentViewportWidth(app);
             bool vClick = false, hClick = false;
-            if (app.verticalScrollbarVisible) {
-                float sbWidth = dpi(app, 14.0f);
-                float sbRight = viewportX + viewportWidth;
-                vClick = (float)app.mouseX >= sbRight - sbWidth &&
-                         (float)app.mouseX <= sbRight;
-            }
-            if (!vClick && app.contentWidth > viewportWidth) {
-                float sbHeight = dpi(app, 14.0f);
-                hClick = (float)app.mouseY >= app.height - sbHeight &&
-                         (float)app.mouseX >= viewportX &&
-                         (float)app.mouseX <= viewportX + viewportWidth;
-            }
+            documentScrollbarsAt(app, (float)app.mouseX, (float)app.mouseY, vClick, hClick);
+            hClick = hClick && !vClick;
             if (!app.showThemeChooser && (vClick || hClick)) {
                 if (app.showFolderBrowser && !app.browserPinned) {
                     app.showFolderBrowser = false;
@@ -2268,37 +2436,12 @@ void handleMouseDown(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
 
     // Check if clicking vertical scrollbar
     if (app.scrollbarHovered && app.verticalScrollbarVisible) {
-        app.scrollbarDragging = true;
-        app.scrollbarDragStartY = (float)app.mouseY;
-        app.scrollbarDragStartScroll = app.scrollY;
-
-        // A click on the track, off the thumb, centres the thumb there
-        const ScrollbarGeometry bar = documentScrollbarV(app);
-        if (app.mouseY < bar.thumbStart || app.mouseY > bar.thumbStart + bar.thumbLength) {
-            app.scrollY = bar.scrollForThumb((float)app.mouseY - bar.thumbLength / 2);
-            app.targetScrollY = app.scrollY;
-            app.scrollbarDragStartScroll = app.scrollY;
-            app.scrollbarDragStartY = (float)app.mouseY;
-            if (app.editMode) editorFollowPreview(app);  // as for the drag (#280)
-        }
-        InvalidateRect(hwnd, nullptr, FALSE);
+        beginDocumentScrollbarDrag(app, hwnd, true);
     }
     // Check if clicking horizontal scrollbar
     else if (app.hScrollbarHovered &&
              app.contentWidth > documentViewportWidth(app)) {
-        app.hScrollbarDragging = true;
-        app.hScrollbarDragStartX = (float)app.mouseX;
-        app.hScrollbarDragStartScroll = app.scrollX;
-
-        // A click on the track, off the thumb, centres the thumb there
-        const ScrollbarGeometry bar = documentScrollbarH(app);
-        if (app.mouseX < bar.thumbStart || app.mouseX > bar.thumbStart + bar.thumbLength) {
-            app.scrollX = bar.scrollForThumb((float)app.mouseX - bar.thumbLength / 2);
-            app.targetScrollX = app.scrollX;
-            app.hScrollbarDragStartScroll = app.scrollX;
-            app.hScrollbarDragStartX = (float)app.mouseX;
-        }
-        InvalidateRect(hwnd, nullptr, FALSE);
+        beginDocumentScrollbarDrag(app, hwnd, false);
     } else {
         // Start page: clicks act on its controls, there is nothing to
         // select underneath. The capture from this press is let go up
@@ -2386,20 +2529,31 @@ void handleMouseDown(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
 // Resolves an Obsidian [[wiki link]] target against the current file's
 // folder and opens it: the name as written, then with .md / .markdown
 // appended, then a case-insensitive scan of the directory listing.
+static std::wstring wikiLinkPath(const App& app, const std::string& target);
+
 static bool openWikiLink(App& app, const std::string& target) {
     if (app.editMode || app.currentFile.empty()) return false;
+    std::wstring path = wikiLinkPath(app, target);
+    return !path.empty() && openDocumentInViewer(app, path);
+}
+
+// The note a wiki link names, beside the current file
+static std::wstring wikiLinkPath(const App& app, const std::string& target) {
+    if (app.currentFile.empty()) return {};
     namespace fs = std::filesystem;
     std::error_code ec;
     std::wstring wideTarget = toWide(target);
     fs::path dir = fs::path(toWide(app.currentFile)).parent_path();
 
-    auto tryOpen = [&](const fs::path& p) {
-        return fs::exists(p, ec) && !fs::is_directory(p, ec) &&
-               openDocumentInViewer(app, p.wstring());
+    // A wiki link names a note; one that reaches another computer's share
+    // is not looked up (network_path.h)
+    auto found = [&](const fs::path& p) {
+        return qmd::mayOpenFromDocument(p.wstring(), dir.wstring()) &&
+               fs::exists(p, ec) && !fs::is_directory(p, ec);
     };
-    if (tryOpen(dir / wideTarget)) return true;
-    if (tryOpen(dir / (wideTarget + L".md"))) return true;
-    if (tryOpen(dir / (wideTarget + L".markdown"))) return true;
+    if (found(dir / wideTarget)) return (dir / wideTarget).wstring();
+    if (found(dir / (wideTarget + L".md"))) return (dir / (wideTarget + L".md")).wstring();
+    if (found(dir / (wideTarget + L".markdown"))) return (dir / (wideTarget + L".markdown")).wstring();
 
     auto lower = [](std::wstring s) {
         for (auto& c : s) c = (wchar_t)std::towlower(c);
@@ -2410,13 +2564,11 @@ static bool openWikiLink(App& app, const std::string& target) {
         if (!entry.is_regular_file(ec)) continue;
         std::wstring stem = lower(entry.path().stem().wstring());
         std::wstring name = lower(entry.path().filename().wstring());
-        if (stem == want || name == want) {
-            if (openDocumentInViewer(app, entry.path().wstring())) return true;
-        }
+        if (stem == want || name == want) return entry.path().wstring();
     }
     // Target doesn't exist: leave the document as-is (a viewer doesn't
     // create notes the way Obsidian would)
-    return false;
+    return {};
 }
 
 // Link jumps remember where they came from so mouse-back (XBUTTON1) can
@@ -2520,6 +2672,9 @@ static void startPageInvoke(App& app, HWND hwnd, int id) {
         app.startPageHover = 0;
     } else if (id == 5) {
         app.showHelp = true;
+    } else if (id == 6) {
+        // New sheet: a Save dialog names it; it opens in this tab
+        sheetCreateInteractive(app, hwnd);
     } else if (id >= 10 && id < 20) {
         int index = id - 10;
         if (index < (int)app.startPageRecents.size()) {
@@ -2554,6 +2709,8 @@ static void startPageInvoke(App& app, HWND hwnd, int id) {
         }
     } else if (id >= 20 && id < 23) {
         startPageOpenEmbedded(app, hwnd, id - 20);
+    } else if (id == 23) {
+        sheetOpenTour(app, hwnd);
     }
     InvalidateRect(hwnd, nullptr, FALSE);
 }
@@ -2848,6 +3005,9 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
         frontmatterMouseUp(app, (float)GET_X_LPARAM(lParam), (float)GET_Y_LPARAM(lParam));
         return;
     }
+    // The release of a press the sheet took, before anything lets go of the
+    // mouse: a lost capture puts a moved card back and drops a new arrow
+    if (sheetActive(app) && sheetMouseUp(app, hwnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) return;
     // A tab drag ends on release (its press already consumed the click)
     // A dragged editor selection lands, or a click on it places the caret,
     // while the press still holds the mouse: losing it cancels the drag
@@ -2856,6 +3016,8 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
         handleEditorMouseUp(app, hwnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
         return;
     }
+    // A selection dragged on the Live page lands
+    if (liveMouseUp(app, hwnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) return;
     if (app.tabDragIndex >= 0) {
         tabDragEnd(app, hwnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
     }
@@ -3537,6 +3699,43 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
     if (GetCapture() == hwnd) ReleaseCapture();
 }
 
+void followDocumentLink(App& app, HWND hwnd, const std::string& url) {
+    if (url.empty()) return;
+    if (url.rfind("wiki:", 0) == 0) {
+        if (!app.editMode) {
+            std::string fromPath = app.currentFile;
+            float fromScroll = app.scrollY;
+            if (openWikiLink(app, url.substr(5))) navRecordJump(app, fromPath, fromScroll);
+            return;
+        }
+        // From the editor the note joins as a tab
+        std::wstring path = wikiLinkPath(app, url.substr(5));
+        if (!path.empty()) openFileRefTarget(app, hwnd, toUtf8(path));
+        return;
+    }
+    if (url.rfind("fileref-ok:", 0) == 0) {
+        openFileRefTarget(app, hwnd, url.substr(11));
+        return;
+    }
+    if (url.rfind("fileref-missing:", 0) == 0) {
+        offerCreateFileRef(app, url.substr(16));
+        return;
+    }
+    // A note beside the document, written as a relative link
+    if (url.find("://") == std::string::npos && url[0] != '#' && url.rfind("mailto:", 0) != 0 && !app.currentFile.empty()) {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        fs::path target = fs::path(toWide(app.currentFile)).parent_path() /
+                          toWide(qmd::decodeLinkComponent(qmd::splitLinkTarget(url).path));
+        if (fs::exists(target, ec) && !fs::is_directory(target, ec)) {
+            openFileRefTarget(app, hwnd, toUtf8(target.wstring()));
+            return;
+        }
+    }
+    app.hoveredLink = url;
+    handleLinkClick(app);
+}
+
 // Zen mode: borderless fullscreen + centered reading column (F11)
 static void toggleZenMode(App& app, HWND hwnd) {
     app.zenMode = !app.zenMode;
@@ -3596,7 +3795,7 @@ bool handleKeyDown(App& app, HWND hwnd, WPARAM wParam) {
         !(GetKeyState(VK_MENU) & 0x8000) && !app.showLightbox && !app.showSettings &&
         !app.showHelp && !app.showPrintPreview && !app.showThemeEditor &&
         !app.showShortcutEditor && !app.annotEditorOpen && !app.confirmExitPending &&
-        !app.createRefPending && !startPageActive(app)) {
+        !app.createRefPending && !startPageActive(app) && !sheetActive(app)) {
         gotoLineOpenPrompt(app);
         InvalidateRect(hwnd, nullptr, FALSE);
         return true;
@@ -3680,6 +3879,19 @@ bool handleKeyDown(App& app, HWND hwnd, WPARAM wParam) {
         }
         InvalidateRect(hwnd, nullptr, FALSE);
         return false;
+    }
+    // An open text menu (Live's, or a sheet card's) takes every key
+    if (!app.confirmExitPending &&
+        (liveMenuKey(app, hwnd, wParam) || (sheetActive(app) && sheetTextMenuKey(app, hwnd, wParam)))) {
+        return true;
+    }
+    // The menu key and Shift+F10 open Live's menu under the caret (the menu
+    // key's release, which would ask for it again, is the window's to drop)
+    if ((wParam == VK_APPS || (wParam == VK_F10 && (GetKeyState(VK_SHIFT) & 0x8000))) && editorLiveOn(app) &&
+        !app.confirmExitPending && !app.showSettings && !app.showHelp && !app.showThemeChooser && !app.showThemeEditor &&
+        !app.showShortcutEditor) {
+        liveContextMenu(app, hwnd, 0, 0, true);
+        return true;
     }
     // Shortcut editor: an armed row captures the next key; Esc cancels
     // the capture, then closes back to settings
@@ -3818,6 +4030,15 @@ bool handleKeyDown(App& app, HWND hwnd, WPARAM wParam) {
         return false;
     }
 
+    // A sheet's keys: its text box, the arrow-key walk, the mind-map keys
+    // and its commands; what it leaves goes on to the window's keys
+    if (sheetActive(app) && !app.confirmExitPending &&
+        !(app.showFolderBrowser && (app.folderBrowserEditingPath || app.folderBrowserNaming != 0))) {
+        bool handled = false;
+        bool consumed = sheetKeyDown(app, hwnd, wParam, handled);
+        if (handled) return consumed;
+    }
+
     // Function-key Help remains available while editing. Printable custom
     // bindings stay with the text editor, as do Tab and Space.
     if (app.editMode && !app.confirmExitPending && !ctrl &&
@@ -3872,6 +4093,11 @@ bool handleKeyDown(App& app, HWND hwnd, WPARAM wParam) {
             InvalidateRect(hwnd, nullptr, FALSE);
             return false;
         }
+        // Live: the page takes the keys it types with (live_editor.h)
+        if (editorLiveOn(app)) {
+            bool consumed = false;
+            if (liveKeyDown(app, hwnd, wParam, consumed)) return consumed;
+        }
         const bool wasReading=app.editorReadingPreview;
         handleEditorKeyDown(app, hwnd, wParam);
         // Save As runs a modal loop: Ctrl may already be released when it
@@ -3923,6 +4149,14 @@ bool handleKeyDown(App& app, HWND hwnd, WPARAM wParam) {
 
     if (ctrl) {
         switch (wParam) {
+            case 'E':
+                // Ctrl+E edits, as E does; in Live the same key reads (#308)
+                if (!app.showSearch && (!app.showFolderBrowser || app.browserPinned) &&
+                    (!app.showToc || app.tocPinned)) {
+                    enterEditMode(app);
+                    return true;
+                }
+                break;
             case 'P':
                 // Print preview (edit mode handles its own Ctrl+P in the
                 // editor path)
@@ -4054,6 +4288,12 @@ bool handleKeyDown(App& app, HWND hwnd, WPARAM wParam) {
             if (!ctrl && keyBindingMatches(app.keymap[KA_NEWFILE], (unsigned)wParam, false)) {
                 startPageInvoke(app, hwnd, 2);
                 return false;
+            }
+            // S makes a sheet, as New sheet's chip says; the key is spent,
+            // so no S reaches the sheet that opens
+            if (!ctrl && wParam == 'S') {
+                startPageInvoke(app, hwnd, 6);
+                return true;
             }
             if (!ctrl && wParam >= '1' && wParam <= '5' &&
                 (int)(wParam - '1') < (int)app.startPageRecents.size()) {
@@ -4289,6 +4529,12 @@ void handleCharInput(App& app, HWND hwnd, WPARAM wParam) {
         return;
     }
 
+    // A sheet's text box types what the keys did not take
+    if (sheetActive(app) && !app.showSettings && !app.showThemeEditor && !app.showHelp &&
+        sheetCharInput(app, hwnd, (wchar_t)wParam)) {
+        return;
+    }
+
     // Annotation note editor takes all typing (#126)
     if (app.annotEditorOpen && !app.editMode) {
         annotationEditorChar(app, wParam);
@@ -4358,6 +4604,11 @@ void handleCharInput(App& app, HWND hwnd, WPARAM wParam) {
             return;
         }
         if (tableEditChar(app, (wchar_t)wParam)) return;
+        if (editorLiveOn(app) && !app.confirmExitPending && !(app.showSearch && app.searchActive)) {
+            // Enter, Tab and Backspace were keys; Ctrl and a letter type nothing
+            if (wParam >= 0x20 && wParam != 0x7F) liveCharInput(app, hwnd, (wchar_t)wParam);
+            return;
+        }
         handleEditorCharInput(app, hwnd, wParam);
         return;
     }
@@ -4436,6 +4687,20 @@ void handleDropFiles(App& app, HWND hwnd, WPARAM wParam) {
     // drop on a single-document window is where the tab strip first appears
     HDROP hDrop = (HDROP)wParam;
     UINT count = DragQueryFileW(hDrop, 0xFFFFFFFF, nullptr, 0);
+    // Onto a sheet, files become cards where they land
+    if (sheetActive(app)) {
+        POINT at{};
+        DragQueryPoint(hDrop, &at);
+        std::vector<std::wstring> files;
+        for (UINT i = 0; i < count && i < 200; i++) {
+            wchar_t path[MAX_PATH * 4];
+            if (DragQueryFileW(hDrop, i, path, (UINT)std::size(path))) files.push_back(path);
+        }
+        if ((float)at.y >= chromeTopHeight(app) && sheetDropFiles(app, hwnd, files, at.x, at.y)) {
+            DragFinish(hDrop);
+            return;
+        }
+    }
     bool activated = false;
     for (UINT i = 0; i < count; i++) {
         wchar_t wpath[MAX_PATH];
@@ -4469,11 +4734,15 @@ void handleLinkPeekTimer(App& app, HWND hwnd) {
                !app.currentFile.empty()) {
         std::wstring t = toWide(app.linkPeekUrl.substr(5));
         fs::path dir = fs::path(toWide(app.currentFile)).parent_path();
-        if (fs::exists(dir / t, ec)) {
+        // Hovering never reaches another computer's share (network_path.h)
+        auto found = [&](const fs::path& p) {
+            return qmd::mayOpenFromDocument(p.wstring(), dir.wstring()) && fs::exists(p, ec);
+        };
+        if (found(dir / t)) {
             target = dir / t;
-        } else if (fs::exists(dir / (t + L".md"), ec)) {
+        } else if (found(dir / (t + L".md"))) {
             target = dir / (t + L".md");
-        } else if (fs::exists(dir / (t + L".markdown"), ec)) {
+        } else if (found(dir / (t + L".markdown"))) {
             target = dir / (t + L".markdown");
         }
     }

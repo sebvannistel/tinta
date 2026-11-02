@@ -1,4 +1,5 @@
 #include "utils.h"
+#include "editor.h"
 #include "link_target.h"
 #include "render.h"
 #include "i18n.h"
@@ -215,7 +216,11 @@ bool scrollToHeadingId(App& app, const std::string& id) {
 void handleLinkClick(App& app) {
     if (app.hoveredLink.empty()) return;
     if (app.hoveredLink[0] == '#') {
-        scrollToHeadingId(app, qmd::decodeLinkComponent(app.hoveredLink.substr(1)));
+        if (scrollToHeadingId(app, qmd::decodeLinkComponent(app.hoveredLink.substr(1))) && app.editMode) {
+            // The next frame follows the source pane. Move it with the
+            // explicit jump, just as a preview scrollbar drag does.
+            editorFollowPreview(app);
+        }
     } else {
         openUrl(app.hoveredLink);
     }
@@ -232,6 +237,19 @@ bool openClipboard(HWND hwnd, bool* held) {
 
 void signalClipboardBusy(App& app) {
     signalPushKey(app, SIG_WARN, SIGI_WARNING, "toast.clipboard_busy");
+}
+
+std::wstring readClipboardText(HWND hwnd) {
+    std::wstring text;
+    if (!openClipboard(hwnd)) return text;
+    if (HANDLE data = GetClipboardData(CF_UNICODETEXT)) {
+        if (const wchar_t* p = static_cast<const wchar_t*>(GlobalLock(data))) {
+            text = p;
+            GlobalUnlock(data);
+        }
+    }
+    CloseClipboard();
+    return text;
 }
 
 bool copyToClipboard(HWND hwnd, const std::wstring& text, bool* held) {

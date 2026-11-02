@@ -1,5 +1,55 @@
 # Changelog
 
+## [v4.0.1] - 2026-11-02
+
+### Added
+- Themes can colour bold and italic text, the selection and horizontal rules. `bold=`, `italic=` and `bolditalic=` in `themes.ini` colour emphasised text on the page, in Live and Source and in the HTML and Word exports, while links and inline code keep their own colours. `selection=` tints the selection in the reading view, Source and Live, and `hr=` colours rules, the footnotes' rule included. Each key is optional, and a theme without them looks as before. See [Theme colours](docs/theme-colours.md). Requested by @Fallgrim (#310)
+
+### Changed
+- In Live, Ctrl+E shows the page as the reader draws it, edits not yet saved included, and Ctrl+E there goes back to the caret. In the reader, Ctrl+E opens the editor, as E does. Source keeps Ctrl+E for its preview pane, Ctrl+Shift+E still reads from either editor, and the Read pill and Help list the keys. Requested by @Fallgrim (#308)
+
+### Fixed
+- Live's scrollbar lights up under the pointer and can be dragged; pressing it used to move the caret and select text. After switching to Source and back, the wheel and Down no longer pull Live's page back to where it was. Reported by @go4399 (#307)
+- Live sometimes missed the switch to a document opened after leaving the editor, and showed that document's text from the caret on as Markdown being typed
+- The Microsoft Store logos are drawn from the full-size icon at each display scale. They had been enlarged from a small icon, which left them soft with a white halo, and on displays above 100% Windows enlarged them again. Reported by @Fallgrim (#309)
+- Strikethrough and highlight wrap bold, italic, links, code and images, as GitHub's strikethrough does; `~~**bold**~~`, `==*italic*==`, ``~~`code`~~`` and `==[a link](x)==` used to show their `~~` and `==` as text. As on GitHub, a `~~` or `==` with a space just inside it stays text, so `x ~~ y ~~ z` and `a == b == c` are no longer struck or marked, and an escaped `\~`, `\=` or `\^` stays a plain sign. A code chip inside a strikethrough is struck through like the text around it
+
+## [v4.0.0] - 2026-11-01
+
+Two new ways to work, both experimental: Live, a WYSIWYG editor that writes on the page as it reads, and Sheets, an infinite canvas of Markdown notes. Suggestions for improving them are very welcome.
+
+### Added
+- Live, a WYSIWYG editor (experimental): the page as the reading view lays it out, with the Markdown showing only in the blocks being typed in. It edits the same text as Source, byte for byte and with the same undo; the pill on the edit rail or Ctrl+/ switches between them, and the choice is remembered. Typing continues lists, tasks, quotes and tables, a slash menu makes every block Tinta draws, a format bar sits over selected words, a right-click menu offers what is under the pointer, and a held finger selects words. See [Live](docs/live-editor.md)
+- Sheets, an infinite canvas of notes (experimental): a `.smd` file whose cards are Markdown notes in the sheet's folder, joined by arrows and gathered in groups. Semantic zoom, keyboard mind mapping, a folder watched for new, renamed and missing notes, ghost lines for the links in the notes, lanes that write front matter, compiling into one document, presenting and tidying along the arrows, Mermaid flowcharts in and out, find and spotlight. Cards are typed in with Live's engine, and Obsidian `.canvas` files open as sheets. New sheet is on the start page (S) and on a new tab's empty page, and the start page's Learn has a Sheet tour. See [Sheets](docs/sheets.md)
+- Markdown in colour in the source editor: the marks go faint, headings take the heading colour, the marks that start a block the accent, links, code and maths their own colours, and fenced code and the properties their language's colours. Settings, Editor turns it off. Requested by @derek-price (#268)
+- A numbered list button on the edit rail, under the bullets: the numbers count on across a selection or several carets, at each level of a nested list, and a second press takes them off. Requested by @nokia5118 (#304)
+- **Exit editing** in the application menu while editing, through the same exit as Esc, in all eight languages. Contributed by @SHM-white (#300)
+- Touch: a finger held in the split preview selects the rendered text and opens Copy and Select all where it lifts, and Help scrolls and flings under a finger, a tap beside it closing it. Contributed by @SHM-white (#301, #302)
+
+### Changed
+- The start page's Learn column starts level with the top of the page
+
+### Fixed
+- The edit rail's bullet, task and quote buttons act on every line a selection takes in, adding the mark where it is missing or taking it off them all, in one Ctrl+Z; they marked only the line holding the caret. A list mark now gives way to another: the bullet button on a task left `[ ] task`, and the task button on a bullet made `- [ ] - item`. Reported by @nokia5118 (#306)
+- Lines pasted on a list item become items of that list as Enter makes them, numbers counting on and task boxes empty, and lines pasted in a quote are quoted; only the first line took the mark. Ctrl+Shift+V still pastes the text as it is. Reported by @nokia5118 (#305)
+- Touch: a finger held in the source editor selects the word and grows the selection by whole words, keeping the editor's menu on the selection. Touches on the editor's menu over the preview, the stacked Replace buttons and a panel's resize edge reach them instead of panning. A finger that catches a flicked page only stops it, and a pan, a second finger, losing focus or a change of tab, file or mode starts touch over. Contributed by @SHM-white (#295, #296, #297, #298)
+- A link to a heading in the split preview moves the source pane too, so the next frame no longer pulls the preview back. Contributed by @SHM-white (#299)
+- A table's Fit and Copy TSV buttons take a press before the cell under them, and draw above a cell being edited. Contributed by @SHM-white (#303)
+- Ctrl+K makes a link in Source, as the edit rail's tooltip says
+
+## [v3.9.6] - 2026-10-31
+
+### Security
+- Images, wiki links and file references on another computer's share (`\\server\share\...`, however the path is written) open only in a document from that same server, since opening the share signs in to it with your Windows credentials. Anywhere else an image shows the note "network path not opened" in the viewer, in print and in the HTML and Word exports. Files on this computer and on a share mapped to a drive letter open as before
+
+### Fixed
+- Tables, code blocks, quotes and other blocks inside list items render where they are written, with their own layout; a table in a list showed its cells as run-together text, and the item's text came out of order. A heading that starts a list item lines up with its number, bullet or checkbox and stays with it at a page break, and raw HTML list items without a closing `</li>` stay separate items. Contributed by @shinfd (#292)
+- Local images whose path holds percent escapes, such as `folder%20with%20space/image.png`, show in the viewer and in the HTML and Word exports instead of a placeholder. Reported and contributed by @tferi99 (#293, #294)
+- Documents in different folders that show an image of the same name, such as `shot.png`, each show their own; the second showed the first one's image while it stayed cached
+- Lists, quotes and emphasis nested a thousand or more levels deep no longer crash Tinta when it shows, prints, exports or copies them. Lists now nest up to 50 levels and quotes up to 100, and anything deeper goes on at the deepest level with all its text
+- A file that starts with a UTF-8 byte order mark, which Windows PowerShell 5.1 and Visual Studio write, reads its first line properly: a heading there showed as the literal `# Title`, a table, list or code fence there was misread, and front matter left an empty line under the properties. Editing and saving keep the mark
+- Text written directly inside a raw HTML `<blockquote>`, without a `<p>` around it, shows in the quote; it was missing from the page, print and copies. The Word export keeps it as one quote paragraph with its bold, links and line breaks, and an `<a id>` right inside such a quote works as a link target
+
 ## [v3.9.5] - 2026-10-29
 
 ### Added

@@ -204,6 +204,9 @@ std::vector<float> computePageBreaks(const App& app, float pageContentH) {
                 }
             };
             for (const auto& line : app.lineBuckets) consider(line.top, line.bottom);
+            // List markers have no selection line bucket. Protect every text
+            // run so it cannot straddle a cut and be replayed on both pages.
+            for (const auto& run : app.layoutTextRuns) consider(run.bounds.top, run.bounds.bottom);
             for (const auto& bmp : app.layoutBitmaps) consider(bmp.destRect.top, bmp.destRect.bottom);
             for (const auto& shape : app.layoutShapes) consider(shape.rect.top, shape.rect.bottom);
             // Shrink bands page-break as a unit: a scaled diagram split
@@ -234,7 +237,8 @@ std::vector<float> computePageBreaks(const App& app, float pageContentH) {
 void drawDocumentRange(App& app, ID2D1DeviceContext* dc,
                        ID2D1SolidColorBrush* brush,
                        float yStart, float yEnd,
-                       float offsetX, float offsetY) {
+                       float offsetX, float offsetY,
+                       D2D1_DRAW_TEXT_OPTIONS textOptions = D2D1_DRAW_TEXT_OPTIONS_NONE) {
     auto inRange = [&](float top, float bottom) {
         return bottom >= yStart && top < yEnd;
     };
@@ -426,7 +430,7 @@ void drawDocumentRange(App& app, ID2D1DeviceContext* dc,
         bool banded = applyBand(run.bounds.top, run.bounds.bottom);
         brush->SetColor(run.color);
         dc->DrawTextLayout(D2D1::Point2F(run.pos.x + dx, run.pos.y + dy),
-                           run.layout, brush);
+                           run.layout, brush, textOptions);
         resetBand(banded);
     }
 }
@@ -953,6 +957,16 @@ bool exportPdfFile(App& app, const std::wstring& path) {
     fileStream->Commit(STGC_DEFAULT);
     fileStream->Release();
     return ok;
+}
+
+// Sheets: a note card lays out at its card's width and draws a slice of
+// itself into its own bitmap, through the print path's layout and replay
+void layoutForWidth(App& app, float widthDips) { layoutAtPrintWidth(app, widthDips); }
+
+void drawLayoutRange(App& app, ID2D1DeviceContext* dc, ID2D1SolidColorBrush* brush,
+                     float yStart, float yEnd, float offsetX, float offsetY,
+                     D2D1_DRAW_TEXT_OPTIONS textOptions) {
+    drawDocumentRange(app, dc, brush, yStart, yEnd, offsetX, offsetY, textOptions);
 }
 
 // Link peek: renders the top of another markdown file at the live theme

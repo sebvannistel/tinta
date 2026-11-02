@@ -17,6 +17,7 @@
 #include "startpage.h"
 #include "file_utils.h"
 #include "i18n.h"
+#include "sheet_ui.h"
 #include "input.h"
 #include "utils.h"
 
@@ -81,6 +82,8 @@ void syncActiveTab(App& app) {
 // nothing: the teardown mirrors exitEditMode minus the dialog and reload
 // (another document loads immediately after).
 void parkActiveEditBuffer(App& app) {
+    // A sheet being left commits its text box and saves
+    sheetLeave(app);
     if (!app.editMode || app.tabs.empty()) return;
     // An open table cell belongs to this buffer, not the next tab (#148)
     tableEditCommit(app);
@@ -88,6 +91,7 @@ void parkActiveEditBuffer(App& app) {
     tab.editMode = true;
     tab.editorDirty = app.editorDirty;
     tab.editorText = std::move(app.editorText);
+    tab.editorBom = app.editorBom;
     tab.editorScrollY = app.editorScrollY;
     tab.editorCursor = app.editorCursorPos;
     tab.wordWrap = app.editorWordWrap;
@@ -100,6 +104,7 @@ void parkActiveEditBuffer(App& app) {
     app.clearEditorLineLayoutCache();
     app.editorText.clear();
     app.editorLineStarts.clear();
+    ++app.editorTextRevision;
     app.editorExtraCarets.clear();
     app.undoStack.clear();
     app.redoStack.clear();
@@ -220,7 +225,7 @@ void tabActivate(App& app, HWND hwnd, int index) {
     if (tab.editMode) {
         app.editorWordWrap = tab.wordWrap;
         restoreEditBuffer(app, tab.editorText, tab.editorDirty,
-                          tab.editorScrollY, tab.editorCursor);
+                          tab.editorScrollY, tab.editorCursor, tab.editorBom);
         tab.editorText.clear();  // ownership moved back to the app
     }
     app.showTabSwitcher = false;

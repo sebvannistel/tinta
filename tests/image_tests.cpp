@@ -1,6 +1,10 @@
 #include "d2d_init.h"
+#include "editor.h"
+#include "export.h"
+#include "i18n.h"
 #include "image_loader.h"
 #include "input.h"
+#include "network_path.h"
 #include "overlays.h"
 #include "print.h"
 #include "render.h"
@@ -11,6 +15,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <set>
 
 namespace {
 using Microsoft::WRL::ComPtr;
@@ -196,6 +201,259 @@ void mixedLayout(App& app) {
     drawImages(app);
 }
 
+// #293: decode local image destinations once, including UTF-8 bytes, while
+// preserving literal plus signs, malformed escapes and encoded NULs.
+void encodedImagePaths(App& app) {
+    std::ifstream file(TINTA_ENCODED_IMAGE_FIXTURE, std::ios::binary);
+    const std::string source((std::istreambuf_iterator<char>(file)), {});
+    check(!source.empty(), "encoded image fixture is readable");
+    app.clearLayoutCache();
+    app.releaseImageCache();
+    app.currentFile = TINTA_ENCODED_IMAGE_FIXTURE;
+    app.root = app.parser.parse(source).root;
+    app.contentScale = 1.0f;
+    updateTextFormats(app);
+    for (int width : {1050, 650}) {
+        app.width = width;
+        layoutDocument(app);
+        ensureLayoutComplete(app);
+        check(app.layoutBitmaps.size() == 9, "all nine local image destinations render");
+        check(app.tableRects.size() == 1 && app.codeBlocks.size() == 1 &&
+              app.docText.find(L"Surrounding content survives.") != std::wstring::npos,
+              "encoded images preserve mixed document content");
+        check(app.docText.find(L"[image:") == std::wstring::npos,
+              "valid encoded images never fall back to alt text");
+        drawImages(app);
+    }
+
+    check(exportHtmlFile(app, L"encoded-images.html"), "encoded image HTML export succeeds");
+    std::ifstream htmlFile("encoded-images.html", std::ios::binary);
+    const std::string html((std::istreambuf_iterator<char>(htmlFile)), {});
+    size_t images = 0;
+    for (size_t pos = 0; (pos = html.find("<img src=\"data:image/png;base64,", pos)) != std::string::npos; ++pos)
+        ++images;
+    check(images == 9, "HTML embeds every encoded local PNG, including an encoded extension");
+
+    check(exportDocxFile(app, L"encoded-images.docx"), "encoded image Word export succeeds");
+    std::ifstream docxFile("encoded-images.docx", std::ios::binary);
+    const std::string docx((std::istreambuf_iterator<char>(docxFile)), {});
+    images = 0;
+    for (size_t pos = 0; (pos = docx.find("<w:drawing>", pos)) != std::string::npos; ++pos)
+        ++images;
+    check(images == 9, "Word embeds every encoded local PNG");
+
+    const std::string remote = "https://example.com/folder%20with%20space/image%2520.png";
+    app.root = app.parser.parse("![Remote](" + remote + ")\n").root;
+    check(exportHtmlFile(app, L"remote-encoded-image.html"), "remote image HTML export succeeds");
+    std::ifstream remoteFile("remote-encoded-image.html", std::ios::binary);
+    const std::string remoteHtml((std::istreambuf_iterator<char>(remoteFile)), {});
+    check(remoteHtml.find("<img src=\"" + remote + "\"") != std::string::npos,
+          "remote image URLs retain their original percent encoding");
+}
+
+// Two notes in different folders that both show "shot.png" each show
+// their own, in either order and as often as they switch: the cache
+// holds the file a document names, not the name
+void imagesPerDocument(App& app) {
+    app.clearLayoutCache();
+    app.releaseImageCache();
+    app.contentScale = 1.0f;
+    updateTextFormats(app);
+    for (int pass = 0; pass < 2; ++pass) {
+        for (const char* folder : {"first", "second"}) {
+            app.currentFile = std::string(TINTA_SAME_IMAGE_FIXTURE) + "/" + folder + "/notes.md";
+            std::ifstream file(app.currentFile, std::ios::binary);
+            const std::string source((std::istreambuf_iterator<char>(file)), {});
+            check(!source.empty(), "same-name image fixture is readable");
+            app.root = app.parser.parse(source).root;
+            for (int width : {1050, 650}) {
+                app.width = width;
+                layoutDocument(app);
+                ensureLayoutComplete(app);
+                const UINT expected = folder[0] == 'f' ? 120 : 240;
+                bool own = app.layoutBitmaps.size() == 4;
+                for (const auto& bitmap : app.layoutBitmaps)
+                    own = own && bitmap.bitmap->GetPixelSize().width == expected;
+                check(own, "each note shows the image from its own folder");
+                check(app.tableRects.size() == 1 && app.codeBlocks.size() == 1 &&
+                      app.docText.find(L"Surrounding content survives.") != std::wstring::npos,
+                      "same-name images keep the notes' mixed content");
+                drawImages(app);
+            }
+        }
+    }
+}
+
+size_t countOf(const std::string& text, const std::string& needle) {
+    size_t count = 0;
+    for (size_t pos = 0; (pos = text.find(needle, pos)) != std::string::npos; pos += needle.size()) ++count;
+    return count;
+}
+
+std::string readAll(const wchar_t* path) {
+    std::ifstream file(path, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(file)), {});
+}
+
+// The fixture folder through this computer's administrative share
+// (\\localhost\C$\...), when it answers: a real network path that stays on
+// this computer. Empty when the share is off or needs elevation.
+std::wstring loopbackShare(const std::wstring& folder) {
+    if (folder.size() < 3 || folder[1] != L':') return {};
+    const std::wstring share = std::wstring(L"\\\\localhost\\") + folder[0] + L"$" + folder.substr(2);
+    if (GetFileAttributesW((share + L"\\plain.png").c_str()) == INVALID_FILE_ATTRIBUTES) return {};
+    return share;
+}
+
+// A document must not have Tinta open another computer's share by itself:
+// showing, exporting or hovering it would sign in to that server with the
+// user's Windows credentials. This computer's files, and the server the
+// document was opened from, still open.
+void networkPaths(App& app) {
+    namespace fs = std::filesystem;
+    using qmd::mayOpenFromDocument;
+    using qmd::pathHost;
+    check(pathHost(L"C:\\notes\\a.png").empty() && pathHost(L"notes\\a.png").empty() &&
+          pathHost(L"\\notes\\a.png").empty() && pathHost(L"C:a.png").empty() &&
+          pathHost(L"\\\\?\\C:\\a.png").empty() && pathHost(L"//./c:/a.png").empty(),
+          "paths on this computer name no server");
+    check(pathHost(L"\\\\NAS\\docs\\a.png") == L"nas" && pathHost(L"//nas/docs") == L"nas" &&
+          pathHost(L"/\\nas\\docs") == L"nas" && pathHost(L"\\/nas/docs") == L"nas" &&
+          pathHost(L"\\\\?\\UNC\\nas\\docs") == L"nas" && pathHost(L"//?/unc/nas/docs") == L"nas" &&
+          pathHost(L"\\\\.\\UNC\\nas\\docs") == L"nas",
+          "every UNC spelling names its server");
+    check(pathHost(L"\\\\.\\pipe\\x") == L"?" && pathHost(L"\\\\?\\GLOBALROOT\\Device\\Mup\\nas\\x") == L"?" &&
+          pathHost(L"\\\\\\nas\\x") == L"?" && pathHost(L"\\\\?\\Volume{1}\\x") == L"?",
+          "other device paths name no server");
+    check(mayOpenFromDocument(L"C:\\pics\\a.png", L"C:\\docs") &&
+          mayOpenFromDocument(L"C:\\pics\\a.png", L"\\\\nas\\docs") &&
+          mayOpenFromDocument(L"\\\\NAS\\photos\\a.png", L"\\\\nas\\docs") &&
+          mayOpenFromDocument(L"//nas/docs/../photos/a.png", L"\\\\?\\UNC\\nas\\docs") &&
+          !mayOpenFromDocument(L"\\\\other\\photos\\a.png", L"\\\\nas\\docs") &&
+          !mayOpenFromDocument(L"//nas/photos/a.png", L"C:\\docs") &&
+          !mayOpenFromDocument(L"//nas/photos/a.png", L"") &&
+          !mayOpenFromDocument(L"\\\\.\\pipe\\x", L"C:\\docs") &&
+          !mayOpenFromDocument(L"\\\\.\\pipe\\x", L"\\\\.\\pipe"),
+          "a document opens this computer's files and its own server's only");
+
+    const std::string source = readAll(L"" TINTA_NETWORK_FIXTURE);
+    check(!source.empty(), "network path fixture is readable");
+    app.clearLayoutCache();
+    app.releaseImageCache();
+    app.contentScale = 1.0f;
+    updateTextFormats(app);
+    app.currentFile = TINTA_NETWORK_FIXTURE;
+    app.root = app.parser.parse(source).root;
+    const std::wstring note = std::wstring(L" \u2014 ") + tr(app, "image.network_blocked") + L"]";
+    for (int width : {1050, 650}) {
+        app.width = width;
+        layoutDocument(app);
+        ensureLayoutComplete(app);
+        check(app.layoutBitmaps.size() == 1, "only the local image opens");
+        size_t notes = 0;
+        for (size_t pos = 0; (pos = app.docText.find(note, pos)) != std::wstring::npos; pos += note.size())
+            ++notes;
+        check(notes == 8, "every image on another computer says why it is missing");
+        check(app.docText.find(L"In a table" + note) != std::wstring::npos &&
+              app.docText.find(L"In a quote" + note) != std::wstring::npos,
+              "images in tables and quotes carry the note too");
+        bool opened = false;
+        for (const auto& cached : app.imageCache)
+            opened = opened || cached.first.find("tinta-blocked") != std::string::npos;
+        check(!opened, "nothing on another computer is opened or cached");
+        std::set<std::string> remoteRefs;
+        bool localLive = false;
+        for (const auto& rect : app.linkRects) {
+            if (rect.url.rfind("fileref-", 0) == 0 && rect.url.find("tinta-blocked.invalid") != std::string::npos)
+                remoteRefs.insert(rect.url);
+            localLive = localLive || (rect.url.rfind("fileref-ok:", 0) == 0 &&
+                                      rect.url.find("linked.md") != std::string::npos);
+        }
+        bool allMissing = remoteRefs.size() == 2;
+        for (const auto& url : remoteRefs) allMissing = allMissing && url.rfind("fileref-missing:", 0) == 0;
+        check(allMissing, "file links to another computer badge as missing");
+        check(localLive, "a local file link stays live");
+        check(app.tableRects.size() == 1 && app.codeBlocks.size() == 1 &&
+              app.docText.find(L"Surrounding content survives.") != std::wstring::npos,
+              "network paths keep the mixed content around them");
+        drawImages(app);
+    }
+    app.linkPeekUrl = app.hoveredLink = "wiki://tinta-blocked.invalid/share/wiki";
+    handleLinkPeekTimer(app, app.hwnd);
+    check(!app.linkPeekActive, "hovering a wiki link to another computer previews nothing");
+    app.linkPeekUrl.clear();
+    app.hoveredLink.clear();
+
+    check(exportHtmlFile(app, L"network-paths.html"), "network path HTML export succeeds");
+    const std::string html = readAll(L"network-paths.html");
+    check(countOf(html, "<img src=\"data:image/png;base64,") == 1, "HTML embeds only the local image");
+    check(html.find("<img src=\"//tinta-blocked.invalid/share/shot.png\"") != std::string::npos,
+          "HTML keeps another computer's image as written");
+    check(exportDocxFile(app, L"network-paths.docx"), "network path Word export succeeds");
+    check(countOf(readAll(L"network-paths.docx"), "<w:drawing>") == 1, "Word embeds only the local image");
+
+    // The same paths through a share that really answers. A document on
+    // this computer must leave it unopened; one opened from the share
+    // shows its server's files.
+    const std::wstring share = loopbackShare(fs::absolute(fs::path(TINTA_NETWORK_FIXTURE).parent_path()).wstring());
+    if (share.empty()) {
+        std::cout << "Network paths: \\\\localhost administrative share unavailable, loopback checks skipped\n";
+        return;
+    }
+    std::string url = toUtf8(share);
+    std::replace(url.begin(), url.end(), '\\', '/');
+    for (size_t space; (space = url.find(' ')) != std::string::npos;) url.replace(space, 1, "%20");
+    const std::string loop = "# Loopback\n\n![Loop](" + url + "/plain.png)\n\n[Loop link](/\\" +
+                             url.substr(2) + "/linked.md)\n\nAfter the share.\n";
+    for (bool onShare : {false, true}) {
+        app.clearLayoutCache();
+        app.releaseImageCache();
+        app.currentFile = onShare ? toUtf8(share + L"\\index.md") : std::string(TINTA_NETWORK_FIXTURE);
+        app.root = app.parser.parse(loop).root;
+        layoutDocument(app);
+        ensureLayoutComplete(app);
+        check(app.layoutBitmaps.size() == (onShare ? 1u : 0u),
+              onShare ? "a document on a share shows that server's image"
+                      : "a local document leaves the share's image unopened");
+        bool live = false, missing = false;
+        for (const auto& rect : app.linkRects) {
+            live = live || rect.url.rfind("fileref-ok:", 0) == 0;
+            missing = missing || rect.url.rfind("fileref-missing:", 0) == 0;
+        }
+        check(onShare ? live && !missing : missing && !live,
+              onShare ? "a document on a share finds that server's linked file"
+                      : "a local document badges the share's file as missing without a lookup");
+        app.linkPeekUrl = app.hoveredLink = "wiki:" + url + "/linked";
+        handleLinkPeekTimer(app, app.hwnd);
+        check(app.linkPeekActive == onShare,
+              onShare ? "a document on a share previews that server's wiki link"
+                      : "a local document never previews the share's wiki link");
+        app.linkPeekActive = false;
+        app.linkPeekUrl.clear();
+        // Clicking the wiki link opens the note only from the share
+        const std::string before = app.currentFile;
+        app.hoveredLink = "wiki:" + url + "/linked";
+        app.selecting = app.mouseDown = true;
+        app.selectionMode = App::SelectionMode::Normal;
+        app.selShiftExtend = false;
+        app.lastClickX = app.lastClickY = app.mouseX = app.mouseY = 100;
+        handleMouseUp(app, app.hwnd, 0, MAKELPARAM(100, 100));
+        check((app.currentFile != before) == onShare,
+              onShare ? "a document on a share opens that server's wiki link"
+                      : "a local document never looks up the share's wiki link");
+        app.hoveredLink.clear();
+    }
+    // An untitled note's export has no folder and put one separator in
+    // front of the path: "/localhost/C$/..." became a share path
+    app.currentFile.clear();
+    app.root = app.parser.parse("![Loop](" + url.substr(1) + "/plain.png)\n").root;
+    check(exportHtmlFile(app, L"network-loop.html") && exportDocxFile(app, L"network-loop.docx"),
+          "loopback exports succeed");
+    check(countOf(readAll(L"network-loop.html"), "data:image/png;base64,") == 0 &&
+          countOf(readAll(L"network-loop.docx"), "<w:drawing>") == 0,
+          "exports leave the share's image unopened");
+}
+
 // Hover, press and release through the real handlers, as a separate click
 // rather than the second half of a double-click
 void click(App& app, float x, float y) {
@@ -274,6 +532,9 @@ int runImageTests(const char* remoteBase) {
     ownership(app);
     mixedLayout(app);
     lightboxDismissal(app);
+    encodedImagePaths(app);
+    imagesPerDocument(app);
+    networkPaths(app);
     if (remoteBase) remoteImages(app, remoteBase);
     DestroyWindow(app.hwnd);
     app.hwnd = nullptr;

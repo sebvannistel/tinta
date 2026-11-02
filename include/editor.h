@@ -2,6 +2,7 @@
 #define TINTA_EDITOR_H
 
 #include "app.h"
+#include "live_text.h"
 #include <windows.h>
 
 // Mode transitions
@@ -13,6 +14,8 @@ void enterRecoveredDraft(App& app, HWND hwnd, const std::string& content,
                          const std::string& origPath);
 void exitEditMode(App& app);
 void setEditorReadingPreview(App& app, bool reading);
+// The Read pill's words, with the shortcut that reads where it is shown
+std::wstring editorReadingButtonLabel(const App& app);
 // The Read button (#236) fades in for a hint session's intro and while the
 // pointer rests on it, and is hidden and click-through otherwise (#245)
 D2D1_RECT_F editorReadingButtonRect(const App& app);
@@ -38,6 +41,8 @@ void editorPositionImeWindow(App& app, HWND hwnd);
 void handleEditorMouseDown(App& app, HWND hwnd, int x, int y);
 void handleEditorMouseUp(App& app, HWND hwnd, int x, int y);
 void handleEditorMouseMove(App& app, HWND hwnd, int x, int y);
+// A held finger extends the original word, without arming a text drag.
+void editorTouchSelection(App& app, int x, int y, bool begin);
 void handleEditorMouseWheel(App& app, HWND hwnd, float delta);
 // A dragged selection (#289): TIMER_EDITOR_DRAG_SCROLL scrolls the editor
 // while the pointer is past its top or bottom edge; Esc, a lost capture or
@@ -51,9 +56,10 @@ void renderEditor(App& app, float editorWidth);
 bool editorCaretPoint(App& app, D2D1_POINT_2F& point);
 
 // Re-enter edit mode from a parked tab buffer (tabs.cpp), restoring the
-// dirty flag, scroll, and caret the switch-away captured
+// dirty flag, scroll, and caret the switch-away captured; bom when the
+// buffer's file starts with a byte order mark
 void restoreEditBuffer(App& app, const std::wstring& text, bool dirty,
-                       float scrollY, size_t cursor);
+                       float scrollY, size_t cursor, bool bom = false);
 
 // Quick-note empty state (design 4a): an untitled buffer with no text yet
 // shows a centered "Open a file" button in the preview pane until typing
@@ -81,6 +87,20 @@ void editorReparse(App& app, bool force = false);
 void editorReplaceRangeExternal(App& app, size_t start, size_t end,
                                 const std::wstring& repl);
 void editorMarkDirtyAndReparse(App& app);
+// The Live editor's edits, in order, as one undo step (a character typed
+// runs on like typing in the source), then its caret and selection
+void editorApplyLiveEdits(App& app, const std::vector<LiveText::Change>& changes, size_t caret, size_t anchor);
+// Ctrl+Z and Ctrl+Y, for the Live editor
+void editorUndoRedo(App& app, bool redo);
+// Puts the source's caret in view (back from Live)
+void editorRevealCaret(App& app);
+// Ctrl+V at the source's caret: a screenshot saves as a PNG beside the
+// document, a spreadsheet's range becomes a table unless `raw` (Shift)
+void editorPasteClipboard(App& app, HWND hwnd, bool raw);
+// The fenced templates the rail's flyout and Live's slash menu insert:
+// 0 flowchart, 1 sequence, 2 class, 3 state, 4 gantt, 5 pie, 6 an empty
+// Mermaid block, 7-9 PlantUML sequence, class and activity, 10 mind map
+const wchar_t* diagramTemplate(int kind);
 
 // Editor search
 void performEditorSearch(App& app);

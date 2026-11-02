@@ -50,6 +50,8 @@ void saveSettings(const Settings& settings) {
     file << "editorWordWrap=" << (settings.editorWordWrap ? 1 : 0) << "\n";
     file << "editHintsShown=" << settings.editHintsShown << "\n";
     file << "editorAssists=" << (settings.editorAssists ? 1 : 0) << "\n";
+    file << "editorHighlight=" << (settings.editorHighlight ? 1 : 0) << "\n";
+    file << "editorLive=" << (settings.editorLive ? 1 : 0) << "\n";
     file << "showWordCount=" << (settings.showWordCount ? 1 : 0) << "\n";
     file << "closeKeepsDrafts=" << (settings.closeKeepsDrafts ? 1 : 0) << "\n";
     file << "printMarginMm=" << settings.printMarginMm << "\n";
@@ -159,11 +161,14 @@ void persistReadingPosition(const std::string& path, float scrollY,
     saveSettings(settings);
 }
 
-// The editor assists toggle persists immediately so fresh windows pick
-// it up without waiting for this one's exit save
+// The editor assists toggle and the Source | Live pill persist
+// immediately so fresh windows pick them up without waiting for this
+// one's exit save
 void persistEditorMode(const App& app) {
     Settings settings = loadSettings();
     settings.editorAssists = app.editorAssists;
+    settings.editorHighlight = app.editorHighlight;
+    settings.editorLive = app.editorLive;
     saveSettings(settings);
 }
 
@@ -392,6 +397,10 @@ Settings loadSettings() {
             } catch (const std::exception&) { /* Keep the default. */ }
         } else if (key == "editorAssists") {
             settings.editorAssists = (value == "1");
+        } else if (key == "editorHighlight") {
+            settings.editorHighlight = (value == "1");
+        } else if (key == "editorLive") {
+            settings.editorLive = (value == "1");
         } else if (key == "showWordCount") {
             settings.showWordCount = (value == "1");
         } else if (key == "closeKeepsDrafts") {

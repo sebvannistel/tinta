@@ -29,6 +29,22 @@ bool hasExtension(std::basic_string_view<Character> path,
     return true;
 }
 
+// Sheets: Tinta's .smd and Obsidian's .canvas (sheet.h)
+template <typename Character>
+bool isSheetPath(std::basic_string_view<Character> path) {
+    const Character smd[] = {
+        static_cast<Character>('.'), static_cast<Character>('s'),
+        static_cast<Character>('m'), static_cast<Character>('d'),
+    };
+    const Character canvas[] = {
+        static_cast<Character>('.'), static_cast<Character>('c'), static_cast<Character>('a'),
+        static_cast<Character>('n'), static_cast<Character>('v'), static_cast<Character>('a'),
+        static_cast<Character>('s'),
+    };
+    return hasExtension(path, std::basic_string_view<Character>(smd, 4)) ||
+           hasExtension(path, std::basic_string_view<Character>(canvas, 7));
+}
+
 template <typename Character>
 bool isMermaidPath(std::basic_string_view<Character> path) {
     const Character extension[] = {
@@ -119,7 +135,8 @@ bool isSupportedPath(std::basic_string_view<Character> path) {
     };
     return hasExtension(path, std::basic_string_view<Character>(md, 3)) ||
         hasExtension(path, std::basic_string_view<Character>(markdown, 9)) ||
-        isMermaidPath(path) || isPlantUmlPath(path) || isPlainTextPath(path);
+        isMermaidPath(path) || isPlantUmlPath(path) || isPlainTextPath(path) ||
+        isSheetPath(path);
 }
 
 // A plain-text file becomes one highlighted code block: peek, tabs, and
@@ -214,12 +231,23 @@ bool isSupportedDropPath(std::wstring_view path) {
 // aligned with the raw source for edit-preview sync and scroll anchors.
 // Only a block opened by --- on the very first line and closed by --- or
 // ... counts; an unclosed fence renders as ordinary markdown.
-static bool blankFrontmatter(const std::string& content, std::string& out) {
+//
+// A UTF-8 byte order mark ahead of the first line is blanked the same way.
+// md4c would read it as that line's first character: a heading there would
+// stay literal text, and a frontmatter block would leave an empty paragraph
+// behind. Its three bytes become line breaks, so the first line still
+// starts a line of its own; spaces would indent it and change what a fence
+// or a list item holds.
+static bool blankPreamble(const std::string& content, std::string& out) {
     auto doc = fm::parse(content);
-    if (!doc.present) return false;
+    const bool bom = startsWithUtf8Bom(content);
+    if (!doc.present && !bom) return false;
     out = content;
-    for (size_t i = doc.begin; i < doc.end; ++i)
-        if (out[i] != '\n' && out[i] != '\r') out[i] = ' ';
+    if (doc.present) {
+        for (size_t i = doc.begin; i < doc.end; ++i)
+            if (out[i] != '\n' && out[i] != '\r') out[i] = ' ';
+    }
+    if (bom) out.replace(0, UTF8_BOM.size(), UTF8_BOM.size(), '\n');
     return true;
 }
 
@@ -242,7 +270,7 @@ qmd::ParseResult parseDocument(qmd::MarkdownParser& parser,
         return createPlainTextDocument(content, plainTextLanguage(path));
     }
     std::string cleaned;
-    if (blankFrontmatter(content, cleaned)) {
+    if (blankPreamble(content, cleaned)) {
         auto result = parser.parse(cleaned);
         insertProperties(result, content);
         return result;
@@ -259,7 +287,7 @@ qmd::ParseResult parseDocument(qmd::MarkdownParser& parser,
         return createPlainTextDocument(content, plainTextLanguage(path));
     }
     std::string cleaned;
-    if (blankFrontmatter(content, cleaned)) {
+    if (blankPreamble(content, cleaned)) {
         auto result = parser.parse(cleaned);
         insertProperties(result, content);
         return result;

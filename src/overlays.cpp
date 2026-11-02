@@ -53,12 +53,11 @@ void renderSearchOverlay(App& app) {
     float anim = app.searchAnimation;
 
     // Search bar dimensions
-    D2D1_RECT_F rest = searchBarRect(app);
+    D2D1_RECT_F rest = searchBarDrawRect(app);
     float barWidth = rest.right - rest.left;
     float barHeight = rest.bottom - rest.top;
     float barX = rest.left;
-    float barY = chromeTopHeight(app) + dpi(app, 20.0f) * anim -
-                 barHeight * (1.0f - anim);  // Slide down from under the strip
+    float barY = rest.top;
 
     // Background with rounded corners
     D2D1_ROUNDED_RECT barRect = D2D1::RoundedRect(
@@ -169,9 +168,10 @@ void renderSearchOverlay(App& app) {
     // Replace row (#121): a second input under the bar plus Replace / All
     app.searchReplaceHits.clear();
     if (app.editMode && app.searchReplaceMode && searchTextFormat) {
-        float rowY = barY + barHeight + dpi(app, 6.0f);
+        const D2D1_RECT_F row = searchReplaceRowRect(app);
+        float rowY = row.top;
         bool stacked = barWidth < dpi(app, 390);
-        float rowH = dpi(app, stacked ? 88.0f : 44.0f);
+        float rowH = row.bottom - row.top;
         D2D1_ROUNDED_RECT rowRect = D2D1::RoundedRect(
             D2D1::RectF(barX, rowY, barX + barWidth, rowY + rowH),
             dpi(app, 8.0f), dpi(app, 8.0f));
@@ -1876,6 +1876,14 @@ static void drawCenteredText(App& app, const wchar_t* text, IDWriteTextFormat* f
     layout->Release();
 }
 
+D2D1_RECT_F helpPanelRect(const App& app) {
+    const float width = std::min(dpi(app, 520.0f), app.width - dpi(app, 40.0f));
+    const float height = std::min(dpi(app, 700.0f), app.height - dpi(app, 40.0f));
+    const float x = (app.width - width) / 2;
+    const float y = (app.height - height) / 2 + (1 - app.helpAnimation) * dpi(app, 50.0f);
+    return D2D1::RectF(x, y, x + width, y + height);
+}
+
 void renderHelpOverlay(App& app) {
     // Animate in
     if (app.helpAnimation < 1.0f) {
@@ -1894,10 +1902,11 @@ void renderHelpOverlay(App& app) {
         D2D1::RectF(0, 0, (float)app.width, (float)app.height), app.brush);
 
     // Panel dimensions - fit to window
-    float panelWidth = std::min(dpi(app, 520.0f), app.width - dpi(app, 40.0f));
-    float panelHeight = std::min(dpi(app, 700.0f), app.height - dpi(app, 40.0f));
-    float panelX = (app.width - panelWidth) / 2;
-    float panelY = (app.height - panelHeight) / 2 + (1 - anim) * dpi(app, 50.0f);
+    const auto panel = helpPanelRect(app);
+    float panelWidth = panel.right - panel.left;
+    float panelHeight = panel.bottom - panel.top;
+    float panelX = panel.left;
+    float panelY = panel.top;
 
     // Panel background follows the active document theme.
     D2D1_ROUNDED_RECT panelRect = D2D1::RoundedRect(
@@ -1968,8 +1977,11 @@ void renderHelpOverlay(App& app) {
     std::wstring kTheme = keyLabel(app.keymap[KA_THEME]);
     std::wstring kStats = keyLabel(app.keymap[KA_STATS]);
     std::wstring kHelp = keyLabel(app.keymap[KA_HELP]);
-    std::wstring kEdit = keyLabel(app.keymap[KA_EDIT]);
+    std::wstring kEdit = keyLabel(app.keymap[KA_EDIT]) + L" / Ctrl+E";
     std::wstring kQuit = keyLabel(app.keymap[KA_QUIT]);
+    // Ctrl+E reads in Live and shows Source's preview pane (#308): the
+    // keys of the editor E opens
+    const bool live = app.editorLive;
 
     const HelpEntry navEntries[] = {
         {kDown.c_str(),   tr(app, "help.nav.scroll_down")},
@@ -1997,9 +2009,14 @@ void renderHelpOverlay(App& app) {
     const HelpEntry editEntries[] = {
         {kEdit.c_str(),   tr(app, "help.edit.enter_edit")},
         {L"Ctrl+S",       tr(app, "help.edit.save")},
-        {L"Ctrl+E",       tr(app, "help.edit.preview")},
+        {L"Ctrl+/",       tr(app, "help.edit.live")},
+        {L"/",            tr(app, "help.edit.slash")},
+        {L"Shift+F10",    tr(app, "help.edit.menu")},
+        {L"[[",           tr(app, "help.sheet.link")},
+        {L"Ctrl+K",       tr(app, "help.edit.link")},
+        {live ? L"Ctrl+/, Ctrl+E" : L"Ctrl+E", tr(app, "help.edit.preview")},
         {L"Ctrl+W",       tr(app, "help.edit.word_wrap")},
-        {L"Ctrl+Shift+E", tr(app, "editor.read_help")},
+        {live ? L"Ctrl+E" : L"Ctrl+Shift+E", tr(app, "editor.read_help")},
         {L"ESC ESC",      tr(app, "help.edit.exit_edit")},
         {L"Alt+\x2191 / Alt+\x2193", tr(app, "help.edit.move_line")},
         {L"Ctrl+Alt+\x2191 / \x2193", tr(app, "help.edit.add_caret")},
@@ -2019,6 +2036,29 @@ void renderHelpOverlay(App& app) {
         {kQuit.c_str(),   tr(app, "help.general.quit")},
     };
 
+    // Sheets (sheet_ui.h): the keys a sheet's tab answers to
+    const HelpEntry sheetEntries[] = {
+        {L"N / Double-click", tr(app, "sheet.tool.note")},
+        {L"Tab / Shift+Enter", tr(app, "help.sheet.child")},
+        {L"\x2190\x2191\x2192\x2193",       tr(app, "help.sheet.walk")},
+        {L"Ctrl+\x2190\x2191\x2192\x2193",  tr(app, "help.sheet.nudge")},
+        {L"Enter / E",        tr(app, "help.sheet.edit")},
+        {L"Drag side dot",    tr(app, "help.sheet.connect")},
+        {L"Ctrl+G / Ctrl+Shift+G", tr(app, "help.sheet.group")},
+        {L"1 \x2013 6 / 0",   tr(app, "help.sheet.color")},
+        {L"F",                tr(app, "sheet.find_placeholder")},
+        {L"S",                tr(app, "sheet.menu.spotlight")},
+        {L"P",                tr(app, "sheet.tool.present")},
+        {L"Ctrl+L",           tr(app, "sheet.tool.tidy")},
+        {L"L / M",            tr(app, "help.sheet.layers")},
+        {L"Shift+1 / Shift+2", tr(app, "help.sheet.fit")},
+        {L"Space+Drag",       tr(app, "help.sheet.pan")},
+        {L"J / Shift+J",      tr(app, "help.sheet.jump")},
+        {L"Z / Shift+Z",      tr(app, "help.sheet.fold")},
+        {L"[[",               tr(app, "help.sheet.link")},
+        {L"Alt / Hover",      tr(app, "help.sheet.peek")},
+    };
+
     float padding = dpi(app, 20.0f);
     float keyColWidth = dpi(app, 150.0f);
     float leftX = panelX + padding;
@@ -2036,7 +2076,8 @@ void renderHelpOverlay(App& app) {
     float totalContentHeight = sectionHeight((int)_countof(navEntries)) +
                                sectionHeight((int)_countof(overlayEntries)) +
                                sectionHeight((int)_countof(editEntries)) +
-                               sectionHeight((int)_countof(generalEntries)) + footerH;
+                               sectionHeight((int)_countof(generalEntries)) +
+                               sectionHeight((int)_countof(sheetEntries)) + footerH;
 
     // Scrollable area
     float contentTopY = titleBottomY + dpi(app, 10.0f);
@@ -2095,6 +2136,7 @@ void renderHelpOverlay(App& app) {
     drawSection(tr(app, "help.section.view"), overlayEntries, (int)_countof(overlayEntries));
     drawSection(tr(app, "help.section.editing"), editEntries, (int)_countof(editEntries));
     drawSection(tr(app, "help.section.general"), generalEntries, (int)_countof(generalEntries));
+    drawSection(tr(app, "help.section.sheets"), sheetEntries, (int)_countof(sheetEntries));
 
     // Footer hint
     D2D1_COLOR_F footerColor = app.theme.text;
@@ -2269,6 +2311,22 @@ D2D1_RECT_F searchBarRect(const App& app) {
     float barX = barLeft + (barCenterWidth - barWidth) / 2;
     float barY = chromeTopHeight(app) + dpi(app, 20.0f);
     return D2D1::RectF(barX, barY, barX + barWidth, barY + barHeight);
+}
+
+D2D1_RECT_F searchBarDrawRect(const App& app) {
+    D2D1_RECT_F bar = searchBarRect(app);
+    const float height = bar.bottom - bar.top;
+    bar.top = chromeTopHeight(app) + dpi(app, 20.0f) * app.searchAnimation -
+              height * (1.0f - app.searchAnimation);
+    bar.bottom = bar.top + height;
+    return bar;
+}
+
+D2D1_RECT_F searchReplaceRowRect(const App& app) {
+    D2D1_RECT_F row = searchBarDrawRect(app);
+    row.top = row.bottom + dpi(app, 6.0f);
+    row.bottom = row.top + dpi(app, row.right - row.left < dpi(app, 390) ? 88.0f : 44.0f);
+    return row;
 }
 
 // The reader's bar ends in a button that opens the results panel (#246)
@@ -2562,8 +2620,9 @@ void settingsChip(App& app, float& x, float y, const wchar_t* label, bool active
 D2D1_RECT_F settingsPanelRect(const App& app) {
     float w = std::min(dpi(app, app.settingsSection == 3 ? 980.0f : 760.0f), app.width - dpi(app, app.settingsSection == 3 ? 32.0f : 80.0f));
     // Leave room for the last row and localized footer in every section.
-    // Appearance holds a sixth row since notifications joined (#273)
-    const float tall = app.settingsSection == 3 || app.settingsSection == 1 ? 650.0f : 590.0f;
+    // Appearance holds a sixth row since notifications joined (#273), the
+    // editor an eighth since Markdown in colour did (#268)
+    const float tall = app.settingsSection == 3 || app.settingsSection == 1 ? 650.0f : app.settingsSection == 2 ? 660.0f : 590.0f;
     float h = std::min(dpi(app, tall), app.height - dpi(app, 64.0f));
     float x = (app.width - w) / 2;
     float y = (app.height - h) / 2 + (1 - app.settingsAnimation) * dpi(app, 30.0f);
@@ -3008,6 +3067,13 @@ void renderSettingsOverlay(App& app) {
         settingsToggle(app, cx + cw - cardPad - dpi(app, 40.0f),
                        cy + (rowCardH - dpi(app, 20.0f)) * 0.5f,
                        app.editorAssists, SET_TOGGLE_ASSISTS, anim);
+        cy += rowCardH + cardGap;
+        card(rowCardH);
+        cardLabel(tr(app, "settings.highlight"),
+                  tr(app, "settings.highlight.hint"), dpi(app, 60.0f));
+        settingsToggle(app, cx + cw - cardPad - dpi(app, 40.0f),
+                       cy + (rowCardH - dpi(app, 20.0f)) * 0.5f,
+                       app.editorHighlight, SET_TOGGLE_HIGHLIGHT, anim);
         cy += rowCardH + cardGap;
         card(rowCardH);
         cardLabel(tr(app, "settings.word_count"),

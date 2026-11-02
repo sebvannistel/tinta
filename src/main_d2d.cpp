@@ -42,6 +42,7 @@
 #include <thread>
 #pragma comment(lib, "winhttp.lib")
 #include "input.h"
+#include "live_editor.h"
 #include "touch.h"
 #include "editor.h"
 #include "print.h"
@@ -49,6 +50,7 @@
 #include "i18n.h"
 #include "tabs.h"
 #include "search_panel.h"
+#include "sheet_ui.h"
 #include <dbghelp.h>
 #pragma comment(lib, "dbghelp.lib")
 
@@ -98,9 +100,14 @@ static int autoThemeIndex(const App& app) {
 // Forward declarations
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 void render(App& app);
+static void renderChromeAndEnd(App& app);
 
 void render(App& app) {
     if (!app.renderTarget) return;
+
+    // A sheet draws its cards' content before the frame begins: the
+    // layout it borrows must not change under a frame in progress
+    if (sheetActive(app)) sheetPrepareFrame(app);
 
     app.renderTarget->BeginDraw();
     app.drawCalls = 0;
@@ -110,6 +117,17 @@ void render(App& app) {
     if (app.showPrintPreview) {
         renderPrintPreview(app);
         app.renderTarget->EndDraw();
+        return;
+    }
+
+    // A sheet's tab shows the canvas instead of the page; the panels,
+    // chips, strip and overlays still layer above it
+    if (sheetActive(app)) {
+        app.startPageShowing = false;
+        app.renderTarget->Clear(app.theme.background);
+        renderSheet(app);
+        if (app.showFolderBrowser) renderFolderBrowser(app);
+        renderChromeAndEnd(app);
         return;
     }
 
@@ -168,15 +186,16 @@ void render(App& app) {
         app.startPageShowing = false;  // recents reload on the way back
         // The reading view (#236) is the reader's page: plain background,
         // content clipped to the window (#242)
-        app.renderTarget->Clear(app.editorReadingPreview ? app.theme.background
-                                                         : editDeskColor(app));
+        const bool livePage = editorLiveOn(app);
+        app.renderTarget->Clear(app.editorReadingPreview || livePage ? app.theme.background
+                                                                     : editDeskColor(app));
 
         float editorWidth = editorPaneWidth(app);
         float previewX = documentViewportX(app);
         float previewWidth = documentViewportWidth(app);
 
         // Render editor (left pane; full width when the preview is hidden)
-        if (!app.editorReadingPreview) renderEditor(app, editorWidth);
+        if (!app.editorReadingPreview && !livePage) renderEditor(app, editorWidth);
 
         // The docked pane's page and the seam hairline first, then the
         // document clips into its pane: the whole window in the reading
@@ -185,6 +204,7 @@ void render(App& app) {
         renderEditPaneChrome(app);
         {
             float paneLeft = app.editorReadingPreview ? 0.0f
+                             : livePage ? previewX
                              : app.editorShowPreview ? editSplitDividerX(app) + 1.0f
                                                      : (float)app.width;
             app.renderTarget->PushAxisAlignedClip(
@@ -198,7 +218,7 @@ void render(App& app) {
             D2D1::Matrix3x2F::Translation(previewX, 0) * originalTransform);
 
         // The caret block's accent wash under the document content
-        if (!app.editorReadingPreview) renderPreviewCaretBlock(app, previewWidth);
+        if (!app.editorReadingPreview && !livePage) renderPreviewCaretBlock(app, previewWidth);
 
         goto render_document;
     }
@@ -241,10 +261,16 @@ render_document:
     // Clamp scroll values
     float documentWidth = documentViewportWidth(app);
     float maxScrollX = std::max(0.0f, app.contentWidth - documentWidth);
-    float maxScrollY = std::max(0.0f, app.contentHeight - app.height);
+    const bool livePage = editorLiveOn(app);
+    float maxScrollY = std::max(0.0f, (livePage ? livePageHeight(app) : app.contentHeight) - app.height);
+    if (livePage) app.scrollbarContentHeight = std::max(app.scrollbarContentHeight, livePageHeight(app));
     app.scrollX = std::max(0.0f, std::min(app.scrollX, maxScrollX));
     app.scrollY = std::max(0.0f, std::min(app.scrollY, maxScrollY));
 
+    // Live draws the page itself: the layout around the blocks being typed in
+    if (livePage) {
+        renderLivePage(app);
+    } else {
     // Render cached layout (document coordinates -> screen)
     const float viewportTop = app.scrollY;
     const float viewportBottom = app.scrollY + app.height;
@@ -666,10 +692,25 @@ render_document:
         }
     }
 
+    // Cell input stays inside the preview clip and below the table actions.
+    // It used to paint after them, hiding Fit / Copy behind the header editor.
+    if (app.editMode) {
+        D2D1_MATRIX_3X2_F saved;
+        app.renderTarget->GetTransform(&saved);
+        app.renderTarget->SetTransform(D2D1::Matrix3x2F::Identity());
+        renderTableEditOverlay(app);
+        app.renderTarget->SetTransform(saved);
+    }
+
     // Table copy-as-TSV button on hover (same pattern as code blocks;
     // wide tables clamp the button into the visible viewport)
-    if (app.hoveredTable >= 0 && app.hoveredTable < (int)app.tableRects.size()) {
-        const auto& tb = app.tableRects[app.hoveredTable];
+    int actionTable = app.hoveredTable;
+    if (actionTable < 0 && app.tableEditActive) {
+        for (int i = 0; i < (int)app.tableRects.size(); ++i)
+            if (app.tableRects[i].sourceOffset == app.tableEditSrc) { actionTable = i; break; }
+    }
+    if (actionTable >= 0 && actionTable < (int)app.tableRects.size()) {
+        const auto& tb = app.tableRects[actionTable];
         if (tb.bounds.bottom >= viewportTop - cullMargin &&
             tb.bounds.top <= viewportBottom + cullMargin) {
             float btnW = dpi(app, 88.0f);
@@ -747,6 +788,8 @@ render_document:
             app.drawCalls++;
         }
     }
+
+    }  // the document pass (Live drew its page instead)
 
     // Determine scrollbar visibility
     bool needsVScroll = app.verticalScrollbarVisible;
@@ -872,7 +915,7 @@ render_document:
     // Draw selection highlights from the exact [selAnchor, selFocus) glyph
     // ranges. The copied text comes from the same range, so highlight and
     // clipboard always agree.
-    if ((app.selecting || app.hasSelection) && !app.textRects.empty() &&
+    if (!livePage && (app.selecting || app.hasSelection) && !app.textRects.empty() &&
         app.selAnchor != app.selFocus) {
         size_t selA = std::min(app.selAnchor, app.selFocus);
         size_t selB = std::max(app.selAnchor, app.selFocus);
@@ -880,7 +923,7 @@ render_document:
         std::vector<D2D1_RECT_F> bars;
         selectionHighlightRects(app, selA, selB, bars);
 
-        app.brush->SetColor(D2D1::ColorF(0.2f, 0.4f, 0.9f, 0.35f));
+        app.brush->SetColor(themeSelectionColor(app.theme, D2D1::ColorF(0.2f, 0.4f, 0.9f, 0.35f)));
         float viewTop = app.scrollY - 50.0f;
         float viewBottom = app.scrollY + app.height + 50.0f;
         for (const auto& bar : bars) {
@@ -894,7 +937,7 @@ render_document:
     }
 
     // Draw search match highlights (search live through visible textRects)
-    if (app.showSearch && !app.searchQuery.empty() && !app.textRects.empty() && !app.searchMatches.empty()) {
+    if (!livePage && app.showSearch && !app.searchQuery.empty() && !app.textRects.empty() && !app.searchMatches.empty()) {
         // Collect visible match rects by intersecting search matches with text rects
         struct VisibleMatch {
             D2D1_RECT_F rect;
@@ -973,7 +1016,7 @@ render_document:
         }
     }
 
-    renderFrontmatterOverflow(app);
+    if (!livePage) renderFrontmatterOverflow(app);
 
     // Back to screen coordinates: notifications, stats, and overlays
     // (including the folder browser panel itself) are not shifted
@@ -1039,13 +1082,16 @@ render_document:
         // Quick-note empty state: Open button in the blank preview pane
         renderQuickNoteEmptyState(app);
 
-        // In-place table editing: cell input + hover affordances (#148)
-        renderTableEditOverlay(app);
-
         // Render search overlay in screen coordinates (over editor pane)
         if (app.showSearch) renderSearchOverlay(app);
     }
 
+    renderChromeAndEnd(app);
+}
+
+// Everything above the page or the sheet: prompts, chips, the tab strip,
+// overlays and dialogs, then the end of the frame
+static void renderChromeAndEnd(App& app) {
     // Ctrl+G's go-to-line prompt, at the top of the pane it acts on (#276)
     renderGotoLinePrompt(app);
 
@@ -1064,6 +1110,8 @@ render_document:
         renderEditCtxMenu(app);
         renderEditorReadingButton(app);
         renderEditorWordCount(app);
+        // Live's menu over the page's buttons and counts
+        renderLiveMenu(app);
     }
     // A resting pointer's tab: full name and folder below the strip
     renderTabHoverCard(app);
@@ -1251,6 +1299,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             break;
 
         case WM_KILLFOCUS:
+            if (app) touchCancel(*app, hwnd);
             if (app) tabHoverCardDismiss(*app, hwnd);
             if (app) searchInputMouseUp(*app);
             if (app) cancelDocumentScrollbarDrag(*app, hwnd);
@@ -1260,6 +1309,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 closeContextMenu(*app);
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
+            if (app) liveCloseMenu(*app);
+            if (app && sheetActive(*app)) sheetCloseTextMenu(*app);
             break;
 
         case WM_NCLBUTTONDOWN:
@@ -1267,6 +1318,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 closeContextMenu(*app);
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
+            if (app) liveCloseMenu(*app);
+            if (app && sheetActive(*app)) sheetCloseTextMenu(*app);
             if (app && !app->zenMode &&
                 (wParam == HTMINBUTTON || wParam == HTMAXBUTTON ||
                  wParam == HTCLOSE)) {
@@ -1329,11 +1382,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     tabStripMouseDown(*app, hwnd, mx, my, true);
                     return 0;
                 }
+                // A sheet pans with the middle button held
+                if (sheetMiddleDown(*app, hwnd, mx, my)) return 0;
             }
+            break;
+
+        case WM_MBUTTONUP:
+            if (app && sheetMiddleUp(*app, hwnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) return 0;
             break;
 
         case WM_CLOSE:
             if (app) tableEditCommit(*app);
+            if (app) sheetLeave(*app);
             // "Close without asking" (#252): unsaved buffers stay behind as
             // drafts, offered back on the next launch, and the window closes
             if (app && app->closeKeepsDrafts) {
@@ -1384,6 +1444,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (app && app->d2dFactory) {
                 sidePanelResizeEnd(*app, hwnd, true);
                 closeContextMenu(*app);  // its anchor belongs to the old viewport
+                liveCloseMenu(*app);
+                if (sheetActive(*app)) sheetCloseTextMenu(*app);
                 // The preview's geometry is stale after a resize: restore
                 // the document at the new size and close the overlay
                 if (app->showPrintPreview) {
@@ -1516,6 +1578,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (app && (HWND)lParam != hwnd) panelScrollbarEnd(*app, hwnd, true);
             if (app && (HWND)lParam != hwnd) sidePanelResizeEnd(*app, hwnd, true);
             if (app && (HWND)lParam != hwnd) editorTextDragCancel(*app, hwnd);
+            if (app && (HWND)lParam != hwnd) sheetCaptureLost(*app, hwnd);
+            if (app && (HWND)lParam != hwnd) liveCaptureLost(*app);
             // Losing capture mid tab-drag (Alt+Tab, a popup stealing the
             // mouse) aborts the drag instead of leaving a stray ghost
             if (app && app->tabDragIndex >= 0 && (HWND)lParam != hwnd) {
@@ -1524,6 +1588,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_CANCELMODE:
+            if (app) touchCancel(*app, hwnd);
             if (app) cancelAppMenuPress(*app, hwnd);
             if (app) tableEditMouseUp(*app);
             if (app) searchInputMouseUp(*app);
@@ -1536,6 +1601,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (app) panelScrollbarEnd(*app, hwnd, true);
             if (app) sidePanelResizeEnd(*app, hwnd, true);
             if (app) editorTextDragCancel(*app, hwnd);
+            if (app) sheetCaptureLost(*app, hwnd);
+            if (app) liveCaptureLost(*app);
             break;
 
         case WM_MOUSELEAVE:
@@ -1562,6 +1629,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (app) touchStopFling(*app, hwnd);
             if (app) return handleKeyDown(*app, hwnd, wParam) ? 1 : 0;
             return 0;
+
+        case WM_KEYUP:
+            if (app) sheetKeyUp(*app, hwnd, wParam);
+            // Live took the menu key on its way down: no second request for the menu
+            if (app && wParam == VK_APPS && editorLiveOn(*app)) return 0;
+            break;
 
         case WM_XBUTTONUP:
             // Mouse side buttons walk back/forward across link jumps
@@ -1628,6 +1701,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
             }
             if (wParam == TIMER_LINK_PEEK && app) handleLinkPeekTimer(*app, hwnd);
+            if (wParam == sheetui::SHEET_TIMER_ID && app) sheetTimer(*app, hwnd);
             if (wParam == TIMER_TAB_HOVER_CARD && app) handleTabHoverCardTimer(*app, hwnd);
             if (wParam == TIMER_FILE_WATCH && app) handleFileWatchTimer(*app, hwnd);
             if (wParam == 2 && app) editorReparse(*app); // TIMER_EDITOR_REPARSE
@@ -1667,6 +1741,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 // One relayout for however many images arrived since armed
                 KillTimer(hwnd, TIMER_IMAGE_REFLOW);
                 app->layoutDirty = true;
+                // Notes on a sheet that show the new image draw again
+                sheetImagesArrived(*app);
                 // The open print preview draws its own cached pages: lay
                 // them out again so the diagram appears and paginates as
                 // it will print
@@ -1811,6 +1887,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 settings.editHintsShown =
                     std::max(settings.editHintsShown, app->editHintsShown);
                 settings.editorAssists = app->editorAssists;
+                settings.editorHighlight = app->editorHighlight;
                 // showWordCount, closeKeepsDrafts and printMarginMm persist
                 // when changed and stay as on disk here, like openInTabs below
                 settings.followSystemTheme = app->followSystemTheme;
@@ -1945,6 +2022,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     // Persisted when toggled and kept as on disk at exit, like openInTabs
     app.showNotifications = savedSettings.showNotifications;
     app.editorAssists = savedSettings.editorAssists;
+    app.editorHighlight = savedSettings.editorHighlight;
+    app.editorLive = savedSettings.editorLive;
+    app.editorLiveAnim = app.editorLive ? 1.0f : 0.0f;
     app.showWordCount = savedSettings.showWordCount;
     app.printMarginMm = savedSettings.printMarginMm;
     app.closeKeepsDrafts = savedSettings.closeKeepsDrafts;

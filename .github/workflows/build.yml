@@ -55,17 +55,19 @@ jobs:
             - Portable: download `tinta.exe` below and run it (SmartScreen may ask: "More info", then "Run anyway")
             - Optionally run `tinta.exe /register` to register Markdown, Mermaid and PlantUML files
 
-            ### Drag text in the editor (#289)
-            - Drag selected text in the editor to move it, or hold Ctrl as you let go to leave a copy. A caret shows where it will land, the editor scrolls at its top and bottom edges, one Ctrl+Z undoes it, and Esc cancels
-            - Requested by @nokia5118 (#289)
+            A fix release for 4.0.0. For what is new in 4.0 (Live and Sheets), see the [v4.0.0 notes](https://github.com/oipoistar/tinta/releases/tag/v4.0.0).
 
-            ### Lists in copies (#290)
-            - Copying from the viewer pastes lists as real bullet and numbered lists in Outlook and Word, nesting and start numbers included, and task items with their checkboxes
-            - Contributed by @sebvannistel (#290)
+            ### Added
+            - Themes can colour bold and italic text, the selection and horizontal rules with `bold=`, `italic=`, `bolditalic=`, `selection=` and `hr=` in `themes.ini`, on the page, in Live and Source and in the exports. See [Theme colours](https://github.com/oipoistar/tinta/blob/master/docs/theme-colours.md). Requested by @Fallgrim (#310)
+
+            ### Changed
+            - In Live, Ctrl+E shows the page as the reader draws it, and Ctrl+E goes back to the caret; in the reader, Ctrl+E opens the editor. Source keeps Ctrl+E for its preview pane. Requested by @Fallgrim (#308)
 
             ### Fixed
-            - A theme font that isn't installed, such as Cascadia Code for Midnight and Arctic on Windows 10, gives way to an installed one, so the editor and code blocks stay monospaced and √ no longer shows as Ã. Reported by @a86022 (#264)
-            - The editor's scrollbar stays below the tab bar, and the preview moves smoothly while the editor scrolls through front matter. Reported by @go4399 (#291)
+            - Live's scrollbar can be dragged, and after a switch to Source and back the wheel and Down keep Live's page where they leave it. Reported by @go4399 (#307)
+            - Live no longer sometimes shows a document opened after leaving the editor as Markdown being typed
+            - The Microsoft Store logos are sharp at every display scale instead of enlarged and soft. Reported by @Fallgrim (#309)
+            - Strikethrough and highlight wrap bold, italic, links and code; `~~**bold**~~` and `==*italic*==` used to show their `~~` and `==` as text. As on GitHub, `a == b` and `x ~~ y ~~ z` stay text, and so do escaped signs
 
             ### What's included
             - Export as HTML, DOCX, or PDF, plus optional Pandoc formats
@@ -73,7 +75,7 @@ jobs:
             - Tabbed interface with drag, session restore, and a tab context menu
             - 10 tuned themes (5 light, 5 dark) plus custom themes
             - Hardware-accelerated rendering via Direct2D
-            - Single portable executable about 2.5 MB, no dependencies
+            - Single portable executable about 4 MB, no dependencies
           files: build/Release/tinta.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
