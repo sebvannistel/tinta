@@ -289,9 +289,12 @@ int testHandEditedThemes(App& app, const std::filesystem::path& dir) {
     applyTheme(app,first+1);
     check(!customThemesChangedOnDisk(),"#310: nothing changed since the themes loaded");
     auto save=[&](const std::string& text) {
+        const auto previous=std::filesystem::last_write_time(ini);
         { std::ofstream f(ini,std::ios::binary); f << text; }
-        // A clock that has not ticked between two writes still reads as a change
-        std::filesystem::last_write_time(ini,std::filesystem::last_write_time(ini)+std::chrono::seconds(2));
+        // Advance from the last observed timestamp, not the fresh write's
+        // clock time: two writes in one tick would otherwise both get now+2s.
+        std::filesystem::last_write_time(ini,previous+std::chrono::seconds(2));
+        check(customThemesChangedOnDisk(),"#310: each saved edit has a distinct timestamp");
     };
     std::string edited=read(ini);
     edited.replace(edited.find("bold = #FF0066"),14,"bold = #3366FF");

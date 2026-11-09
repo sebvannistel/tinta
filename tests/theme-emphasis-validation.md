@@ -199,3 +199,24 @@ user would leave it: the examples uncommented, then the hand-written theme.
 - A value that still isn't a colour (`bold=red`) is dropped without a
   message, as before.
 - The theme editor has no controls for these keys yet.
+
+### CI timestamp regression (2026-11-09)
+
+The hand-edit test used to add two seconds to each fresh write's timestamp.
+When the move and deletion writes share a clock tick, both receive the same
+timestamp, so the deletion is not detected and the Paper fallback check fails.
+The helper now advances from the timestamp captured before the write and checks
+that every save is detected before testing the reload.
+
+Checked with the MSVC Release native `inline_code_theme` harness:
+
+- The original test passed 30 ordinary local runs.
+- Temporarily simulating a shared clock tick for the final two writes reproduced
+  the exact CI failure with the original helper; the fixed helper passed the
+  same simulation. The temporary simulation was removed.
+- The final test passed 30 consecutive runs, including its existing mixed
+  Markdown layout and HTML/DOCX export checks.
+- `git diff --check` passed.
+
+Only the theme test target was built and run locally; the full 63-test suite
+and GitHub Actions were not rerun. No application rendering behavior changed.
