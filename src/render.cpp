@@ -1,6 +1,7 @@
 #include "frontmatter_ui.h"
 #include "render.h"
 #include "file_utils.h"
+#include "folding.h"
 #include "inline_style.h"
 #include "utils.h"
 #include "syntax.h"
@@ -38,6 +39,26 @@
 static bool fitBlockEnabled(const App& app, unsigned key) {
     return std::find(app.fitBlocks.begin(), app.fitBlocks.end(), key) !=
            app.fitBlocks.end();
+}
+
+App::LayoutShape listBullet(float textX, float baseline, float em, int depth, D2D1_COLOR_F color) {
+    App::LayoutShape shape;
+    const int kind = std::max(0, depth) % 3;
+    // Two fifths of an em clear of the text, as a browser sets its marker
+    const float cx = textX - em * 0.56f, cy = baseline - em * 0.3f;
+    const float half = em * (kind == 2 ? 0.14f : 0.16f);
+    shape.type = kind == 2 ? App::LayoutShapeType::Rectangle : App::LayoutShapeType::Ellipse;
+    shape.rect = D2D1::RectF(cx - half, cy - half, cx + half, cy + half);
+    shape.fill = color;
+    if (kind == 1) {
+        // A ring as wide as the disc: its stroke inside the disc's edge
+        shape.strokeWidth = std::max(1.0f, em * 0.07f);
+        const float inset = shape.strokeWidth * 0.5f;
+        shape.rect = D2D1::RectF(cx - half + inset, cy - half + inset, cx + half - inset, cy + half - inset);
+        shape.stroke = color;
+        shape.fill.a = 0.0f;
+    }
+    return shape;
 }
 
 namespace {
@@ -80,47 +101,47 @@ static LayoutInfo createLayout(App& app, std::wstring_view text, IDWriteTextForm
     return info;
 }
 
+// A cell laid out only to be measured, then taken back by rollbackTo: its
+// text joins no line of the selection's, so the page's first lines are
+// left alone and nothing has to be taken back out of them (#318)
+struct MeasuringOnly {
+    App& app;
+    explicit MeasuringOnly(App& a) : app(a) { ++app.layoutMeasuring; }
+    ~MeasuringOnly() { --app.layoutMeasuring; }
+};
+
+static bool bucketAbove(const App::LineBucket& bucket, float top) { return bucket.top < top; }
+
 static void addTextRect(App& app, const D2D1_RECT_F& rect, size_t docStart, size_t docLength,
                         size_t runIndex = (size_t)-1) {
+    if (app.layoutMeasuring > 0) return;
     size_t idx = app.textRects.size();
     app.textRects.push_back({rect, docStart, docLength, runIndex});
 
     // Table cells are laid out column by column. A wrapped cell can append a
     // later line before the next column appends its first line, so buckets
-    // cannot be grouped by looking only at the last one.
-    for (auto& bucket : app.lineBuckets) {
-        if (std::abs(rect.top - bucket.top) <= kLineBucketTolerance) {
-            bucket.bottom = std::max(bucket.bottom, rect.bottom);
-            bucket.minX = std::min(bucket.minX, rect.left);
-            bucket.maxX = std::max(bucket.maxX, rect.right);
-            bucket.textRectIndices.push_back(idx);
-            return;
-        }
-    }
-
-    if (app.lineBuckets.empty() || rect.top > app.lineBuckets.back().top) {
-        App::LineBucket bucket;
-        bucket.top = rect.top;
-        bucket.bottom = rect.bottom;
-        bucket.minX = rect.left;
-        bucket.maxX = rect.right;
-        bucket.textRectIndices.push_back(idx);
-        app.lineBuckets.push_back(std::move(bucket));
+    // cannot be grouped by looking only at the last one. The buckets run
+    // down the page, so the first within the tolerance of this top is found
+    // by halving rather than by walking every line laid out so far.
+    auto& buckets = app.lineBuckets;
+    auto at = std::lower_bound(buckets.begin(), buckets.end(), rect.top - kLineBucketTolerance, bucketAbove);
+    if (at != buckets.end() && at->top <= rect.top + kLineBucketTolerance) {
+        at->bottom = std::max(at->bottom, rect.bottom);
+        at->minX = std::min(at->minX, rect.left);
+        at->maxX = std::max(at->maxX, rect.right);
+        at->textRectIndices.push_back(idx);
         return;
     }
 
+    // A line of its own: after the last, or among them when a cell's later
+    // line came before the next column's first
     App::LineBucket bucket;
     bucket.top = rect.top;
     bucket.bottom = rect.bottom;
     bucket.minX = rect.left;
     bucket.maxX = rect.right;
     bucket.textRectIndices.push_back(idx);
-    auto insertAt = std::lower_bound(
-        app.lineBuckets.begin(), app.lineBuckets.end(), rect.top,
-        [](const App::LineBucket& existing, float top) {
-            return existing.top < top;
-        });
-    app.lineBuckets.insert(insertAt, std::move(bucket));
+    buckets.insert(at, std::move(bucket));
 }
 
 static void addTextRun(App& app, LayoutInfo&& info, const D2D1_POINT_2F& pos,
@@ -171,9 +192,12 @@ static void markStyles(App& app, const InlineStyle& style, bool isLink, const st
     }
 }
 
+// Where each list stood before a trial layout, which rollbackTo cuts back
+// to. The line buckets are not cut by count: a trial can add to buckets
+// laid out before it (rollbackLineBuckets).
 struct LayoutSnapshot {
     size_t textRuns, rects, lines, shapes, connectors, bitmaps;
-    size_t links, textRects, lineBuckets, docTextLen, tasks, anchors;
+    size_t links, textRects, docTextLen, tasks, anchors, scrollAnchors;
 };
 
 static LayoutSnapshot takeSnapshot(App& app) {
@@ -186,11 +210,57 @@ static LayoutSnapshot takeSnapshot(App& app) {
         app.layoutBitmaps.size(),
         app.linkRects.size(),
         app.textRects.size(),
-        app.lineBuckets.size(),
         app.docText.size(),
         app.taskRects.size(),
-        app.htmlAnchors.size()
+        app.htmlAnchors.size(),
+        app.scrollAnchors.size()
     };
+}
+
+// Takes a trial's rectangles back out of the line buckets (#318). A trial
+// is laid out wherever it likes: a table cell is measured at y = 0, so its
+// rectangles joined the buckets of the page's first lines, or made buckets
+// of their own among them rather than after the last one, and cutting the
+// list back to its old length took away a real line while the trial's
+// stayed. Buckets run down the page and a rectangle joins only one within
+// kLineBucketTolerance of its top, so only the buckets about the trial's
+// rectangles are looked at.
+static void rollbackLineBuckets(App& app, size_t keptRects) {
+    if (keptRects >= app.textRects.size()) return;
+    float low = std::numeric_limits<float>::max();
+    float high = std::numeric_limits<float>::lowest();
+    for (size_t i = keptRects; i < app.textRects.size(); i++) {
+        low = std::min(low, app.textRects[i].rect.top);
+        high = std::max(high, app.textRects[i].rect.top);
+    }
+    auto& buckets = app.lineBuckets;
+    auto it = std::lower_bound(buckets.begin(), buckets.end(), low - kLineBucketTolerance, bucketAbove);
+    auto out = it;
+    for (; it != buckets.end() && it->top <= high + kLineBucketTolerance; ++it) {
+        // A bucket gains rectangles in the order they are laid out, so the
+        // trial's are its last ones
+        auto& indices = it->textRectIndices;
+        auto trial = std::lower_bound(indices.begin(), indices.end(), keptRects);
+        if (trial != indices.end()) {
+            indices.erase(trial, indices.end());
+            if (indices.empty()) continue;  // the trial made this bucket
+            // Its extents again from the rectangles it keeps, the first of
+            // which made it and gave it its top
+            const D2D1_RECT_F& first = app.textRects[indices.front()].rect;
+            it->bottom = first.bottom;
+            it->minX = first.left;
+            it->maxX = first.right;
+            for (size_t idx : indices) {
+                const D2D1_RECT_F& rect = app.textRects[idx].rect;
+                it->bottom = std::max(it->bottom, rect.bottom);
+                it->minX = std::min(it->minX, rect.left);
+                it->maxX = std::max(it->maxX, rect.right);
+            }
+        }
+        if (out != it) *out = std::move(*it);
+        ++out;
+    }
+    buckets.erase(out, it);
 }
 
 static void rollbackTo(App& app, const LayoutSnapshot& s) {
@@ -211,8 +281,8 @@ static void rollbackTo(App& app, const LayoutSnapshot& s) {
     app.layoutConnectors.resize(s.connectors);
     app.layoutBitmaps.resize(s.bitmaps);
     app.linkRects.resize(s.links);
+    rollbackLineBuckets(app, s.textRects);  // reads the trial's rectangles first
     app.textRects.resize(s.textRects);
-    app.lineBuckets.resize(s.lineBuckets);
     app.docText.resize(s.docTextLen);
     for (auto* ranges : {&app.docBoldRanges, &app.docItalicRanges}) {
         while (!ranges->empty() && ranges->back().first >= s.docTextLen) ranges->pop_back();
@@ -226,6 +296,9 @@ static void rollbackTo(App& app, const LayoutSnapshot& s) {
     for (auto& item : items) item.end = std::min(item.end, s.docTextLen);
     app.taskRects.resize(s.tasks);
     app.htmlAnchors.resize(s.anchors);  // a trial layout's anchors sit at trial positions
+    // A diagram fitted again drops the scroll anchors of the larger pass;
+    // kept, they held its nodes' places in the editor's scroll sync
+    app.scrollAnchors.resize(s.scrollAnchors);
 }
 
 static void shiftLayoutItems(App& app, const LayoutSnapshot& from, float dx) {
@@ -580,7 +653,7 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
         }
         IDWriteTextFormat* format = run.style.format ? run.style.format : baseFormat;
         float size = format->GetFontSize();
-        mathBoxes[i] = mathParse(app, toWide(run.elem->text), size, false);
+        mathBoxes[i] = mathParse(app, mathResolveRefs(toWide(run.elem->text), app.mathLabels), size, false);
         if (!mathBoxes[i]) continue;
         float baseline = size * 0.8f;
         IDWriteTextLayout* probe = nullptr;
@@ -736,12 +809,14 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                 // text flow, baseline-aligned with the surrounding line
                 std::wstring latex = toWide(elem->text);
                 MathBoxPtr box = mathBoxes[runIndex];
+                // $$ shows as $$: a display equation's source read $x$ (#314)
+                const std::wstring dollars = elem->type == ElementType::MathDisplay ? L"$$" : L"$";
                 if (!box) {
                     // Unsupported TeX: show the raw source in code style
                     format = inlineCodeFormat(app, run.style.bold, run.style.italic);
                     if (!isLink) color = themeInlineCodeColor(app.theme);
                     drawYOffset += baselineOf(textFormat) - baselineOf(format);
-                    text = L"$" + latex + L"$";
+                    text = dollars + latex + dollars;
                     break;
                 }
                 float w = mathBoxWidth(box);
@@ -771,7 +846,7 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                 if (isLink) addLinkSegment(x, x + w, y, linkUrl, color);
 
                 size_t docStart = app.docText.size();
-                std::wstring source = L"$" + latex + L"$";
+                std::wstring source = dollars + latex + dollars;
                 app.docText += source;
                 addTextRect(app,
                             D2D1::RectF(x, y, x + w, y + lineHeight),
@@ -1126,7 +1201,7 @@ static void layoutMathBlock(App& app, const ElementPtr& elem, float& y,
                             float indent, float maxWidth) {
     std::wstring latex = toWide(elem->text);
     float baseSize = app.textFormat ? app.textFormat->GetFontSize() : 16.0f;
-    MathBoxPtr box = mathParse(app, latex, baseSize * 1.06f, true);
+    MathBoxPtr box = mathParse(app, mathResolveRefs(latex, app.mathLabels), baseSize * 1.06f, true);
     if (!box) {
         // Unsupported TeX: raw source in code style (the mermaid pattern)
         auto fallback = std::make_shared<Element>(ElementType::CodeBlock);
@@ -1142,6 +1217,18 @@ static void layoutMathBlock(App& app, const ElementPtr& elem, float& y,
     y += 6 * scale;
     float w = mathBoxWidth(box);
     float x = indent + std::max(0.0f, (maxWidth - w) / 2);
+    // Its \tag's number at the line's right (#314). The equation moves off
+    // the middle to keep an em clear of it, and with no room for both on
+    // one line the number goes under it, at the right.
+    float below = 0;
+    if (MathBoxPtr tag = mathBoxTag(box)) {
+        const float tagX = indent + std::max(0.0f, maxWidth - mathBoxWidth(tag));
+        if (x + w + baseSize > tagX) x = std::max(indent, tagX - baseSize - w);
+        const bool under = x + w + baseSize > tagX;
+        const float tagY = under ? y + mathBoxHeight(box) : y + mathBoxBaseline(box) - mathBoxBaseline(tag);
+        mathBoxRetain(app, tag, tagX, tagY, app.theme.text);
+        if (under) below = mathBoxHeight(tag);
+    }
     mathBoxRetain(app, box, x, y, app.theme.text);
 
     size_t docStart = app.docText.size();
@@ -1150,26 +1237,17 @@ static void layoutMathBlock(App& app, const ElementPtr& elem, float& y,
                 docStart, latex.size());
     app.docText += L"\n\n";
 
-    y += mathBoxHeight(box) + 14 * scale;
+    y += mathBoxHeight(box) + below + 14 * scale;
 }
 
-// A paragraph that is exactly one $$...$$ span renders as a math block
-static const ElementPtr* soleMathDisplayChild(const ElementPtr& elem) {
-    const ElementPtr* found = nullptr;
-    for (const auto& child : elem->children) {
-        if (!child) continue;
-        if (child->type == ElementType::MathDisplay) {
-            if (found) return nullptr;
-            found = &child;
-        } else if (child->type == ElementType::Text) {
-            for (char c : child->text) {
-                if (!isspace((unsigned char)c)) return nullptr;
-            }
-        } else if (child->type != ElementType::SoftBreak) {
-            return nullptr;
-        }
+// Nothing to draw between equations: blanks and line breaks
+static bool blankInline(const ElementPtr& child) {
+    if (!child || child->type == ElementType::SoftBreak) return true;
+    if (child->type != ElementType::Text) return false;
+    for (char c : child->text) {
+        if (!isspace((unsigned char)c)) return false;
     }
-    return found;
+    return true;
 }
 
 static bool isAnchorOnlyContent(const std::vector<ElementPtr>& children) {
@@ -1202,9 +1280,29 @@ static bool pinAnchorsOnly(App& app, const std::vector<ElementPtr>& children, fl
     return true;
 }
 
+static void layoutInlineRun(App& app, std::vector<ElementPtr>& run, float& y, float indent, float maxWidth);
+
 static void layoutParagraph(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
-    if (const ElementPtr* math = soleMathDisplayChild(elem)) {
-        layoutMathBlock(app, *math, y, indent, maxWidth);
+    // A $$...$$ equation stands on its own line, centered, wherever it sits
+    // in the paragraph: two in a row ran on as one line of text (#314). The
+    // words before, between and after them make lines of their own.
+    if (std::any_of(elem->children.begin(), elem->children.end(),
+                    [](const ElementPtr& c) { return c && c->type == ElementType::MathDisplay; })) {
+        std::vector<ElementPtr> words;
+        auto flush = [&] {
+            while (!words.empty() && blankInline(words.front())) words.erase(words.begin());
+            while (!words.empty() && blankInline(words.back())) words.pop_back();
+            layoutInlineRun(app, words, y, indent, maxWidth);
+        };
+        for (const auto& child : elem->children) {
+            if (child && child->type == ElementType::MathDisplay) {
+                flush();
+                layoutMathBlock(app, child, y, indent, maxWidth);
+            } else {
+                words.push_back(child);
+            }
+        }
+        flush();
         return;
     }
     if (pinAnchorsOnly(app, elem->children, y)) return;
@@ -1228,6 +1326,44 @@ static void layoutInlineRun(App& app, std::vector<ElementPtr>& run, float& y, fl
     run.clear();
 }
 
+// Counts a heading for Contents and anchor links: its text, and a
+// GitHub-style slug numbered when the same text came before
+static size_t registerHeading(App& app, const ElementPtr& elem, float y) {
+    std::wstring headingText;
+    std::function<void(const ElementPtr&)> extract = [&](const ElementPtr& e) {
+        if (!e) return;
+        if (e->type == ElementType::Text) headingText += toWide(e->text);
+        else for (const auto& c : e->children) extract(c);
+    };
+    for (const auto& child : elem->children) extract(child);
+
+    std::string baseId = slugifyHeading(headingText);
+    int& n = app.headingSlugCounts[baseId];
+    std::string id = (n == 0) ? baseId : (baseId + "-" + std::to_string(n));
+    n++;
+    app.headings.push_back({headingText, elem->level, y, id});
+    return app.headings.size() - 1;
+}
+
+// The headings and anchors of a block a folded section hides (#316),
+// counted as its layout would count them, at the folded heading's place:
+// slugs, Contents and links read as if the section were open
+static void registerHidden(App& app, const ElementPtr& elem, size_t under) {
+    if (!elem) return;
+    if (elem->type == ElementType::Heading) {
+        if (elem->level >= 1 && elem->level <= 6) {
+            const size_t heading = registerHeading(app, elem, app.headings[under].y);
+            app.headings[heading].hiddenUnder = (int)under;
+        }
+    } else if (elem->type == ElementType::Anchor && !elem->title.empty()) {
+        app.htmlAnchors.push_back({elem->title, app.headings[under].y});
+    } else if (elem->type == ElementType::FootnoteReference && !elem->title.empty()) {
+        // A footnote's way back to its reference
+        app.footnoteAnchors.emplace(elem->title, app.headings[under].y);
+    }
+    for (const auto& child : elem->children) registerHidden(app, child, under);
+}
+
 static void layoutHeading(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
     float scale = app.contentScale * app.zoomFactor;
     int levelIndex = std::min(elem->level - 1, 5);
@@ -1240,21 +1376,7 @@ static void layoutHeading(App& app, const ElementPtr& elem, float& y, float inde
     }
 
     // All Markdown heading levels participate in Contents and anchor navigation (#210).
-    if (elem->level >= 1 && elem->level <= 6) {
-        std::wstring headingText;
-        std::function<void(const ElementPtr&)> extract = [&](const ElementPtr& e) {
-            if (!e) return;
-            if (e->type == ElementType::Text) headingText += toWide(e->text);
-            else for (const auto& c : e->children) extract(c);
-        };
-        for (const auto& child : elem->children) extract(child);
-
-        std::string baseId = slugifyHeading(headingText);
-        int& n = app.headingSlugCounts[baseId];
-        std::string id = (n == 0) ? baseId : (baseId + "-" + std::to_string(n));
-        n++;
-        app.headings.push_back({headingText, elem->level, y, id});
-    }
+    if (elem->level >= 1 && elem->level <= 6) registerHeading(app, elem, y);
 
     layoutInlineContent(app, elem->children, indent, y, maxWidth, format, themeHeadingColor(app.theme, elem->level));
 
@@ -2871,7 +2993,8 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
         if (child->type != ElementType::ListItem) continue;
 
         const LayoutSnapshot markerStart = takeSnapshot(app);
-        size_t markerIndex = SIZE_MAX;
+        size_t markerIndex = SIZE_MAX, bulletIndex = SIZE_MAX;
+        float bulletBaseline = 0;
         size_t listItem = app.docListItems.size();
         app.docListItems.push_back({app.docText.size(), app.docText.size(), listDepth - 1,
                                     elem->ordered, itemNum,
@@ -2910,15 +3033,19 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
                                 boxX + box + 4 * scale, boxY + box + 4 * scale),
                     child->taskMarkOffset, child->taskChecked});
             }
-        } else {
-            std::wstring marker = elem->ordered ?
-                std::to_wstring(itemNum++) + L"." : L"\x2022";
+        } else if (elem->ordered) {
+            std::wstring marker = std::to_wstring(itemNum++) + L".";
 
             LayoutInfo info = createLayout(app, marker, app.textFormat, 24.0f, app.bodyTypography);
             D2D1_POINT_2F pos = D2D1::Point2F(indent, y);
             D2D1_RECT_F bounds = D2D1::RectF(indent, y, indent + listIndent, y + 24);
             if (info.layout) markerIndex = app.layoutTextRuns.size();
             addTextRun(app, std::move(info), pos, bounds, app.theme.text, 0, 0, false);
+        } else if (app.textFormat) {
+            bulletBaseline = y + formatBaseline(app, app.textFormat);
+            bulletIndex = app.layoutShapes.size();
+            app.layoutShapes.push_back(listBullet(indent + listIndent, bulletBaseline,
+                app.textFormat->GetFontSize(), listDepth - 1, app.theme.text));
         }
 
         const LayoutSnapshot contentStart = takeSnapshot(app);
@@ -2977,6 +3104,11 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
                 marker.pos.y += shift;
                 marker.bounds.top += shift;
                 marker.bounds.bottom += shift;
+            } else if (bulletIndex < app.layoutShapes.size()) {
+                auto& bullet = app.layoutShapes[bulletIndex].rect;
+                float shift = headingBaseline - bulletBaseline;
+                bullet.top += shift;
+                bullet.bottom += shift;
             }
         }
 
@@ -3416,9 +3548,12 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
                 // right edge (chip rects included), then roll back.
                 LayoutSnapshot snap = takeSnapshot(app);
                 float cy = 0.0f;
-                layoutInlineContent(app, cell->children, 0.0f, cy,
-                                    kHugeWidth, fmt, app.theme.text, {},
-                                    lineHeight);
+                {
+                    MeasuringOnly measuring(app);
+                    layoutInlineContent(app, cell->children, 0.0f, cy,
+                                        kHugeWidth, fmt, app.theme.text, {},
+                                        lineHeight);
+                }
                 float maxRight = 0.0f;
                 for (size_t i = snap.textRuns; i < app.layoutTextRuns.size();
                      i++) {
@@ -3533,8 +3668,11 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
             float cellW = colWidths[c] - cellPadding * 2;
             LayoutSnapshot snap = takeSnapshot(app);
             float cellY = 0.0f;
-            layoutInlineContent(app, cell->children, 0.0f, cellY, cellW,
-                                fmt, textColor, {}, lineHeight);
+            {
+                MeasuringOnly measuring(app);
+                layoutInlineContent(app, cell->children, 0.0f, cellY, cellW,
+                                    fmt, textColor, {}, lineHeight);
+            }
             rollbackTo(app, snap);
 
             float h = cellY + cellPadding * 2;
@@ -3810,6 +3948,14 @@ static size_t countElements(const ElementPtr& elem) {
 
 namespace {
 
+void collectMathLabels(const ElementPtr& elem, std::map<std::wstring, std::wstring>& labels) {
+    if (!elem) return;
+    if ((elem->type == ElementType::MathInline || elem->type == ElementType::MathDisplay) &&
+        elem->text.find("\\label") != std::string::npos)
+        mathCollectLabels(toWide(elem->text), labels);
+    for (const auto& child : elem->children) collectMathLabels(child, labels);
+}
+
 // Reset layout state and prepare for laying out blocks. Returns false when
 // there is nothing to lay out (no document).
 bool layoutBegin(App& app) {
@@ -3865,7 +4011,46 @@ bool layoutBegin(App& app) {
     app.scrollAnchors.clear();
     app.layoutTableSeq = 0;
     app.layoutDiagramSeq = 0;
+    app.layoutFoldArrow = -1;
+    // The equations' numbers by label, for an \eqref anywhere to read (#314)
+    app.mathLabels.clear();
+    collectMathLabels(app.root, app.mathLabels);
     return true;
+}
+
+// A top-level block that ends a heading's section (#316): a heading of its
+// level or above, or the footnotes, which no fold hides
+static bool endsSection(const ElementPtr& block, int level) {
+    return block->type == ElementType::Footnotes ||
+           (block->type == ElementType::Heading && block->level <= level);
+}
+
+// The fold arrow of a top-level heading just laid out, when it has a
+// section to fold (#316); folded, the blocks of that section are skipped
+static void addFoldArrow(App& app, const std::vector<ElementPtr>& blocks, size_t block, size_t heading,
+                         size_t firstRun) {
+    const int level = blocks[block]->level;
+    size_t end = block + 1;
+    while (end < blocks.size() && !endsSection(blocks[end], level)) end++;
+    if (end == block + 1) return;  // nothing under it to fold
+    const float scale = app.contentScale * app.zoomFactor;
+    // Beside the heading's first line, in the margin left of the page
+    float top = app.headings[heading].y, bottom = top + 24.0f * scale;
+    if (firstRun < app.layoutTextRuns.size()) {
+        top = app.layoutTextRuns[firstRun].bounds.top;
+        bottom = app.layoutTextRuns[firstRun].bounds.bottom;
+    }
+    const float size = 20.0f * scale, middle = (top + bottom) * 0.5f;
+    const float right = app.layoutIndent - 6.0f * scale;
+    App::FoldArrow fold;
+    fold.arrow = D2D1::RectF(right - size, middle - size * 0.5f, right, middle + size * 0.5f);
+    fold.line = D2D1::RectF(right - size, top, app.layoutIndent + app.layoutMaxWidth, bottom);
+    fold.heading = heading;
+    fold.block = block;
+    fold.endBlock = end;
+    fold.folded = headingFolded(app, app.headings[heading].id);
+    app.foldArrows.push_back(fold);
+    if (fold.folded) app.layoutFoldArrow = (int)app.foldArrows.size() - 1;
 }
 
 // Lay out top-level blocks until targetY is passed (targetY < 0: no limit) or
@@ -3881,6 +4066,17 @@ bool layoutStep(App& app, float targetY, int64_t budgetUs) {
         if (budgetUs > 0 && usElapsed(t0) > budgetUs) break;
 
         const auto& child = children[app.layoutNextBlock];
+        // A folded section's blocks are not laid out; their headings and
+        // anchors still count, where the folded heading is (#316)
+        if (app.layoutFoldArrow >= 0) {
+            const auto& fold = app.foldArrows[app.layoutFoldArrow];
+            if (app.layoutNextBlock < fold.endBlock) {
+                registerHidden(app, child, fold.heading);
+                app.layoutNextBlock++;
+                continue;
+            }
+            app.layoutFoldArrow = -1;
+        }
         // Record scroll anchor from source offset
         size_t offset = findFirstSourceOffset(child);
         // Endnotes can move definitions ahead of their source order. Keep the
@@ -3890,8 +4086,12 @@ bool layoutStep(App& app, float targetY, int64_t budgetUs) {
             app.scrollAnchors.push_back({offset, y});
         }
         float top = y;
+        const size_t headings = app.headings.size(), runs = app.layoutTextRuns.size();
         layoutElement(app, child, y, app.layoutIndent, app.layoutMaxWidth);
         app.blockSpans.push_back({offset, top, y});
+        if (child->type == ElementType::Heading && headings < app.headings.size() && foldingActive(app)) {
+            addFoldArrow(app, children, app.layoutNextBlock, headings, runs);
+        }
         app.layoutNextBlock++;
     }
 

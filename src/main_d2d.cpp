@@ -35,6 +35,7 @@
 #include "signals.h"
 #include "tableedit.h"
 #include "editrail.h"
+#include "folding.h"
 #include "startpage.h"
 
 #include <appmodel.h>
@@ -561,6 +562,9 @@ render_document:
         app.drawCalls++;
     }
 
+    // Fold arrows in the margin beside headings (#316)
+    renderFoldArrows(app, viewportTop, viewportBottom);
+
     for (const auto& line : app.layoutLines) {
         float minY = std::min(line.p1.y, line.p2.y);
         float maxY = std::max(line.p1.y, line.p2.y);
@@ -928,10 +932,8 @@ render_document:
         float viewBottom = app.scrollY + app.height + 50.0f;
         for (const auto& bar : bars) {
             if (bar.bottom < viewTop || bar.top > viewBottom) continue;
-            app.renderTarget->FillRectangle(
-                D2D1::RectF(bar.left - app.scrollX, bar.top - app.scrollY,
-                            bar.right - app.scrollX, bar.bottom - app.scrollY),
-                app.brush);
+            app.renderTarget->FillRectangle(selectionBarOnScreen(bar, app.scrollX, app.scrollY),
+                                            app.brush);
             app.drawCalls++;
         }
     }
@@ -1104,9 +1106,10 @@ static void renderChromeAndEnd(App& app) {
     renderTabStrip(app);
 
     // Edit-mode tool rail (design t8): covers the strip's left corner
-    // and the old gutter column, so it draws above both
+    // and the old gutter column, so it draws above both. Every frame
+    // calls it: one without the rail lets edit mode slide it in again.
+    renderEditRail(app);
     if (app.editMode) {
-        if (!app.editorReadingPreview) renderEditRail(app);
         renderEditCtxMenu(app);
         renderEditorReadingButton(app);
         renderEditorWordCount(app);
@@ -1407,6 +1410,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // save still remembers them
             if (app && app->confirmExitPending) {
                 app->pendingWindowClose = true;  // dialog is already asking
+                // about leaving, even if it asked about a change on disk
+                app->confirmExitExternal = false;
+                InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
             if (app) {
@@ -1421,6 +1427,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     }
                     app->pendingWindowClose = true;
                     app->confirmExitPending = true;
+                    app->confirmExitExternal = false;
                     app->confirmExitOpenedAt = std::chrono::steady_clock::now();
                     InvalidateRect(hwnd, nullptr, FALSE);
                     return 0;
@@ -1612,6 +1619,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 // The Read button fades out and the seam hairline dims (#245)
                 editorReadingButtonHover(*app, -1.0f, -1.0f);
                 app->editSeamHover = false;
+                app->hoveredFold = -1;  // the heading's fold arrow (#316)
                 // Off the tab strip too: its hover and hover card (#246)
                 tabHoverCardLeave(*app, hwnd);
                 InvalidateRect(hwnd, nullptr, FALSE);
@@ -1909,6 +1917,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 // newer one with launch-time data.
                 if (app->sessionOwner) {
                     settings.sessionTabs.clear();
+                    settings.sessionPinned.clear();
                     settings.sessionActive = 0;
                     for (size_t i = 0; i < app->tabs.size(); i++) {
                         const std::string& path =
@@ -1920,15 +1929,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                 (int)settings.sessionTabs.size();
                         }
                         settings.sessionTabs.push_back(path);
+                        if (app->tabs[i].pinned) settings.sessionPinned.push_back(path);
                     }
                 } else {
                     Settings onDisk = loadSettings();
                     settings.sessionTabs = onDisk.sessionTabs;
                     settings.sessionActive = onDisk.sessionActive;
+                    settings.sessionPinned = onDisk.sessionPinned;
                 }
                 settings.readingWidthPct = app->readingWidthPct;
                 settings.zenWidthPct = app->zenWidthPct;
                 settings.headingRules = app->headingRules;
+                settings.foldSections = app->foldSections;
+                settings.foldOnOpen = app->foldOnOpen;
                 settings.tocOnLeft = app->tocOnLeft;
                 settings.tocPinned = app->tocPinned;
                 settings.browserPinned = app->browserPinned;
@@ -2019,6 +2032,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     app.browserFocusPath = savedSettings.browserFocusPath;
     app.openInTabs = savedSettings.openInTabs;
     app.keepDeletedTabs = savedSettings.keepDeletedTabs;
+    // The title bar's pin as last pressed (#312); applied once the window shows
+    app.alwaysOnTop = savedSettings.alwaysOnTop;
     // Persisted when toggled and kept as on disk at exit, like openInTabs
     app.showNotifications = savedSettings.showNotifications;
     app.editorAssists = savedSettings.editorAssists;
@@ -2031,6 +2046,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     app.frontmatter = savedSettings.frontmatter;
     app.pandocUserPath = toWide(savedSettings.pandocPath);
     app.plantumlUserPath = toWide(savedSettings.plantumlPath);
+    app.mathFont = toWide(savedSettings.mathFont);
+    app.cjkFont = toWide(savedSettings.cjkFont);
     int startTheme = app.followSystemTheme ? autoThemeIndex(app)
                                            : savedSettings.themeIndex;
     app.currentThemeIndex = startTheme;
@@ -2045,6 +2062,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     app.readingWidthPct = savedSettings.readingWidthPct;
     app.zenWidthPct = savedSettings.zenWidthPct;
     app.headingRules = savedSettings.headingRules;
+    app.foldSections = savedSettings.foldSections;
+    app.foldOnOpen = savedSettings.foldOnOpen;
     app.tocOnLeft = savedSettings.tocOnLeft;
     app.tocPinned = savedSettings.tocPinned;
     app.browserPinned = savedSettings.browserPinned;
@@ -2396,6 +2415,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     // editor at the top instead
     if (!startInEditMode && !app.currentFile.empty()) {
         app.pendingScrollRestore = findReadingPosition(savedSettings, app.currentFile);
+        foldsEnter(app);  // a document opening folded starts at its top (#316)
         // Per-document zoom overrides the global one for known documents
         float docZoom = findReadingZoom(savedSettings, app.currentFile);
         if (docZoom > 0.0f && fabsf(docZoom - app.zoomFactor) > 0.01f) {
@@ -2413,6 +2433,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     // session rebuilds the whole row in its saved order
     if (restoreSession && !app.currentFile.empty()) {
         tabsSeedSession(app, sessionPaths);
+        tabsPinPaths(app, savedSettings.sessionPinned);
     } else {
         tabsInit(app);
     }
@@ -2427,6 +2448,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         ShowWindow(app.hwnd, SW_SHOWMAXIMIZED);
     } else {
         ShowWindow(app.hwnd, nCmdShow);
+    }
+    if (app.alwaysOnTop) {
+        SetWindowPos(app.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
     UpdateWindow(app.hwnd);
     app.metrics.showWindowUs = usElapsed(t0);

@@ -44,6 +44,9 @@ void handleEditorMouseMove(App& app, HWND hwnd, int x, int y);
 // A held finger extends the original word, without arming a text drag.
 void editorTouchSelection(App& app, int x, int y, bool begin);
 void handleEditorMouseWheel(App& app, HWND hwnd, float delta);
+// Pans long unwrapped lines by dx, as far as the widest reaches (#314):
+// the horizontal wheel and Shift+wheel. False with nothing to pan.
+bool editorScrollHorizontally(App& app, HWND hwnd, float dx);
 // A dragged selection (#289): TIMER_EDITOR_DRAG_SCROLL scrolls the editor
 // while the pointer is past its top or bottom edge; Esc, a lost capture or
 // a cancelled mode put the drag away and leave the text as it was
@@ -76,8 +79,13 @@ void saveEditorFileAs(App& app, HWND hwnd);
 // Ctrl+Shift+S anywhere: editor writes the buffer to a new path, viewer
 // copies the viewed file; the tab follows the new name either way
 void saveFileAs(App& app, HWND hwnd);
-// Unsaved-changes dialog outcome: 1 save+exit, 2 discard, 3 keep editing
+// Unsaved-changes dialog outcome: 1 save+exit, 2 discard, 3 keep editing.
+// Asking about a file changed on disk (#311): 1 reload, 2 and 3 keep mine
 void confirmExitAction(App& app, HWND hwnd, int action);
+// The open file as it is on disk now, into the editor: what changed is
+// replaced as one step Ctrl+Z takes back, the caret kept in the text
+// around it, and the buffer is clean. False when the file cannot be read.
+bool editorReloadFromDisk(App& app, HWND hwnd);
 
 // Editor reparse (called from timer)
 // Exports need the current buffer even when the preview pane is hidden.

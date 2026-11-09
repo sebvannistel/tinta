@@ -212,17 +212,32 @@ static size_t editorNextCharEnd(const App& app, size_t pos) {
 
 static void rebuildEditorRowMetrics(App& app);
 
+// A letter the width of two in a monospaced face: Hangul, CJK, full-width forms
+static bool wideColumn(wchar_t c) {
+    return (c >= 0x1100 && c <= 0x115F) || (c >= 0x2E80 && c <= 0xA4CF) || (c >= 0xAC00 && c <= 0xD7A3) ||
+           (c >= 0xF900 && c <= 0xFAFF) || (c >= 0xFE30 && c <= 0xFE4F) || (c >= 0xFF00 && c <= 0xFF60) ||
+           (c >= 0xFFE0 && c <= 0xFFE6);
+}
+
 void rebuildLineStarts(App& app) {
     app.editorCaretUpstreamPos = std::wstring::npos;
     ++app.editorTextRevision;
     app.clearEditorLineLayoutCache();
     app.editorLineStarts.clear();
     app.editorLineStarts.push_back(0);
+    size_t columns = 0;
+    app.editorWidestColumns = 0;
     for (size_t i = 0; i < app.editorText.size(); i++) {
-        if (app.editorText[i] == L'\n') {
+        const wchar_t c = app.editorText[i];
+        if (c == L'\n') {
             app.editorLineStarts.push_back(i + 1);
+            app.editorWidestColumns = std::max(app.editorWidestColumns, columns);
+            columns = 0;
+        } else {
+            columns += c == L'\t' ? 4 : wideColumn(c) ? 2 : 1;
         }
     }
+    app.editorWidestColumns = std::max(app.editorWidestColumns, columns);
     rebuildEditorRowMetrics(app);
 }
 
@@ -793,13 +808,25 @@ static void editorUpdateSelEnd(App& app) {
 
 // --- Word boundary helpers ---
 
+// Letters, digits and marks of every alphabetic script, and _: a Turkish,
+// Greek or Cyrillic word is one word, as an English one is (#313). CJK,
+// kana and Hangul, from U+2E80, run on without spaces and keep a class of
+// their own below.
 static bool isEditorWordChar(wchar_t c) {
-    return (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') ||
-           (c >= L'0' && c <= L'9') || c == L'_';
+    if (c < 0x80) {
+        return (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') ||
+               (c >= L'0' && c <= L'9') || c == L'_';
+    }
+    if (c >= 0x2E80) return false;
+    WORD kind = 0;
+    if (GetStringTypeW(CT_CTYPE1, &c, 1, &kind) && (kind & (C1_ALPHA | C1_DIGIT))) return true;
+    // An accent typed after its letter (e + U+0301) and a vowel sign belong to it
+    return GetStringTypeW(CT_CTYPE3, &c, 1, &kind) &&
+           (kind & (C3_ALPHA | C3_NONSPACING | C3_VOWELMARK));
 }
 
 // Character class for double-click selection: 0 = whitespace/ASCII
-// punctuation, 1 = ASCII word chars, 2 = CJK and any other non-ASCII text.
+// punctuation, 1 = word chars, 2 = CJK and any other non-ASCII text.
 // Double-click selects a contiguous run of the same class.
 static int editorCharClass(wchar_t c) {
     if (isEditorWordChar(c)) return 1;
@@ -833,6 +860,19 @@ static void editorWordAt(const App& app, size_t pos, size_t& start, size_t& end)
     if (cls == 0) return;
     while (start > 0 && editorCharClass(app.editorText[start - 1]) == cls) start--;
     while (end < app.editorText.size() && editorCharClass(app.editorText[end]) == cls) end++;
+}
+
+// What a double-click (unit 2) or a triple-click (unit 3) at pos takes:
+// the word as above, or the line with its newline
+static void editorUnitAt(const App& app, size_t pos, int unit, size_t& first, size_t& last) {
+    if (unit == 2) {
+        editorWordAt(app, pos, first, last);
+        return;
+    }
+    size_t line = getLineFromPos(app, pos);
+    first = app.editorLineStarts[line];
+    last = getLineEnd(app, line);
+    if (last < app.editorText.size()) last++;
 }
 
 // --- Extra carets (#251) ---
@@ -1520,6 +1560,24 @@ static void editHintSessionBegin(App& app) {
     editorReadingButtonIntro(app);
 }
 
+// A file's bytes as the editor holds them: without the byte order mark,
+// which writeEditorFile puts back, and with \r\n and a lone \r as \n
+static std::wstring editorTextOfFile(const std::string& content, bool& bom) {
+    bom = startsWithUtf8Bom(content);
+    const std::wstring raw = fromUtf8(content.substr(bom ? UTF8_BOM.size() : 0));
+    std::wstring text;
+    text.reserve(raw.size());
+    for (size_t i = 0; i < raw.size(); i++) {
+        if (raw[i] == L'\r') {
+            text += L'\n';
+            if (i + 1 < raw.size() && raw[i + 1] == L'\n') i++;
+        } else {
+            text += raw[i];
+        }
+    }
+    return text;
+}
+
 // intro = false when a parked edit buffer comes back on a tab switch: the
 // session goes on, it does not start over
 static void enterEditModeWithContent(App& app, const std::string& content,
@@ -1547,19 +1605,7 @@ static void enterEditModeWithContent(App& app, const std::string& content,
     // A byte order mark belongs to the file, not the text: nothing typed
     // can land ahead of it, and writeEditorFile puts it back. The walks
     // below still count its bytes, as the reading view's offsets do.
-    app.editorBom = startsWithUtf8Bom(content);
-    app.editorText = fromUtf8(content.substr(app.editorBom ? UTF8_BOM.size() : 0));
-    // Normalize \r\n to \n
-    std::wstring normalized;
-    normalized.reserve(app.editorText.size());
-    for (size_t i = 0; i < app.editorText.size(); i++) {
-        if (app.editorText[i] == L'\r') {
-            normalized += L'\n';
-            if (i + 1 < app.editorText.size() && app.editorText[i + 1] == L'\n') i++;
-        } else {
-            normalized += app.editorText[i];
-        }
-    }
+    std::wstring normalized = editorTextOfFile(content, app.editorBom);
     // Map the current reading position to a source line so the editor opens
     // where the user was, not at the top (#77). Anchors carry UTF-8 offsets
     // into the text the reading view parsed, which the viewer reads in text
@@ -1610,8 +1656,11 @@ static void enterEditModeWithContent(App& app, const std::string& content,
     app.editMode = true;
     app.escPressedOnce = false;
     app.confirmExitPending = false;
-    // The tool rail slides in fresh with every edit-mode entry
-    app.editRailAnim = 0.0f;
+    // The tool rail slides in when edit mode follows a frame without it.
+    // Opening, closing or switching tabs in the editor parks one buffer and
+    // enters edit mode again for the next: the rail stays where it is, as
+    // it slid in from nothing and was gone for a few frames (#317)
+    if (!app.editRailShown) app.editRailAnim = 0.0f;
     app.editRailHover = 0;
 
     // Resume at the reading position rather than the top (#77)
@@ -1775,6 +1824,7 @@ void exitEditMode(App& app) {
         // timestamp opens a grace window so smashed Esc presses land on a
         // stable dialog instead of instantly cancelling it.
         app.confirmExitPending = true;
+        app.confirmExitExternal = false;
         app.confirmExitOpenedAt = std::chrono::steady_clock::now();
         InvalidateRect(app.hwnd, nullptr, FALSE);
         return;
@@ -2400,11 +2450,72 @@ void saveFileAs(App& app, HWND hwnd) {
     InvalidateRect(hwnd, nullptr, FALSE);
 }
 
+bool editorReloadFromDisk(App& app, HWND hwnd) {
+    if (app.currentFile.empty()) return false;
+    std::ifstream in(toWide(app.currentFile), std::ios::binary);
+    if (!in) return false;
+    const std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    bool bom = false;
+    const std::wstring text = editorTextOfFile(content, bom);
+    app.editorBom = bom;
+    if (text != app.editorText) {
+        // Only what changed is replaced: carets before it stay, carets
+        // after it move with the text, and one Ctrl+Z brings back the rest
+        size_t begin = 0, oldEnd = app.editorText.size(), newEnd = text.size();
+        while (begin < oldEnd && begin < newEnd && app.editorText[begin] == text[begin]) ++begin;
+        while (oldEnd > begin && newEnd > begin && app.editorText[oldEnd - 1] == text[newEnd - 1]) {
+            --oldEnd;
+            --newEnd;
+        }
+        auto shifted = [&](size_t position) {
+            if (position <= begin) return position;
+            if (position < oldEnd) return std::min(position, newEnd);
+            return position - oldEnd + newEnd;
+        };
+        const size_t cursor = shifted(app.editorCursorPos);
+        pushReplaceUndo(app, begin, app.editorText.substr(begin, oldEnd - begin),
+                        text.substr(begin, newEnd - begin), app.editorCursorPos, cursor);
+        app.editorSelStart = shifted(app.editorSelStart);
+        app.editorSelEnd = shifted(app.editorSelEnd);
+        app.editorHasSelection = app.editorHasSelection && app.editorSelStart != app.editorSelEnd;
+        for (auto& caret : app.editorExtraCarets) {
+            caret.pos = shifted(caret.pos);
+            caret.anchor = shifted(caret.anchor);
+            caret.hasSelection = caret.hasSelection && caret.pos != caret.anchor;
+        }
+        app.editorText = text;
+        app.editorCursorPos = cursor;
+        app.editorDesiredCol = -1;
+        app.editorDocCountsStale = true;
+        rebuildLineStarts(app);
+        app.editorRowMetricsWidth = -1.0f;
+    }
+    app.editorDirty = false;
+    updateFileWriteTime(app);
+    app.sourceText = content;
+    editorReparse(app, true);
+    updateWindowTitle(app);
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return true;
+}
+
 // --- Input handlers ---
 
 // Unsaved-changes dialog outcomes (shared by keyboard and mouse):
 // 1 = save and exit, 2 = discard changes, 3 = keep editing
 void confirmExitAction(App& app, HWND hwnd, int action) {
+    // Asked about the file changed on disk (#311): Reload takes the disk's
+    // text, as one step Ctrl+Z takes back; Keep mine goes on editing, and a
+    // save then writes these edits over the other program's
+    if (app.confirmExitExternal) {
+        app.confirmExitPending = false;
+        app.confirmExitExternal = false;
+        app.escPressedOnce = false;
+        if (action == 1) editorReloadFromDisk(app, hwnd);
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return;
+    }
     if (action == 1) {
         app.confirmExitPending = false;
         saveEditorFile(app, hwnd);
@@ -2769,7 +2880,12 @@ void handleEditorKeyDown(App& app, HWND hwnd, WPARAM wParam) {
         auto sinceOpen = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - app.confirmExitOpenedAt).count();
         bool inGrace = sinceOpen < 600;
-        if (wParam == 'Y' || wParam == VK_RETURN || (ctrl && wParam == 'S')) {
+        // The question about a file changed on disk comes up unasked, maybe
+        // mid-word: Y and Enter wait out the grace as well, and Ctrl+S,
+        // which saves, does not answer Reload (#311)
+        const bool external = app.confirmExitExternal;
+        if (((wParam == 'Y' || wParam == VK_RETURN) && !(external && inGrace)) ||
+            (ctrl && wParam == 'S' && !external)) {
             confirmExitAction(app, hwnd, 1);
         } else if (wParam == 'N' && !inGrace) {
             confirmExitAction(app, hwnd, 2);
@@ -4024,6 +4140,29 @@ static bool overEditorScrollbar(const App& app, float x, float y) {
            x <= editorWidth - dpi(app, 2.0f) && y >= chromeTopHeight(app);
 }
 
+ScrollbarGeometry editorScrollbarH(const App& app) {
+    ScrollbarGeometry bar;
+    if (editorWrapOn(app) || !app.editorTextFormat) return bar;
+    // As far as the caret follows a line's end: the widest line by its
+    // columns, or past it when the caret took the pane further
+    const float charWidth = app.editorCharWidth > 0 ? app.editorCharWidth : app.editorTextFormat->GetFontSize() * 0.6f;
+    const float view = editorTextMaxWidth(app) - dpi(app, 12.0f);
+    bar.maxScroll = std::max(0.0f, std::max((float)app.editorWidestColumns * charWidth - view, app.editorScrollX));
+    bar.trackStart = editorTextX(app);
+    bar.trackLength = std::max(0.0f, editorPaneWidth(app) - dpi(app, 14.0f) - bar.trackStart);
+    if (bar.maxScroll <= 0) return bar;
+    bar.thumbLength = std::max(bar.trackLength * view / (view + bar.maxScroll), dpi(app, 30.0f));
+    bar.thumbStart = bar.trackStart + std::clamp(app.editorScrollX / bar.maxScroll, 0.0f, 1.0f) * (bar.trackLength - bar.thumbLength);
+    return bar;
+}
+
+// The band the bar along the editor's foot takes presses in (#314)
+static bool overEditorScrollbarH(const App& app, float x, float y) {
+    const ScrollbarGeometry bar = editorScrollbarH(app);
+    return bar.maxScroll > 0 && y >= (float)app.height - dpi(app, 14.0f) && x >= bar.trackStart &&
+           x <= bar.trackStart + bar.trackLength;
+}
+
 void handleEditorMouseDown(App& app, HWND hwnd, int x, int y) {
     float editorWidth = editorPaneWidth(app);
 
@@ -4046,6 +4185,20 @@ void handleEditorMouseDown(App& app, HWND hwnd, int x, int y) {
         app.editorScrollbarDragging = true;
         app.editorScrollbarDragStartY = (float)y;
         app.editorScrollbarDragStartScroll = app.editorScrollY;
+        SetCapture(hwnd);
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return;
+    }
+    // The bar along the foot, as the side one: long unwrapped lines could
+    // be read across only by following the caret (#314)
+    if (overEditorScrollbarH(app, (float)x, (float)y)) {
+        const ScrollbarGeometry bar = editorScrollbarH(app);
+        if ((float)x < bar.thumbStart || (float)x > bar.thumbStart + bar.thumbLength) {
+            app.editorScrollX = bar.scrollForThumb((float)x - bar.thumbLength * 0.5f);
+        }
+        app.editorScrollbarHDragging = true;
+        app.editorScrollbarHDragStartX = (float)x;
+        app.editorScrollbarHDragStartScroll = app.editorScrollX;
         SetCapture(hwnd);
         InvalidateRect(hwnd, nullptr, FALSE);
         return;
@@ -4103,36 +4256,23 @@ void handleEditorMouseDown(App& app, HWND hwnd, int x, int y) {
     app.lastClickX = x;
     app.lastClickY = y;
 
-    if (app.clickCount == 2) {
+    if (app.clickCount >= 2) {
         app.editorCaretUpstreamPos = std::wstring::npos;
-        // Double-click: select run of same character class (handles CJK,
-        // which has no spaces between words)
-        size_t wordStart = clickPos;
-        size_t wordEnd = clickPos;
-        int cls = 0;
-        if (clickPos < app.editorText.size()) cls = editorCharClass(app.editorText[clickPos]);
-        if (cls == 0 && clickPos > 0) {
-            // Clicked just past the end of a word: select the run before
-            cls = editorCharClass(app.editorText[clickPos - 1]);
-            if (cls != 0) { wordStart = clickPos - 1; wordEnd = clickPos; }
-        }
-        if (cls != 0) {
-            while (wordStart > 0 && editorCharClass(app.editorText[wordStart - 1]) == cls) wordStart--;
-            while (wordEnd < app.editorText.size() && editorCharClass(app.editorText[wordEnd]) == cls) wordEnd++;
-        }
-        app.editorSelStart = wordStart;
-        app.editorSelEnd = wordEnd;
-        app.editorCursorPos = wordEnd;
-        app.editorHasSelection = (wordStart != wordEnd);
-    } else if (app.clickCount == 3) {
-        app.editorCaretUpstreamPos = std::wstring::npos;
-        // Triple-click: select line
-        size_t line = getLineFromPos(app, clickPos);
-        app.editorSelStart = app.editorLineStarts[line];
-        app.editorSelEnd = getLineEnd(app, line);
-        if (app.editorSelEnd < app.editorText.size()) app.editorSelEnd++; // include \n
-        app.editorCursorPos = app.editorSelEnd;
-        app.editorHasSelection = true;
+        // Double-click: the run of one character class, as CJK has no
+        // spaces between words; triple-click: the line, its newline too
+        size_t first = clickPos, last = clickPos;
+        editorUnitAt(app, clickPos, app.clickCount, first, last);
+        app.editorSelStart = first;
+        app.editorSelEnd = last;
+        app.editorCursorPos = last;
+        app.editorHasSelection = (first != last);
+        // A drag on from here grows the selection by words or lines, as
+        // Live's does (#313)
+        app.editorSelectUnit = app.clickCount;
+        app.editorUnitFrom = first;
+        app.editorUnitTo = last;
+        app.editorSelecting = true;
+        SetCapture(hwnd);
     } else {
         // Single click
         if (shift && app.editorHasSelection) {
@@ -4161,6 +4301,7 @@ void handleEditorMouseDown(App& app, HWND hwnd, int x, int y) {
             app.editorSelEnd = clickPos;
             app.editorHasSelection = false;
         }
+        app.editorSelectUnit = 1;
         app.editorSelecting = true;
         SetCapture(hwnd);
     }
@@ -4174,8 +4315,8 @@ void handleEditorMouseUp(App& app, HWND hwnd, int x, int y) {
         editorTextDragRelease(app, hwnd, x, y);
         return;
     }
-    if (app.editorScrollbarDragging) {
-        app.editorScrollbarDragging = false;
+    if (app.editorScrollbarDragging || app.editorScrollbarHDragging) {
+        app.editorScrollbarDragging = app.editorScrollbarHDragging = false;
         ReleaseCapture();
         return;
     }
@@ -4215,19 +4356,8 @@ void handleEditorMouseMove(App& app, HWND hwnd, int x, int y) {
         return;
     }
 
-    // Insert-menu hover: rows highlight, parents open their submenu
-    if (editCtxMouseMove(app, x, y)) {
-        SetCursor(LoadCursor(nullptr, IDC_ARROW));
-        return;
-    }
-
-    // Rail hover (design t8/t11)
-    if (editRailMouseMove(app, hwnd, x, y)) {
-        SetCursor(LoadCursor(nullptr,
-                             app.editRailHover ? IDC_HAND : IDC_ARROW));
-        return;
-    }
-
+    // A dragged scrollbar owns the pointer wherever it goes, over the
+    // rail too
     if (app.editorScrollbarDragging) {
         // The pointer stays an arrow for the whole drag, over the text too (#280)
         SetCursor(LoadCursor(nullptr, IDC_ARROW));
@@ -4239,6 +4369,30 @@ void handleEditorMouseMove(App& app, HWND hwnd, int x, int y) {
             app.editorScrollY = std::clamp(app.editorScrollbarDragStartScroll + delta, 0.0f, bar.maxScroll);
         }
         InvalidateRect(hwnd, nullptr, FALSE);
+        return;
+    }
+    if (app.editorScrollbarHDragging) {
+        SetCursor(LoadCursor(nullptr, IDC_ARROW));
+        const ScrollbarGeometry bar = editorScrollbarH(app);
+        const float travel = bar.trackLength - bar.thumbLength;
+        if (bar.maxScroll > 0 && travel > 0) {
+            const float delta = ((float)x - app.editorScrollbarHDragStartX) / travel * bar.maxScroll;
+            app.editorScrollX = std::clamp(app.editorScrollbarHDragStartScroll + delta, 0.0f, bar.maxScroll);
+        }
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return;
+    }
+
+    // Insert-menu hover: rows highlight, parents open their submenu
+    if (editCtxMouseMove(app, x, y)) {
+        SetCursor(LoadCursor(nullptr, IDC_ARROW));
+        return;
+    }
+
+    // Rail hover (design t8/t11)
+    if (editRailMouseMove(app, hwnd, x, y)) {
+        SetCursor(LoadCursor(nullptr,
+                             app.editRailHover ? IDC_HAND : IDC_ARROW));
         return;
     }
 
@@ -4258,8 +4412,22 @@ void handleEditorMouseMove(App& app, HWND hwnd, int x, int y) {
         static HCURSOR cursorIBeam = LoadCursor(nullptr, IDC_IBEAM);
         SetCursor(cursorIBeam);
         size_t pos = editorPosFromClick(app, x, y);
-        app.editorSelEnd = pos;
-        app.editorCursorPos = pos;
+        if (app.editorSelectUnit < 2) {
+            app.editorSelEnd = pos;
+            app.editorCursorPos = pos;
+        } else {
+            // By whole words or lines, keeping the one the clicks took
+            // whichever way the drag runs (#313)
+            size_t first = pos, last = pos;
+            editorUnitAt(app, pos, app.editorSelectUnit, first, last);
+            if (first < app.editorUnitFrom) {
+                app.editorSelStart = app.editorUnitTo;
+                app.editorSelEnd = app.editorCursorPos = first;
+            } else {
+                app.editorSelStart = app.editorUnitFrom;
+                app.editorSelEnd = app.editorCursorPos = std::max(last, app.editorUnitTo);
+            }
+        }
         app.editorHasSelection = (app.editorSelStart != app.editorSelEnd);
         InvalidateRect(hwnd, nullptr, FALSE);
         return;
@@ -4278,7 +4446,7 @@ void handleEditorMouseMove(App& app, HWND hwnd, int x, int y) {
         (float)x < editorWidth + editSeamWidth(app)) {
         SetCursor(cursorSizeWE);
         return;
-    } else if (overEditorScrollbar(app, (float)x, (float)y)) {
+    } else if (overEditorScrollbar(app, (float)x, (float)y) || overEditorScrollbarH(app, (float)x, (float)y)) {
         SetCursor(cursorArrow);  // a control, not text (#280)
         return;
     } else if (x < editorWidth) {
@@ -4288,11 +4456,19 @@ void handleEditorMouseMove(App& app, HWND hwnd, int x, int y) {
     // Preview pane cursor is handled by the normal handleMouseMove.
 }
 
+bool editorScrollHorizontally(App& app, HWND hwnd, float dx) {
+    const ScrollbarGeometry bar = editorScrollbarH(app);
+    if (bar.maxScroll <= 0) return false;
+    app.editorScrollX = std::clamp(app.editorScrollX + dx, 0.0f, bar.maxScroll);
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return true;
+}
+
 void handleEditorMouseWheel(App& app, HWND hwnd, float delta) {
-    // Shift+wheel pans long unwrapped lines horizontally (#77)
+    // Shift+wheel pans long unwrapped lines horizontally (#77), as far as
+    // the widest one reaches (#314)
     if (!editorWrapOn(app) && (GetKeyState(VK_SHIFT) & 0x8000)) {
-        app.editorScrollX = std::max(0.0f, app.editorScrollX - delta * dpi(app, 60.0f));
-        InvalidateRect(hwnd, nullptr, FALSE);
+        editorScrollHorizontally(app, hwnd, -delta * dpi(app, 60.0f));
         return;
     }
     app.editorScrollY -= delta * dpi(app, 60.0f);
@@ -4736,6 +4912,16 @@ void renderEditor(App& app, float editorWidth) {
                               editorBottomClearance(app, lineHeight);
 
     renderEditorScrollbar(app, editorWidth);
+    // And along the foot, while lines run past the pane (#314)
+    const ScrollbarGeometry across = editorScrollbarH(app);
+    if (across.maxScroll > 0) {
+        float shade = app.theme.isDark ? 1.0f : 0.0f;
+        app.brush->SetColor(D2D1::ColorF(shade, shade, shade, app.editorScrollbarHDragging ? 0.45f : 0.3f));
+        app.renderTarget->FillRoundedRectangle(
+            D2D1::RoundedRect(D2D1::RectF(across.thumbStart, (float)app.height - dpi(app, 10.0f),
+                                           across.thumbStart + across.thumbLength, (float)app.height - dpi(app, 4.0f)), 3, 3),
+            app.brush);
+    }
 
     app.renderTarget->PopAxisAlignedClip();
 }

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(tinta VERSION 4.0.1 LANGUAGES C CXX)
+project(tinta VERSION 4.0.2 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -22,15 +22,46 @@ if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
-# MD4C markdown parser
+# MD4C markdown parser: fetched, then built here from a copy with one rule
+# changed (below). Its own CMakeLists is left out: no CMakeLists in the
+# subdirectory named means fetched and not added.
 include(FetchContent)
 FetchContent_Declare(
     md4c
     GIT_REPOSITORY https://github.com/mity/md4c.git
     GIT_TAG 729e6b8b320caa96328968ab27d7db2235e4fb47  # release-0.5.2, pinned by commit
     GIT_SHALLOW TRUE
+    SOURCE_SUBDIR built-by-tinta
 )
 FetchContent_MakeAvailable(md4c)
+
+# A closing $ may be followed by a letter, as pandoc reads it: $50\,\mu$m
+# closes after \mu (#314). md4c wanted a space or punctuation after it and
+# ran the span on to the next $. A digit after it still leaves it open
+# ($5 and $6), and so does a space before it ($name and $amount). The copy
+# is written again when md4c changes; one without the rule stops here.
+file(READ "${md4c_SOURCE_DIR}/src/md4c.c" MD4C_SOURCE)
+set(MD4C_CLOSER "if(tmp < line->end  &&  !ISUNICODEWHITESPACE(tmp)  &&  !ISUNICODEPUNCT(tmp))")
+string(FIND "${MD4C_SOURCE}" "${MD4C_CLOSER}" MD4C_CLOSER_AT)
+if(MD4C_CLOSER_AT EQUAL -1)
+    message(FATAL_ERROR "md4c: the closing $ rule Tinta changes is not in ${md4c_SOURCE_DIR}/src/md4c.c")
+endif()
+string(REPLACE "${MD4C_CLOSER}"
+    "if(tmp < line->end  &&  !ISUNICODEWHITESPACE(tmp)  &&  !ISUNICODEPUNCT(tmp)  &&  (ISDIGIT(tmp)  ||  off == line->beg  ||  ISUNICODEWHITESPACEBEFORE(off)))"
+    MD4C_SOURCE "${MD4C_SOURCE}")
+set(MD4C_COPY "${CMAKE_CURRENT_BINARY_DIR}/md4c-tinta/md4c.c")
+set(MD4C_WRITTEN "")
+if(EXISTS "${MD4C_COPY}")
+    file(READ "${MD4C_COPY}" MD4C_WRITTEN)
+endif()
+if(NOT MD4C_WRITTEN STREQUAL MD4C_SOURCE)
+    file(WRITE "${MD4C_COPY}" "${MD4C_SOURCE}")
+endif()
+add_library(md4c STATIC "${MD4C_COPY}")
+target_include_directories(md4c PUBLIC "${md4c_SOURCE_DIR}/src")
+target_compile_definitions(md4c PRIVATE MD4C_USE_UTF8)
+# The warning level md4c builds itself at
+target_compile_options(md4c PRIVATE $<$<C_COMPILER_ID:MSVC>:/W3>)
 
 # Source files
 set(SOURCES
@@ -89,6 +120,7 @@ set(SOURCES
     src/drafts.cpp
     src/startpage.cpp
     src/editrail.cpp
+    src/folding.cpp
     src/pandoc.cpp
     src/plantuml.cpp
     src/plantuml_queue.cpp
@@ -190,11 +222,13 @@ if(BUILD_TESTING)
     # window, including layout-dependent character sequences (#195).
     set(INPUT_TEST_SOURCES ${SOURCES})
     list(REMOVE_ITEM INPUT_TEST_SOURCES src/main_d2d.cpp)
-    add_executable(input_tests tests/input_tests.cpp tests/deleted_tab_tests.cpp tests/table_input_tests.cpp tests/docked_preview_tests.cpp tests/table_layout_tests.cpp tests/highlight_layout_tests.cpp tests/window_drag_tests.cpp tests/tab_drop_tests.cpp tests/tab_hover_card_tests.cpp tests/search_panel_tests.cpp tests/superscript_tests.cpp tests/sidepanel_tests.cpp tests/image_tests.cpp tests/search_input_tests.cpp tests/wrapped_cursor_tests.cpp tests/file_fragment_tests.cpp tests/editor_context_tests.cpp tests/editor_features_tests.cpp tests/ui_font_tests.cpp tests/print_export_tests.cpp tests/scroll_sync_tests.cpp tests/notification_setting_tests.cpp tests/goto_line_tests.cpp tests/reading_position_tests.cpp tests/split_scrollbar_tests.cpp tests/touch_tests.cpp tests/editor_drag_tests.cpp tests/byte_order_mark_tests.cpp tests/sheet_tests.cpp tests/live_tests.cpp tests/source_highlight_tests.cpp ${INPUT_TEST_SOURCES})
+    add_executable(input_tests tests/input_tests.cpp tests/deleted_tab_tests.cpp tests/file_change_tests.cpp tests/pinned_tab_tests.cpp tests/table_input_tests.cpp tests/docked_preview_tests.cpp tests/table_layout_tests.cpp tests/highlight_layout_tests.cpp tests/window_drag_tests.cpp tests/tab_drop_tests.cpp tests/tab_hover_card_tests.cpp tests/search_panel_tests.cpp tests/superscript_tests.cpp tests/sidepanel_tests.cpp tests/image_tests.cpp tests/search_input_tests.cpp tests/wrapped_cursor_tests.cpp tests/file_fragment_tests.cpp tests/editor_context_tests.cpp tests/editor_features_tests.cpp tests/ui_font_tests.cpp tests/print_export_tests.cpp tests/scroll_sync_tests.cpp tests/notification_setting_tests.cpp tests/goto_line_tests.cpp tests/reading_position_tests.cpp tests/split_scrollbar_tests.cpp tests/touch_tests.cpp tests/editor_drag_tests.cpp tests/byte_order_mark_tests.cpp tests/sheet_tests.cpp tests/live_tests.cpp tests/source_highlight_tests.cpp tests/math_markdown_tests.cpp tests/folding_tests.cpp ${INPUT_TEST_SOURCES})
     target_include_directories(input_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
     target_link_libraries(input_tests PRIVATE $<TARGET_PROPERTY:tinta,LINK_LIBRARIES>)
     target_compile_definitions(input_tests PRIVATE $<TARGET_PROPERTY:tinta,COMPILE_DEFINITIONS>
         TINTA_DELETED_TAB_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/deleted-tab.md"
+        TINTA_FILE_CHANGES_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/file-changes-311.md"
+        TINTA_PINNED_TABS_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/pinned-tabs"
         TINTA_SHORTCUT_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/shortcuts-layouts.md"
         TINTA_TAB_DROP_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/tab-drop-position.md"
         TINTA_TAB_HOVER_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/tab-hover-card"
@@ -271,6 +305,18 @@ if(BUILD_TESTING)
         -DTEST_BINARY=$<TARGET_FILE:input_tests>
         -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/highlight-layout-test-$<CONFIG>
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_highlight_layout_tests.cmake)
+    # Equations in a document (#314): numbers, two in a row, references
+    add_test(NAME math_markdown COMMAND ${CMAKE_COMMAND}
+        -DTEST_BINARY=$<TARGET_FILE:input_tests>
+        -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/math-markdown-test-$<CONFIG>
+        -DTEST_FIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/math-tags-314.md
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_math_markdown_tests.cmake)
+    # Folding sections in the reading view (#316)
+    add_test(NAME folding_sections COMMAND ${CMAKE_COMMAND}
+        -DTEST_BINARY=$<TARGET_FILE:input_tests>
+        -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/folding-test-$<CONFIG>
+        -DTEST_FIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/folding-sections-316.md
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_folding_tests.cmake)
     add_test(NAME window_drag_and_title_space COMMAND ${CMAKE_COMMAND}
         -DTEST_BINARY=$<TARGET_FILE:input_tests>
         -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/window-drag-test-$<CONFIG>
@@ -291,6 +337,16 @@ if(BUILD_TESTING)
         -DTEST_BINARY=$<TARGET_FILE:input_tests>
         -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/deleted-tab-memory-test-$<CONFIG>
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_deleted_tab_tests.cmake)
+    # A file changed by another program while the reader or an editor shows it (#311)
+    add_test(NAME file_changes COMMAND ${CMAKE_COMMAND}
+        -DTEST_BINARY=$<TARGET_FILE:input_tests>
+        -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/file-change-test-$<CONFIG>
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_file_change_tests.cmake)
+    # Pinned tabs and the remembered window pin (#312)
+    add_test(NAME pinned_tabs COMMAND ${CMAKE_COMMAND}
+        -DTEST_BINARY=$<TARGET_FILE:input_tests>
+        -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/pinned-tab-test-$<CONFIG>
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_pinned_tab_tests.cmake)
     add_test(NAME notification_setting COMMAND ${CMAKE_COMMAND}
         -DTEST_BINARY=$<TARGET_FILE:input_tests>
         -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/notification-setting-test-$<CONFIG>
@@ -310,6 +366,7 @@ if(BUILD_TESTING)
         -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/split-scrollbar-test-$<CONFIG>
         -DTEST_DOC=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/split-scrollbars-280.md
         -DTEST_DOC2=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/editor-scrollbar-291.md
+        -DTEST_DOC3=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/editor-long-lines-314.md
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_split_scrollbar_tests.cmake)
     add_test(NAME editor_drag_move COMMAND ${CMAKE_COMMAND}
         -DTEST_BINARY=$<TARGET_FILE:input_tests>
