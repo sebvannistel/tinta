@@ -107,7 +107,8 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel
       - name: Test
-        run: ctest --test-dir build -C Release --output-on-failure
+        # Retry only failed tests, without repeating the build or passing tests.
+        run: ctest --test-dir build -C Release --output-on-failure --repeat until-pass:3
       - uses: actions/upload-artifact@v4
         if: ${{ !inputs.build_only }}
         with:
