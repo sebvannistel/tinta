@@ -17,6 +17,7 @@
 #include <memory>
 #include <vector>
 #include <unordered_map>
+#include <map>
 #include <chrono>
 #include <utility>
 #include <optional>
@@ -218,6 +219,9 @@ inline const wchar_t* themeHeadingFont(const D2DTheme& t) {
                : t.fontFamily;
 }
 void loadCustomThemes();
+// themes.ini was written by something else, a hand edit, since it was last
+// read or written here (#310)
+bool customThemesChangedOnDisk();
 // What a new themes.ini starts with: a commented example naming every
 // key, headingfont= and codefont= included (#256)
 const char* themesIniTemplate();
@@ -245,6 +249,9 @@ struct Settings {
     int windowWidth = 1024;
     int windowHeight = 768;
     bool windowMaximized = false;
+    // The title bar's pin, kept from the last time it was pressed: a window
+    // opens on top when it was left so (#312)
+    bool alwaysOnTop = false;
     bool hasAskedFileAssociation = false;
     bool hasAskedFileIcon = false;  // personal: borrowed .md icon offer
     // Personal: the exe path whose Program Files install offer was declined
@@ -275,6 +282,8 @@ struct Settings {
     // Last session's open tabs, restored on the next plain launch
     std::vector<std::string> sessionTabs;
     int sessionActive = 0;
+    // Which of them were pinned, first in the row again (#312)
+    std::vector<std::string> sessionPinned;
     // Reading positions: most-recent-first, capped (#77). zoom = 0 means
     // "no per-document zoom": the document keeps the current zoom.
     struct ReadingPosition { std::string path; float scrollY; float zoom = 0.0f; };
@@ -290,6 +299,10 @@ struct Settings {
     // Separator line under level 1 and 2 headings (#154): off renders
     // the heading text alone
     bool headingRules = true;
+    // Folding sections in the reading view (#316): the arrows beside
+    // headings, and whether documents open with every section folded
+    bool foldSections = true;
+    bool foldOnOpen = false;
     // Table of contents panel side: false = right (default), true = left
     bool tocOnLeft = false;
     // Pinned side panels (#156): a pinned panel stops dismissing on
@@ -334,6 +347,12 @@ struct Settings {
     std::string pandocPath;
     // User-chosen PlantUML tool: plantuml.exe or plantuml.jar ("" = PATH)
     std::string plantumlPath;
+    // A math face to set equations in, for one with a MATH table such as
+    // Latin Modern Math (#314); "" or one not installed: Cambria Math
+    std::string mathFont;
+    // A face a document's Chinese, Japanese and Korean letters fall back
+    // to before Tinta's own (#314); "": Microsoft YaHei UI and the others
+    std::string cjkFont;
 };
 
 // Application state
@@ -573,6 +592,9 @@ struct App {
         bool fileMissing = false;  // deleted/renamed on disk (red-grey dot)
         std::optional<std::string> viewerSource;
         FILETIME lastWrite{};      // for external-change conflicts (dirty tabs)
+        // Pinned (#312): first in the row, narrow, spared by Close others
+        // and the left and right sweeps, and back with the session
+        bool pinned = false;
         std::wstring editorText;   // parked edit buffer (editMode only)
         bool editorBom = false;    // its file starts with a byte order mark
         float editorScrollY = 0.0f;
@@ -614,8 +636,8 @@ struct App {
         D2D1_RECT_F labelRect{};  // room the title had (zero: none drawn)
     };
     std::vector<TabHit> tabHits;       // refreshed by renderTabStrip
-    // Pin button in the title bar: keeps this window above every other
-    // (per-window, not persisted)
+    // Pin button in the title bar: keeps this window above every other,
+    // and is remembered for the next window when pressed (#312)
     bool alwaysOnTop = false;
 
     // Update-available chip (bottom right): non-blocking, once per
@@ -680,6 +702,11 @@ struct App {
     bool editorScrollbarDragging = false;
     float editorScrollbarDragStartY = 0.0f;
     float editorScrollbarDragStartScroll = 0.0f;
+    // The bar along the editor's foot while unwrapped lines run past the
+    // pane (#314), dragged as the side one is
+    bool editorScrollbarHDragging = false;
+    float editorScrollbarHDragStartX = 0.0f;
+    float editorScrollbarHDragStartScroll = 0.0f;
     // The selection dragged to move it, or with Ctrl to copy it (#289):
     // armed by a press on the selection, a drag once the pointer passes
     // the system's drag distance
@@ -778,6 +805,33 @@ struct App {
     int readingWidthPct = 100;  // mirrors Settings (#82); 100 = full width
     int zenWidthPct = 60;
     bool headingRules = true;   // mirrors Settings (#154)
+    // Folding sections (#316), mirroring Settings: the arrows beside
+    // headings, and documents opening with every section folded
+    bool foldSections = true;
+    bool foldOnOpen = false;
+    // This document's folds (folding.h): every heading folded when foldAll,
+    // but the ones in foldToggled, which flip it. Kept for each file left
+    // this session.
+    bool foldAll = false;
+    std::vector<std::string> foldToggled;
+    struct FoldState {
+        bool all = false;
+        std::vector<std::string> toggled;
+    };
+    std::unordered_map<std::string, FoldState> foldStates;
+    // Laid out with the page: the arrow of each heading that has a section
+    // to fold, and the page's top-level blocks a folded one hides
+    struct FoldArrow {
+        D2D1_RECT_F arrow{};  // the arrow's box, left of the heading
+        D2D1_RECT_F line{};   // the heading's first line, from the arrow on
+        size_t heading = 0;   // into headings
+        size_t block = 0;     // the heading's index among root's children
+        size_t endBlock = 0;  // the first block after its section
+        bool folded = false;
+    };
+    std::vector<FoldArrow> foldArrows;
+    int hoveredFold = -1;     // the heading line under the mouse
+    int layoutFoldArrow = -1; // while laying out: the folded arrow skipping blocks
     int settingsDragSlider = 0;         // SET_SLIDER_* while dragging, else 0
     D2D1_RECT_F settingsSliderTrack[2]{};  // 0 window, 1 fullscreen (set in render)
 
@@ -998,6 +1052,9 @@ struct App {
         int level;       // 1-6
         float y;         // document Y coordinate
         std::string id;  // GitHub-style slug for anchor links
+        // In a folded section (#316): the folded heading's index, whose y
+        // this one takes; -1 when laid out
+        int hiddenUnder = -1;
     };
     std::vector<HeadingInfo> headings;
     std::unordered_map<std::string, int> headingSlugCounts;
@@ -1103,6 +1160,9 @@ struct App {
     std::vector<unsigned> fitBlocks;
     unsigned layoutTableSeq = 0;
     unsigned layoutDiagramSeq = 0;
+    // Above 0 while a table cell is laid out only to be measured and taken
+    // back: its text is not given to the selection's lines (#318)
+    int layoutMeasuring = 0;
 
     // Text bounds - tracked for cursor changes and selection (document coordinates)
     struct TextRect {
@@ -1416,6 +1476,9 @@ struct App {
     std::chrono::steady_clock::time_point lastEscTime;
     bool escPressedOnce = false;
     bool confirmExitPending = false;  // Unsaved-changes dialog is showing
+    // It asks about the file changed on disk under unsaved edits: Reload
+    // or Keep mine, instead of Save and exit or Discard (#311)
+    bool confirmExitExternal = false;
     // Dialog open time: keys arriving within the grace window are ignored
     // so ESC-smashing lands on a visible, stable dialog
     std::chrono::steady_clock::time_point confirmExitOpenedAt;
@@ -1446,6 +1509,13 @@ struct App {
     plantuml::Tool plantumlTool;
     std::wstring plantumlUserPath;
     bool plantumlChecked = false;
+
+    // Equations: settings.ini's math face, and the numbers the document's
+    // \tag gives its \label names, gathered as the layout starts (#314)
+    std::wstring mathFont;
+    std::map<std::wstring, std::wstring> mathLabels;
+    // settings.ini's face for a document's CJK letters, read at start (#314)
+    std::wstring cjkFont;
     // Async render queue (created lazily by plantumlEnsureQueue) and the
     // per-process work root under %TEMP%; unique_ptr keeps App.h the only
     // owner and joins the worker before exit via WM_DESTROY
@@ -1465,6 +1535,9 @@ struct App {
     bool closeKeepsDrafts = false;   // #252
     fm::Settings frontmatter;
     float editRailAnim = 0.0f;       // rail slide-in 0..1
+    // Whether the last frame painted showed the rail: edit mode slides it
+    // in only after a frame without it (#317)
+    bool editRailShown = false;
     int editRailHover = 0;           // hit id under the mouse, 0 = none
     std::vector<std::pair<D2D1_RECT_F, int>> editRailHits;  // rebuilt each paint
 
@@ -1494,6 +1567,9 @@ struct App {
     // (the highlighting's line kinds) knows when to work it out again
     unsigned long long editorTextRevision = 0;
     float editorScrollX = 0.0f;  // horizontal scroll, non-wrap mode only (#77)
+    // The widest line in columns, a wide (CJK) letter two, for the
+    // horizontal scrollbar's reach (#314)
+    size_t editorWidestColumns = 0;
 
     // Editor view options (persisted)
     bool editorShowPreview = true;
@@ -1520,6 +1596,10 @@ struct App {
     int editorDesiredCol = -1;
     float editorDesiredX = -1.0f;  // desired caret x for Up/Down in wrap mode
     bool editorSelecting = false;
+    // What a double- or triple-click took, which a drag after it keeps
+    // while it grows by words (2) or lines (3); 1 for a plain click (#313)
+    int editorSelectUnit = 1;
+    size_t editorUnitFrom = 0, editorUnitTo = 0;
     size_t editorSelStart = 0;
     size_t editorSelEnd = 0;
     bool editorHasSelection = false;
@@ -1640,6 +1720,7 @@ struct App {
         docListItems.clear();
         headings.clear();
         headingSlugCounts.clear();
+        foldArrows.clear();
         footnoteAnchors.clear();
         htmlAnchors.clear();
         fileRefCache.clear();

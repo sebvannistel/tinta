@@ -27,6 +27,7 @@
 #include "plantuml_app.h"
 #include "print.h"
 #include "export.h"
+#include "folding.h"
 #include "i18n.h"
 #include "selection.h"
 
@@ -271,6 +272,7 @@ float readingPlace(const App& app) {
 }
 
 void persistLeavingPosition(App& app) {
+    foldsLeave(app);  // its folds stay for the session (#316)
     if (app.currentFile.empty()) return;
     persistReadingPosition(app.currentFile, readingPlace(app), app.zoomFactor);
     app.pendingScrollRestore = -1.0f;  // it belonged to the document left
@@ -311,6 +313,7 @@ bool openDocumentSourceInViewer(App& app, const std::wstring& fullPath,
     {
         Settings stored = loadSettings();
         app.pendingScrollRestore = findReadingPosition(stored, app.currentFile);
+        foldsEnter(app);  // its folds from earlier, or the setting's (#316)
         // Per-document zoom (#zoom-memory): a document remembered at a
         // different zoom reopens there
         float zoom = findReadingZoom(stored, app.currentFile);
@@ -770,6 +773,15 @@ static void settingsAction(App& app, HWND hwnd, int action) {
             app.closeKeepsDrafts = !app.closeKeepsDrafts;
             persistCloseKeepsDrafts(app);
             break;
+        case SET_FOLD_OFF:
+        case SET_FOLD_ON:
+        case SET_FOLD_FOLDED:
+            // Folding sections (#316); Folded folds the page being read too
+            app.foldSections = action != SET_FOLD_OFF;
+            app.foldOnOpen = action == SET_FOLD_FOLDED;
+            if (action == SET_FOLD_FOLDED) foldAllSections(app, true);
+            app.layoutDirty = true;
+            break;
         case SET_TOGGLE_HEADRULES:
             app.headingRules = !app.headingRules;
             // Layout shifts (the rule adds height), so a repaint alone
@@ -1063,6 +1075,11 @@ void handleMouseHWheel(App& app, HWND hwnd, WPARAM wParam, LPARAM) {
     }
     // Horizontal scroll
     float delta = (float)GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA * dpi(app, 60.0f);
+    // Over the source, its long unwrapped lines pan (#314)
+    if (app.editMode && app.mouseX < editorPaneWidth(app)) {
+        editorScrollHorizontally(app, hwnd, delta);
+        return;
+    }
     app.targetScrollX += delta;
 
     float maxScrollX = std::max(
@@ -1693,6 +1710,10 @@ void handleMouseMove(App& app, HWND hwnd, LPARAM lParam) {
         }
     }
 
+    // The heading line under the mouse shows its fold arrow (#316)
+    const int prevHoveredFold = app.hoveredFold;
+    app.hoveredFold = foldLineAt(app, docX, docY);
+
     // Table hover (shows the copy-as-TSV button)
     int prevHoveredTable = app.hoveredTable;
     app.hoveredTable = -1;
@@ -1754,7 +1775,7 @@ void handleMouseMove(App& app, HWND hwnd, LPARAM lParam) {
                 annotationCopyButtonHit(app, (float)app.mouseX,
                                         (float)app.mouseY))) {
         SetCursor(cursorHand);
-    } else if (taskRectAt(app) != nullptr) {
+    } else if (taskRectAt(app) != nullptr || foldArrowAt(app, docX, docY) >= 0) {
         SetCursor(cursorHand);
     } else if (app.hoveredCodeBlock >= 0) {
         // Show hand cursor only when over the copy button area
@@ -1794,6 +1815,7 @@ void handleMouseMove(App& app, HWND hwnd, LPARAM lParam) {
         wasHHovered != app.hScrollbarHovered ||
         prevHoveredLink != app.hoveredLink ||
         prevHoveredCodeBlock != app.hoveredCodeBlock ||
+        prevHoveredFold != app.hoveredFold ||
         prevHoveredTable != app.hoveredTable ||
         prevHoveredAnnotation != app.hoveredAnnotation) {
         InvalidateRect(hwnd, nullptr, FALSE);
@@ -1875,6 +1897,9 @@ static void invokeContextMenuAction(App& app, HWND hwnd, int item) {
             break;
         case CTX_SEARCH:
             openSearchInput(app);
+            break;
+        case CTX_FOLD_ALL:
+            foldAllSections(app, !anySectionFolded(app));
             break;
         case CTX_TOC:
             closeSearchIfOpen(app);
@@ -2470,7 +2495,7 @@ void handleMouseDown(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
             std::abs(app.mouseX - app.lastClickX) < 5 &&
             std::abs(app.mouseY - app.lastClickY) < 5);
 
-        if (isRepeatedClick) {
+        if (isRepeatedClick && foldArrowAt(app, docX, docY) < 0) {
             app.clickCount = std::min(app.clickCount + 1, 3);
         } else {
             app.clickCount = 1;
@@ -3148,7 +3173,10 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
                 std::wstring name = app.themeEditorName.empty()
                     ? tr(app, "theme.editor.default_name") : app.themeEditorName;
                 // The heading and code faces start from the base theme's,
-                // so deriving from Abyss keeps its pinned heading face
+                // so deriving from Abyss keeps its pinned heading face. A
+                // hand edit made since the themes loaded is read first, so
+                // the rewrite keeps it (#310)
+                if (customThemesChangedOnDisk()) loadCustomThemes();
                 int idx = saveCustomTheme(app.themeEditorTheme, name, app.themeEditorFont,
                     app.themeEditorCodeFont, app.themeEditorHeadingFont);
                 if (idx >= 0) {
@@ -3309,7 +3337,7 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
 
     // Edit mode: route to editor
     if (app.editMode && (app.draggingSeparator || app.editorSelecting ||
-                         app.editorScrollbarDragging)) {
+                         app.editorScrollbarDragging || app.editorScrollbarHDragging)) {
         int x = GET_X_LPARAM(lParam);
         int y = GET_Y_LPARAM(lParam);
         handleEditorMouseUp(app, hwnd, x, y);
@@ -3347,7 +3375,7 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
                     InvalidateRect(hwnd, nullptr, FALSE);
                     return;
                 }
-                scrollToHeadingY(app, app.headings[hit].y);
+                scrollToHeadingY(app, headingTargetY(app, (size_t)hit));
                 // The clicked heading is the active one even when the
                 // scroll cannot physically reach it (short documents);
                 // the next real scroll hands back to the spy
@@ -3631,6 +3659,10 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
             if ((dx > 5 || dy > 5 || app.selShiftExtend) &&
                 app.selFocus != app.selAnchor) {
                 app.hasSelection = true;
+            } else if (int fold = foldArrowAt(app, docX, docY); fold >= 0) {
+                // The arrow beside a heading folds or opens its section (#316)
+                foldArrowClick(app, fold);
+                app.hasSelection = false;
             } else if (const App::TaskRect* task = taskRectAt(app)) {
                 // Click on a task checkbox: flip the mark in the file
                 toggleTaskOnDisk(app, hwnd, task->markOffset, task->checked);
@@ -4099,10 +4131,13 @@ bool handleKeyDown(App& app, HWND hwnd, WPARAM wParam) {
             if (liveKeyDown(app, hwnd, wParam, consumed)) return consumed;
         }
         const bool wasReading=app.editorReadingPreview;
+        // A key the unsaved-changes dialog takes types nothing after it:
+        // Keep mine leaves the editor open under it (#311)
+        const bool asking = app.confirmExitPending;
         handleEditorKeyDown(app, hwnd, wParam);
         // Save As runs a modal loop: Ctrl may already be released when it
         // returns. Do not translate its original S into newly typed text (#206).
-        return (ctrl && wParam == 'S') || (wasReading && !app.editorReadingPreview);
+        return asking || (ctrl && wParam == 'S') || (wasReading && !app.editorReadingPreview);
     }
 
     // Folder browser path/name input captures the keyboard while active
@@ -4258,7 +4293,7 @@ bool handleKeyDown(App& app, HWND hwnd, WPARAM wParam) {
                         toLower(heading.text).find(needle) !=
                             std::wstring::npos) {
                         ensureLayoutComplete(app);
-                        scrollToHeadingY(app, heading.y);
+                        scrollToHeadingY(app, headingTargetY(app, i));
                         app.tocSpyOverride = (int)i;
                         app.tocSpyOverrideScroll = app.targetScrollY;
                         app.showToc = false;
@@ -4787,7 +4822,46 @@ void handleLinkPeekTimer(App& app, HWND hwnd) {
     InvalidateRect(hwnd, nullptr, FALSE);
 }
 
+void reloadThemesIniIfChanged(App& app, HWND hwnd) {
+    // The theme editor holds a theme of its own; its save reads the file first
+    if (app.showThemeEditor || !customThemesChangedOnDisk()) return;
+    // Names before the reload: the themes they point into are replaced
+    auto nameOf = [](int index) {
+        return index >= THEME_COUNT && index < themeCount() ? std::wstring(themeAt(index).name) : std::wstring();
+    };
+    const std::wstring current = nameOf(app.currentThemeIndex), light = nameOf(app.lightThemeIndex),
+                       dark = nameOf(app.darkThemeIndex);
+    loadCustomThemes();
+    // A user theme by its name again, wherever it moved; one gone from the
+    // file gives way to Paper
+    auto indexOf = [](const std::wstring& name, int index) {
+        if (name.empty()) return index;
+        for (int i = THEME_COUNT; i < themeCount(); ++i) {
+            if (_wcsicmp(themeAt(i).name, name.c_str()) == 0) return i;
+        }
+        return 0;
+    };
+    const int index = indexOf(current, app.currentThemeIndex);
+    const int lightIndex = indexOf(light, app.lightThemeIndex), darkIndex = indexOf(dark, app.darkThemeIndex);
+    // The chooser's previews follow the themes there are now
+    for (auto& pf : app.themePreviewFormats) {
+        if (pf.name) { pf.name->Release(); pf.name = nullptr; }
+        if (pf.preview) { pf.preview->Release(); pf.preview = nullptr; }
+        if (pf.code) { pf.code->Release(); pf.code = nullptr; }
+    }
+    app.themePreviewFormats.clear();
+    const bool moved = index != app.currentThemeIndex || lightIndex != app.lightThemeIndex ||
+                       darkIndex != app.darkThemeIndex;
+    app.lightThemeIndex = lightIndex;
+    app.darkThemeIndex = darkIndex;
+    if (!current.empty()) applyTheme(app, index);  // its colours and faces as now written
+    if (moved) persistThemeChoice(app);
+    app.layoutDirty = true;
+    if (hwnd) InvalidateRect(hwnd, nullptr, FALSE);
+}
+
 void handleFileWatchTimer(App& app, HWND hwnd) {
+    reloadThemesIniIfChanged(app, hwnd);
     // Refresh the deleted-on-disk flags driving the red-grey tab dots
     // (runs even when the active document is untitled or being edited)
     bool missingChanged = false;
@@ -4805,8 +4879,8 @@ void handleFileWatchTimer(App& app, HWND hwnd) {
     if (missingChanged) InvalidateRect(hwnd, nullptr, FALSE);
 
     // External edits to a file that has unsaved changes in some tab surface
-    // immediately: jump to that tab and raise the unsaved-changes dialog
-    // (Save and exit = your version wins, Discard = the disk version loads)
+    // immediately: jump to that tab and ask, Reload (the disk version, one
+    // Ctrl+Z from yours) or Keep mine (#311)
     if (!app.confirmExitPending) {
         for (size_t i = 0; i < app.tabs.size(); i++) {
             bool isActive = (int)i == app.activeTab;
@@ -4833,6 +4907,7 @@ void handleFileWatchTimer(App& app, HWND hwnd) {
                     app.lastFileWriteTime = current;
                 }
                 app.confirmExitPending = true;
+                app.confirmExitExternal = true;
                 app.confirmExitOpenedAt = std::chrono::steady_clock::now();
                 InvalidateRect(hwnd, nullptr, FALSE);
                 break;
@@ -4840,7 +4915,8 @@ void handleFileWatchTimer(App& app, HWND hwnd) {
         }
     }
 
-    if (app.currentFile.empty() || !app.fileWatchEnabled || app.editMode) return;
+    if (app.currentFile.empty() || !app.fileWatchEnabled) return;
+    if (app.editMode && (app.editorDirty || app.confirmExitPending)) return;
 
     std::wstring widePath = toWide(app.currentFile);
     HANDLE h = CreateFileW(widePath.c_str(), GENERIC_READ,
@@ -4849,6 +4925,18 @@ void handleFileWatchTimer(App& app, HWND hwnd) {
         FILETIME ft;
         GetFileTime(h, nullptr, nullptr, &ft);
         CloseHandle(h);
+        if (CompareFileTime(&ft, &app.lastFileWriteTime) != 0 && app.editMode) {
+            // An editor with nothing unsaved, Source or Live, takes the new
+            // text as the reader does, the caret where it was; Ctrl+Z
+            // takes it back (#311)
+            app.lastFileWriteTime = ft;
+            if (editorReloadFromDisk(app, hwnd) && !app.tabs.empty() && app.activeTab >= 0 &&
+                app.activeTab < (int)app.tabs.size()) {
+                signalHint(app, SIGI_FILE, std::wstring(tr(app, "toast.reloaded")) + L" \x2014 ",
+                           app.tabs[app.activeTab].title);
+            }
+            return;
+        }
         if (CompareFileTime(&ft, &app.lastFileWriteTime) != 0) {
             app.lastFileWriteTime = ft;
             // Reload file

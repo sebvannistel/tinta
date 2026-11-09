@@ -211,19 +211,24 @@ void listMarkerPagination(App& app) {
                 for (const auto& run : app.layoutTextRuns)
                     if (offset != std::wstring::npos && run.docLength && run.docStart <= offset && offset < run.docStart + run.docLength)
                         heading = &run;
-                const App::LayoutTextRun* marker = nullptr;
+                // A number is set as text, a bullet drawn (#315)
+                const D2D1_RECT_F* marker = nullptr;
                 if (heading) for (const auto& run : app.layoutTextRuns)
                     if (!run.docLength && run.pos.x < heading->pos.x &&
                         run.bounds.top < heading->bounds.bottom && run.bounds.bottom > heading->bounds.top)
-                        marker = &run;
+                        marker = &run.bounds;
+                if (heading && !marker) for (const auto& shape : app.layoutShapes)
+                    if (shape.rect.right <= heading->pos.x &&
+                        shape.rect.top < heading->bounds.bottom && shape.rect.bottom > heading->bounds.top)
+                        marker = &shape.rect;
                 check(heading && marker, context + ": native heading and marker render");
                 if (!heading || !marker) continue;
                 int sharedPages = 0;
                 for (size_t i = 1; i < app.printPreviewBounds.size(); ++i) {
                     const float top = app.printPreviewBounds[i - 1], bottom = app.printPreviewBounds[i];
-                    check(!(marker->bounds.top < bottom && bottom < marker->bounds.bottom),
+                    check(!(marker->top < bottom && bottom < marker->bottom),
                           context + ": no page boundary slices the marker");
-                    if (top <= marker->bounds.top && marker->bounds.bottom <= bottom &&
+                    if (top <= marker->top && marker->bottom <= bottom &&
                         top <= heading->bounds.top && heading->bounds.bottom <= bottom) ++sharedPages;
                 }
                 check(sharedPages == 1, context + ": marker and first heading line belong wholly to one page");
@@ -267,6 +272,25 @@ void wordFonts(App& app, const std::filesystem::path& dir) {
     check(docx.find("<w:outlineLvl w:val=\"0\"/></w:pPr><w:rPr>" + rFonts(L"Cambria", headingHan)) !=
               std::string::npos,
           "headingfont= reaches Word's heading styles");
+
+    // #314: settings.ini's cjkFont= comes before Tinta's own CJK faces, on
+    // the screen and in Word; one not installed leaves them as they were
+    auto preferCjk = [&](const wchar_t* face) {
+        app.cjkFont = face;
+        if (app.fontFallback) app.fontFallback->Release();
+        app.fontFallback = nullptr;
+        updateTextFormats(app);
+    };
+    preferCjk(L"SimSun");
+    check(latinHan != L"SimSun" && facesOf(app, app.textFormat, kHan) == L"SimSun",
+          "cjkFont= draws CJK beside a Latin body face");
+    check(exportDocxFile(app, (dir / L"cjk-font.docx").wstring()), "the cjkFont export succeeds");
+    docx = read(dir / L"cjk-font.docx");
+    check(docx.find("<w:rPrDefault><w:rPr>" + rFonts(L"Georgia", L"SimSun")) != std::string::npos,
+          "Word names cjkFont= for CJK");
+    preferCjk(L"No Such CJK Face");
+    check(facesOf(app, app.textFormat, kHan) == latinHan, "a cjkFont= not installed leaves the faces as they were");
+    preferCjk(L"");
     app.theme = saved;
     updateTextFormats(app);
 }
