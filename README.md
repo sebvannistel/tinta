@@ -23,7 +23,7 @@
 
 <br>
 
-Tinta is a **fast, lightweight Markdown and Mermaid viewer for Windows**, built with Direct2D and DirectWrite for hardware-accelerated rendering. A single native executable of under 5 MB that opens instantly — no Electron, no web engine, no installer.
+Tinta is a **fast, lightweight Markdown and Mermaid viewer for Windows**, built with Direct2D and DirectWrite for hardware-accelerated rendering. A single native executable of about 5 MB that opens instantly — no Electron, no web engine, no installer.
 
 <p align="center">
   <img src="https://tinta.cc/img/screenshots/paper.png" width="49%" alt="Tinta markdown viewer on Windows — Paper light theme">
@@ -56,7 +56,7 @@ Most markdown apps ship an entire browser to render text. Tinta uses the GPU-acc
 |  | Tinta | Typora | Obsidian | VS Code |
 |---|---|---|---|---|
 | Startup | **<100 ms** | ~1.5 s | ~3 s | ~2 s |
-| Install size | **<5 MB** | ~90 MB | ~250 MB | ~350 MB |
+| Install size | **~5 MB** | ~90 MB | ~250 MB | ~350 MB |
 | Runtime | **Native Direct2D** | Electron | Electron | Electron |
 
 It's a viewer first: perfect as the double-click default for `.md` and `.mmd` files, for reading documentation and diagrams — with an edit mode when you need it.
@@ -68,6 +68,8 @@ It's a viewer first: perfect as the double-click default for `.md` and `.mmd` fi
 - **Hardware-accelerated** - Smooth text rendering via DirectWrite
 - **Word wrap** - Optional soft wrap in the editor (Ctrl+W)
 - **Native LaTeX math** - `$inline$` and `$$display$$` equations with matrices, cases, aligned equations, fractions, limits, accents and custom macros. Uses an installed math font; no bundled fonts or web engine. See the [supported math syntax](docs/math-support.md).
+- **Citations** - Name a BibTeX or CSL-JSON library in the front matter and cite with pandoc's syntax (`[@doe2024, p. 4]`, `@doe2024 says`): citations and the references come out in APA, Chicago, IEEE, Nature or GB/T 7714, or any `.csl` style, with a hover card and a click to each reference. Figures, tables and equations number themselves and `@fig:id` refers to them, as pandoc-crossref does; HTML, Word and PDF keep it all, and pandoc exports get `--citeproc`. Typing `[@` lists the library's keys by author, year and title as you write, `@fig:` the document's figures, and the rail's Cite button opens Zotero's picker through Better BibTeX. A paper's front matter in pandoc's variables (`title`, `author`, `abstract`, `keywords`, `classoption: twocolumn`, `papersize`, `fontsize`) prints like a journal manuscript, with a title block, two columns, page numbers and running heads, and Word gets Title, Author and Abstract styles and numbered captions as fields. See [Citations, figures and tables](docs/citations.md)
+- **CSS themes** - A `.css` file in the `themes` folder is a theme: real CSS syntax, selectors and cascade, variables, `oklch()`, `color-mix()` and `light-dark()` for one sheet that follows Windows. Every element takes its own rules, from margins, borders and justified text to list markers, counters and `@font-face` fonts, on screen, on paper and in Word; `--ui-*` variables colour the window and Mermaid's own theme variables the diagrams. A `tinta.css` styles a folder's documents, Ctrl+Alt+click shows which rules style what, and Typora and Obsidian themes import from Settings. Saving a sheet restyles the window, and its mistakes are reported with their lines. See [CSS themes](docs/css-themes.md)
 - **Focused editing** - Hide the preview pane while writing (Ctrl+E)
 - **Native Mermaid diagrams** - 22 diagram families, from flowcharts with subgraphs through sequence, class, state, ER, gantt, and pie to C4, sankey, kanban, and radar - rendered without a web engine
 - **Export as HTML, DOCX, or PDF** - Right-click and pick "Export as..." for a self-contained web page, a Word document that opens natively, or a vector PDF; diagrams and math come along in every format
@@ -85,13 +87,15 @@ It's a viewer first: perfect as the double-click default for `.md` and `.mmd` fi
 - **Paste screenshots** - Ctrl+V a bitmap in edit mode and it saves as a PNG beside the document with the link inserted
 - **Pin on top** - A pushpin in the title bar keeps the window above every other app, and Tinta remembers it for the next window
 - **Rich tables** - Tables with bold, italic, code, and clickable links in cells
-- **Tabs** - Win11 Notepad-style tabs in the title bar: files opened from Explorer join the window as tabs, Ctrl+Tab or the mouse wheel over the strip cycles, Ctrl+W or Ctrl+F4 closes (Ctrl+F4 also while editing, where Ctrl+W is word wrap), middle-click closes, Ctrl+T opens the file browser into a new tab, unsaved buffers show a dot, resting the pointer on a tab shows its full name, its folder and what its dot means, and dragging reorders tabs. Right-click a tab for close operations (close, close all but this, close all to the left/right), pin tab, plus copy path and reveal in Explorer. A pinned tab moves to the start of the row and shrinks to its name's first letter, stays when the others are closed, and comes back pinned with the session. Pulling a tab out of the strip floats it as a card: drop it on open space for a new window (which keeps the tab row), or onto another Tinta window to move it there — and dropping a single-file window onto a tab strip merges it back. Single-file windows stay tabless; turn the Explorer behavior off with the "Open files in tabs" setting
+- **Tabs** - Win11 Notepad-style tabs in the title bar: files opened from Explorer join the window as tabs, Ctrl+Tab or the mouse wheel over the strip cycles, Ctrl+W or Ctrl+F4 closes (Ctrl+F4 also while editing, where Ctrl+W is word wrap), middle-click closes, Ctrl+Shift+T reopens the tab closed last (with its place, scroll and any unsaved text; a sweep of closes comes back together), Ctrl+T opens the start page in a new tab, unsaved buffers show a dot, resting the pointer on a tab shows its full name, its folder and what its dot means, and dragging reorders tabs. Right-click a tab for close operations (close, close all but this, close all to the left/right), pin tab, copy path and reveal in Explorer, then reopen closed tab with the last five closed tabs by name. A pinned tab moves to the start of the row and shrinks to its name's first letter, stays when the others are closed, and comes back pinned with the session. Pulling a tab out of the strip floats it as a card: drop it on open space for a new window (which keeps the tab row), or onto another Tinta window to move it there — and dropping a single-file window onto a tab strip merges it back. Single-file windows stay tabless; turn the Explorer behavior off with the "Open files in tabs" setting. Tinta starts with the tabs it was closed with; with Settings → General → **Reopen tabs from last time** off (`reopenTabs=0` in `settings.ini`) a file opens alone and only the pinned tabs come back
 - **Folder browser** - Press B to browse and open Markdown or Mermaid files (Ctrl+click a file to open it in a new tab)
 - **Table of contents** - Press Tab to see document headings, click to jump; the panel follows your reading position, and typing filters the headings
 - **Folding sections** - In the reading view, the arrow beside a heading folds its section and opens it again, and right-clicking the page offers Fold all sections. Contents still lists every heading, fainter when folded, and jumping to one, following a link to it or searching for a word in a folded section opens the sections around it. Settings → Appearance → Fold sections turns the arrows off, or opens every document folded
 - **Unified editor** - Press `:` to edit: your raw Markdown on the left with the rendered page docked beside it. A slim line-number gutter, a soft accent wash on the caret's line and its rendered block, a tool rail with formatting controls (its bullet, numbered, task and quote buttons mark every selected line) plus table-size and diagram-template pickers, and Markdown assists (lists continue on Enter and on a paste of several lines, Tab indents, Ctrl+B/I wrap, and a quote, bracket or `* ~ ^ = :` typed over a selection wraps it). Alt+↑/↓ moves lines, selected text drags to another place (Ctrl+drag leaves a copy), and several carets (Alt+click, Ctrl+Alt+↑/↓, Ctrl+D) type, delete and move together, handy for lining up tables. A word and character count sits beside the Read button, for the whole document or the selection. Search and find-replace work in the editor too. The source is in colour: headings, links and code stand out, Markdown's marks go faint, and fenced code and the properties take their language's colours ([details](docs/syntax-highlighting.md#markdown-in-the-source-editor); Settings → Editor turns it off)
+- **Open in the editor** - Settings → Editor → **Open Markdown files in** picks where a Markdown file opens: the reading view (as always), or the editor in Live or on its source, at the place the file was left. `E` and `Esc` still go between reading and editing, and a tab stays as you left it. Diagrams, text files and sheets open as before. Kept as `openMode=reading`, `live` or `source` in `settings.ini`
 - **Emoji shortcodes** - `:rocket:` and friends render as real emoji
 - **Fit to width** - Wide tables and diagrams grow a Fit button that shrinks them to the reading column
+- **Wrapped code** - A line of a code block that is longer than the block wraps at its edge, on the page, in print and PDF and in the HTML export, so a long line is read without scrolling sideways. Settings → Appearance → **Wrap long lines in code blocks** (`wrapCode=0` in `settings.ini`) keeps every line on one row instead
 - **Draft recovery** - Unsaved quick notes are stashed continuously and offered back on the next launch. With **Close without asking** (Settings → Editor), closing Tinta skips the save prompt and keeps unsaved edits as drafts for the next launch
 - **Create on click** - Clicking a missing file reference offers to create the file and opens it ready to type
 - **Text-file references** - `.txt`, `.json`, `.yaml` and friends link like Markdown files and open as highlighted documents
@@ -133,7 +137,7 @@ It's a viewer first: perfect as the double-click default for `.md` and `.mmd` fi
 | `Ctrl+S` | Save (in edit mode) |
 | `Ctrl+Shift+S` | Save As: the editor writes the buffer to a new path, the viewer saves a copy, and the document continues under the new name |
 | `Ctrl+H` | Find and replace (in edit mode): Tab switches fields, Enter replaces, Ctrl+Enter replaces all |
-| `Ctrl+P` | Print / export to PDF; the preview picks the paper, orientation and margins |
+| `Ctrl+P` | Print / export to PDF; the preview picks the paper, orientation and margins, two columns, page numbers and running heads |
 | `Ctrl+E` | In Source, show/hide the preview pane; in Live, read the page at full width, and `Ctrl+E` again to go back |
 | `Ctrl+Shift+E` | Read the unsaved edits at full width; `Esc` returns to the source (in edit mode) |
 | `Ctrl+W` | Toggle word wrap (in edit mode) |
@@ -142,6 +146,7 @@ It's a viewer first: perfect as the double-click default for `.md` and `.mmd` fi
 | `Ctrl+Alt+↑` / `Ctrl+Alt+↓` / `Alt+Click` | Add a caret above, below or at the click; `Esc` returns to one caret (in edit mode) |
 | `Ctrl+D` | Select the word, then add its next occurrence as another caret (in edit mode) |
 | `Ctrl+F4` | Close the current tab (viewer and edit mode) |
+| `Ctrl+Shift+T` | Reopen the tab closed last, with its place, scroll and unsaved text; again for the one before |
 | `Q` | Quit |
 
 ## Customization
@@ -296,8 +301,12 @@ Press `T` to open the theme chooser:
 - Ember - Warm charcoal
 - Abyss - Pure black (OLED-friendly)
 
-Custom themes live in `themes.ini` beside the portable executable, or in
-`%APPDATA%\Tinta`. Add `inlinecode` to a `[theme]` section to color inline code
+A theme of your own is a CSS file in the `themes` folder, in `%APPDATA%\Tinta`
+or beside the portable executable: [THEMES.md](THEMES.md) is the short guide,
+with examples to start from.
+
+Themes made in the colour editor (Settings > Appearance > New) live in
+`themes.ini` in the same place. Add `inlinecode` to a `[theme]` section to color inline code
 independently of fenced blocks:
 
 ```ini
@@ -318,6 +327,8 @@ The [Frontmatter settings](docs/frontmatter.md) page controls property display a
 Named, repeated and multiline [footnotes](docs/footnotes.md) include native navigation and HTML/DOCX export.
 
 Individual H1-H6, marked-text, bold, italic, selection and rule colours are described in [Theme colours](docs/theme-colours.md).
+
+Themes can also be written in CSS, one `.css` file each in a `themes` folder beside `themes.ini`; see [CSS themes](docs/css-themes.md).
 
 ## Dependencies
 

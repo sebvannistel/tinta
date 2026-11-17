@@ -3,6 +3,7 @@
 // document surface with an accent underline, unsaved buffers show a dot,
 // a chevron opens the open-files switcher when the strip is crowded.
 
+#include "ui_paint.h"
 #include "tabs.h"
 #include "d2d_init.h"
 #include "search.h"
@@ -11,6 +12,7 @@
 
 #include "document.h"
 #include "drafts.h"
+#include "print.h"
 #include "signals.h"
 #include "tableedit.h"
 #include "editor.h"
@@ -76,14 +78,17 @@ void syncActiveTab(App& app) {
     if (!app.currentFile.empty() || tab.title.empty() || app.editMode) {
         tab.title = titleForPath(app, app.currentFile);
     }
-    tab.editMode = app.editMode;
-    tab.editorDirty = app.editMode && app.editorDirty;
+    tab.editMode = app.editingNow();
+    tab.editorDirty = app.unsavedNow();
 }
 
 // Park the active editor buffer into its tab so the switch away loses
 // nothing: the teardown mirrors exitEditMode minus the dialog and reload
 // (another document loads immediately after).
 void parkActiveEditBuffer(App& app) {
+    // A print preview is of the document being left: closed, the editor
+    // it put aside is here to be parked
+    if (app.showPrintPreview) closePrintPreview(app, app.hwnd);
     // A sheet being left commits its text box and saves
     sheetLeave(app);
     if (!app.editMode || app.tabs.empty()) return;
@@ -160,6 +165,10 @@ void tabsSeedSession(App& app, const std::vector<std::string>& paths) {
             _stricmp(path.c_str(), app.currentFile.c_str()) == 0) {
             app.activeTab = (int)app.tabs.size();
             if (app.keepDeletedTabs) tab.viewerSource = app.sourceText;
+        } else {
+            // The others open when they are first shown (#322); the one
+            // in the window is the launch's to place
+            tab.openModePending = true;
         }
         app.tabs.push_back(std::move(tab));
     }
@@ -171,6 +180,50 @@ void tabsSeedSession(App& app, const std::vector<std::string>& paths) {
         if (app.keepDeletedTabs && !tab.path.empty()) tab.viewerSource = app.sourceText;
         app.tabs.push_back(std::move(tab));
         app.activeTab = (int)app.tabs.size() - 1;
+    }
+}
+
+namespace {
+bool sessionPins(const Settings& settings, const std::string& path) {
+    for (const auto& pinned : settings.sessionPinned) {
+        if (_stricmp(pinned.c_str(), path.c_str()) == 0) return true;
+    }
+    return false;
+}
+}  // namespace
+
+// The tabs a launch brings back, in their order: the session's files that
+// are still on the disk. With the setting off only the pinned ones, as a
+// pinned tab stays through every other sweep (#312). The active slot
+// follows its path through the filtering, and falls on the first tab when
+// its own did not come back
+SessionTabs sessionToReopen(const Settings& settings) {
+    SessionTabs session;
+    for (size_t i = 0; i < settings.sessionTabs.size(); i++) {
+        const std::string& path = settings.sessionTabs[i];
+        if (!settings.reopenTabs && !sessionPins(settings, path)) continue;
+        if (GetFileAttributesW(toWide(path).c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+        if ((int)i == settings.sessionActive) session.active = (int)session.paths.size();
+        session.paths.push_back(path);
+    }
+    return session;
+}
+
+// The tabs a closing window leaves for the next launch (untitled buffers
+// have no path to come back to). `settings` is the file as it stands, so
+// the setting is the one picked last in any window. Off, the paths of the
+// tabs that are not pinned are not written at all
+void sessionKeep(Settings& settings, const App& app) {
+    settings.sessionTabs.clear();
+    settings.sessionPinned.clear();
+    settings.sessionActive = 0;
+    for (size_t i = 0; i < app.tabs.size(); i++) {
+        const std::string& path = (int)i == app.activeTab ? app.currentFile : app.tabs[i].path;
+        if (path.empty()) continue;
+        if (!settings.reopenTabs && !app.tabs[i].pinned) continue;
+        if ((int)i == app.activeTab) settings.sessionActive = (int)settings.sessionTabs.size();
+        settings.sessionTabs.push_back(path);
+        if (app.tabs[i].pinned) settings.sessionPinned.push_back(path);
     }
 }
 
@@ -222,6 +275,26 @@ void tabsPinPaths(App& app, const std::vector<std::string>& paths) {
     keepPinnedFirst(app);
 }
 
+bool windowCloseAsks(App& app, HWND hwnd) {
+    // A print preview is of the document as edited. Closed, the editor it
+    // put aside is whole again and the dialog has its page to ask over
+    if (app.showPrintPreview) closePrintPreview(app, hwnd);
+    for (size_t i = 0; i < app.tabs.size(); i++) {
+        bool dirty = (int)i == app.activeTab ? app.unsavedNow() : (app.tabs[i].editMode && app.tabs[i].editorDirty);
+        if (!dirty) continue;
+        if ((int)i != app.activeTab) {
+            tabActivate(app, hwnd, (int)i);
+        }
+        app.pendingWindowClose = true;
+        app.confirmExitPending = true;
+        app.confirmExitExternal = false;
+        app.confirmExitOpenedAt = std::chrono::steady_clock::now();
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return true;
+    }
+    return false;
+}
+
 void tabActivate(App& app, HWND hwnd, int index) {
     tabsInit(app);
     if (index < 0 || index >= (int)app.tabs.size()) return;
@@ -258,6 +331,7 @@ void tabActivate(App& app, HWND hwnd, int index) {
         persistLeavingPosition(app);
         app.currentFile.clear();
         app.sourceText.clear();
+        app.annotations.clear();
         auto result = parseDocument(app.parser, std::string(), app.currentFile);
         if (result.success) {
             app.root = result.root;
@@ -281,6 +355,12 @@ void tabActivate(App& app, HWND hwnd, int index) {
         // since then still reloads it or asks (#311), though the viewer
         // just read the file's time as it is now
         app.lastFileWriteTime = tab.lastWrite;
+    }
+    // A tab shown for the first time since its file was opened goes to
+    // the view Markdown files open in (#322)
+    if (tab.openModePending) {
+        tab.openModePending = false;
+        applyOpenMode(app);
     }
     app.showTabSwitcher = false;
     // An open search follows to the new document: its highlights, count
@@ -311,6 +391,7 @@ void tabOpenPath(App& app, HWND hwnd, const std::string& utf8Path,
     tab.id = ++app.tabIdCounter;
     tab.path = utf8Path;
     tab.title = titleForPath(app, utf8Path);
+    tab.openModePending = !utf8Path.empty();  // placed when first shown (#322)
     cacheViewerSource(app, tab);
     if (!utf8Path.empty() && !tab.viewerSource && !std::ifstream(toWide(utf8Path))) return;
     int index = insertBefore < 0 ? (int)app.tabs.size()
@@ -327,16 +408,86 @@ void tabOpenPath(App& app, HWND hwnd, const std::string& utf8Path,
     }
 }
 
-void tabCloseIndex(App& app, HWND hwnd, int index) {
+namespace {
+
+constexpr size_t kClosedTabsKept = 25;
+
+// A tab the user closes, kept for Ctrl+Shift+T: its place, its pin and,
+// closed in the editor, its buffer. A dirty buffer has been through the
+// unsaved-changes dialog by now; what "Don't save" threw away comes back
+// unsaved. The start page and an empty note leave nothing to keep
+void rememberClosedTab(App& app, int index) {
+    if (index < 0 || index >= (int)app.tabs.size()) return;
+    const App::DocTab& tab = app.tabs[index];
+    const bool active = index == app.activeTab;
+    App::ClosedTab closed;
+    if (app.discardedEditTabId == tab.id) {
+        closed = std::move(app.discardedEdit);
+        closed.editMode = true;
+        closed.editorDirty = true;
+    } else if (active ? app.editMode : tab.editMode) {
+        closed.path = active ? app.currentFile : tab.path;
+        closed.editMode = true;
+        if (active) {
+            closed.editorText = app.editorText;
+            closed.editorBom = app.editorBom;
+            closed.editorScrollY = app.editorScrollY;
+            closed.editorCursor = app.editorCursorPos;
+            closed.wordWrap = app.editorWordWrap;
+            closed.lastWrite = app.lastFileWriteTime;
+        } else {
+            closed.editorText = tab.editorText;
+            closed.editorBom = tab.editorBom;
+            closed.editorScrollY = tab.editorScrollY;
+            closed.editorCursor = tab.editorCursor;
+            closed.wordWrap = tab.wordWrap;
+            closed.lastWrite = tab.lastWrite;
+        }
+    } else {
+        closed.path = active ? app.currentFile : tab.path;
+    }
+    app.discardedEditTabId = 0;
+    app.discardedEdit = {};
+    if (closed.path.empty() && closed.editorText.empty()) return;
+    closed.index = index;
+    if (index > 0) closed.after = index - 1 == app.activeTab ? app.currentFile : app.tabs[index - 1].path;
+    closed.pinned = tab.pinned;
+    closed.group = app.tabBulkCloseMode ? app.tabBulkCloseGroup : ++app.closedTabGroups;
+    app.closedTabs.push_back(std::move(closed));
+    if (app.closedTabs.size() > kClosedTabsKept) app.closedTabs.erase(app.closedTabs.begin());
+}
+
+void becomeStartPage(App& app, HWND hwnd);
+
+}  // namespace
+
+void tabKeepDiscardedEdit(App& app) {
+    if (app.tabs.empty() || !app.editMode) return;
+    if (app.pendingTabClose < 0 && !app.tabBulkCloseMode) return;
+    App::ClosedTab& kept = app.discardedEdit;
+    kept = {};
+    kept.path = app.currentFile;
+    kept.editorText = app.editorText;
+    kept.editorBom = app.editorBom;
+    kept.editorScrollY = app.editorScrollY;
+    kept.editorCursor = app.editorCursorPos;
+    kept.wordWrap = app.editorWordWrap;
+    kept.lastWrite = app.lastFileWriteTime;
+    app.discardedEditTabId = app.tabs[app.activeTab].id;
+}
+
+void tabCloseIndex(App& app, HWND hwnd, int index, TabClose how) {
     tabsInit(app);
     if (index < 0 || index >= (int)app.tabs.size()) return;
     if (index==app.activeTab) tableEditCommit(app);
+    // The dialog asks over the document, not over a print preview of it
+    if (app.showPrintPreview) closePrintPreview(app, hwnd);
 
     // A dirty buffer routes through the unsaved-changes dialog (#106):
     // activate the tab, open the dialog, and finish the close from
     // confirmExitAction once the user decides
     bool dirty = (index == app.activeTab)
-                     ? (app.editMode && app.editorDirty)
+                     ? app.unsavedNow()
                      : (app.tabs[index].editMode && app.tabs[index].editorDirty);
     if (dirty) {
         if (index != app.activeTab) tabActivate(app, hwnd, index);
@@ -349,6 +500,7 @@ void tabCloseIndex(App& app, HWND hwnd, int index) {
         return;
     }
 
+    if (how == TabClose::User) rememberClosedTab(app, index);
     // The closed tab's crash-recovery draft goes with it
     draftsDeleteForTab(app, app.tabs[index].id);
 
@@ -358,7 +510,7 @@ void tabCloseIndex(App& app, HWND hwnd, int index) {
         if (startPageActive(app)) {
             PostMessageW(hwnd, WM_CLOSE, 0, 0);
         } else {
-            tabBecomeStartPage(app, hwnd);
+            becomeStartPage(app, hwnd);
         }
         return;
     }
@@ -381,7 +533,7 @@ void tabCloseIndex(App& app, HWND hwnd, int index) {
         if (app.activeTab == index) {
             // Keep unavailable tabs intact; replace the closed document with
             // a launcher so no stale document or out-of-range index survives.
-            tabBecomeStartPage(app, hwnd);
+            becomeStartPage(app, hwnd);
             return;
         }
         int erase = index;
@@ -413,6 +565,13 @@ void tabCycle(App& app, HWND hwnd, int direction) {
 // vanishing. Idempotent — a tab that is already the launcher stays one.
 void tabBecomeStartPage(App& app, HWND hwnd) {
     tabsInit(app);
+    rememberClosedTab(app, app.activeTab);
+    becomeStartPage(app, hwnd);
+}
+
+namespace {
+
+void becomeStartPage(App& app, HWND hwnd) {
     parkActiveEditBuffer(app);  // clean editor teardown if one was open
     persistLeavingPosition(app);  // reopened later, it resumes there (#279)
     App::DocTab& tab = app.tabs[app.activeTab];
@@ -425,6 +584,7 @@ void tabBecomeStartPage(App& app, HWND hwnd) {
     tab.viewerSource.reset();
     tab.fileMissing = false;
     app.sourceText.clear();
+    app.annotations.clear();
     app.currentFile.clear();
     auto result = parseDocument(app.parser, std::string(), app.currentFile);
     if (result.success) {
@@ -438,6 +598,107 @@ void tabBecomeStartPage(App& app, HWND hwnd) {
     app.hoveredTab = -1;
     updateWindowTitle(app);
     InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+// One closed tab back where it stood: a file that is open already gets
+// its tab activated, a file gone with no text to restore is reported. An
+// editor tab comes back parked with its buffer, which activation restores
+// as it does any parked tab; a reader tab reads its file and resumes at
+// its reading position. The new index, or -1
+int reopenClosedTab(App& app, HWND hwnd, App::ClosedTab& closed) {
+    if (!closed.path.empty()) {
+        for (size_t i = 0; i < app.tabs.size(); i++) {
+            const std::string& open = (int)i == app.activeTab ? app.currentFile : app.tabs[i].path;
+            if (_stricmp(open.c_str(), closed.path.c_str()) == 0) {
+                tabActivate(app, hwnd, (int)i);
+                return (int)i;
+            }
+        }
+        std::wstring wide = toWide(closed.path);
+        if (!closed.editMode && GetFileAttributesW(wide.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            signalPushKey(app, SIG_WARN, SIGI_FILE, "toast.file_missing",
+                          titleForPath(app, closed.path), wide);
+            return -1;
+        }
+    }
+    App::DocTab tab;
+    tab.id = ++app.tabIdCounter;
+    tab.path = closed.path;
+    tab.title = titleForPath(app, closed.path);
+    tab.pinned = closed.pinned;
+    tab.editMode = closed.editMode;
+    tab.editorDirty = closed.editorDirty;
+    tab.editorText = std::move(closed.editorText);
+    tab.editorBom = closed.editorBom;
+    tab.editorScrollY = closed.editorScrollY;
+    tab.editorCursor = closed.editorCursor;
+    tab.wordWrap = closed.wordWrap;
+    tab.lastWrite = closed.lastWrite;
+    if (!tab.editMode) cacheViewerSource(app, tab);
+    // Beside the file that was to its left, wherever that is now; else at
+    // the index it left
+    int index = std::clamp(closed.index, 0, (int)app.tabs.size());
+    for (size_t i = 0; !closed.after.empty() && i < app.tabs.size(); i++) {
+        const std::string& open = (int)i == app.activeTab ? app.currentFile : app.tabs[i].path;
+        if (_stricmp(open.c_str(), closed.after.c_str()) == 0) {
+            index = (int)i + 1;
+            break;
+        }
+    }
+    const int pinned = tabsPinnedCount(app);
+    index = tab.pinned ? std::min(index, pinned) : std::max(index, pinned);
+    app.tabs.insert(app.tabs.begin() + index, std::move(tab));
+    if (app.activeTab >= index) ++app.activeTab;
+    tabActivate(app, hwnd, index);
+    if (app.activeTab != index) {
+        // The file could not be read after all
+        app.tabs.erase(app.tabs.begin() + index);
+        if (app.activeTab > index) --app.activeTab;
+        return -1;
+    }
+    return index;
+}
+
+}  // namespace
+
+bool tabReopenClosed(App& app, HWND hwnd, int entry) {
+    tabsInit(app);
+    if (app.confirmExitPending || app.pendingTabClose >= 0 || app.tabBulkCloseMode) return false;
+    // An empty start page gives way, as it does to a file opened from it
+    const int launcher = startPageActive(app) ? app.tabs[app.activeTab].id : 0;
+    int reopened = -1;
+    while (reopened < 0 && !app.closedTabs.empty()) {
+        // The newest close and the rest of its sweep, newest first: each
+        // goes back to the index it left, which rebuilds the old order
+        std::vector<App::ClosedTab> batch;
+        if (entry >= 0) {
+            if (entry >= (int)app.closedTabs.size()) return false;
+            batch.push_back(std::move(app.closedTabs[entry]));
+            app.closedTabs.erase(app.closedTabs.begin() + entry);
+        } else {
+            const int group = app.closedTabs.back().group;
+            while (!app.closedTabs.empty() && app.closedTabs.back().group == group) {
+                batch.push_back(std::move(app.closedTabs.back()));
+                app.closedTabs.pop_back();
+            }
+        }
+        for (auto& closed : batch) {
+            int index = reopenClosedTab(app, hwnd, closed);
+            if (index >= 0) reopened = index;
+        }
+        if (entry >= 0) break;
+    }
+    if (reopened < 0) return false;
+    if (launcher) {
+        for (int i = 0; i < (int)app.tabs.size(); i++) {
+            if (app.tabs[i].id == launcher && i != app.activeTab) {
+                tabCloseIndex(app, hwnd, i, TabClose::Internal);
+                break;
+            }
+        }
+    }
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return true;
 }
 
 // Ctrl+T: a fresh empty viewer tab, which is the start page (the
@@ -679,12 +940,35 @@ int captionHitTest(const App& app, float x, float y) {
 // --- rendering ---
 
 D2D1_COLOR_F tabStripBackground(const App& app) {
+    // A CSS theme's --ui-background; else the page's, a shade deeper
+    if (app.theme.uiBackground) return *app.theme.uiBackground;
     D2D1_COLOR_F c = app.theme.background;
-    float f = app.theme.isDark ? 0.78f : 0.955f;
+    // A clear step under the page in a light theme too (it was 0.955)
+    float f = app.theme.isDark ? 0.78f : 0.94f;
     c.r *= f;
     c.g *= f;
     c.b *= f;
     return c;
+}
+
+D2D1_COLOR_F tabStripEdge(const App& app) {
+    // The row's ground a step towards its ink: the line under the row, the
+    // chosen tab's edge and the window's own border. A CSS theme's
+    // --ui-border where it gives one.
+    const D2D1_COLOR_F ground = tabStripBackground(app), ink = themeUiText(app.theme);
+    const float t = 0.18f;
+    D2D1_COLOR_F edge = D2D1::ColorF(ground.r + (ink.r - ground.r) * t, ground.g + (ink.g - ground.g) * t,
+                                     ground.b + (ink.b - ground.b) * t, 1.0f);
+    edge = themeUiBorder(app.theme, edge);
+    // Over the row's ground, so that it is one colour for the window's border too
+    return D2D1::ColorF(ground.r + (edge.r - ground.r) * edge.a, ground.g + (edge.g - ground.g) * edge.a,
+                        ground.b + (edge.b - ground.b) * edge.a, 1.0f);
+}
+
+float tabRowCentre(const App& app) {
+    // Every name, the +, the window's buttons and the icon stand on this
+    // line: the middle of a tab, which begins kTabTop under the window's edge
+    return (chromeTopHeight(app) + dpi(app, 4.0f)) * 0.5f;
 }
 
 namespace {
@@ -720,8 +1004,9 @@ void drawCloseGlyph(App& app, float cx, float cy, float arm,
 // (where it is the visible hint that the window can hold tabs)
 void drawPlusButton(App& app, float plusX, float stripH,
                     const D2D1_COLOR_F& faint, const D2D1_COLOR_F& muted) {
-    float plusSize = dpi(app, 30.0f);
-    float plusY = (stripH - plusSize) * 0.5f;
+    float plusSize = dpi(app, 28.0f);
+    float plusY = tabRowCentre(app) - plusSize * 0.5f;
+    (void)stripH;
     D2D1_RECT_F plusRect = D2D1::RectF(plusX, plusY, plusX + plusSize,
                                        plusY + plusSize);
     bool plusHover = app.mouseX >= plusRect.left &&
@@ -758,7 +1043,9 @@ void renderTabStrip(App& app) {
     tabsInit(app);
     syncActiveTab(app);
 
-    D2D1_COLOR_F text = app.theme.text;
+    // The strip's ink (--ui-text); the active tab wears the page's colour,
+    // so it keeps the page's text
+    D2D1_COLOR_F text = themeUiText(app.theme);
     D2D1_COLOR_F muted = text;
     muted.a = 0.7f;
     D2D1_COLOR_F faint = text;
@@ -769,6 +1056,13 @@ void renderTabStrip(App& app) {
     app.brush->SetColor(stripBackground(app));
     app.renderTarget->FillRectangle(
         D2D1::RectF(0, 0, (float)app.width, stripH), app.brush);
+    // A hairline parts the row from the page; the chosen tab, drawn over
+    // it, opens it where the tab meets the page
+    const D2D1_COLOR_F edge = tabStripEdge(app);
+    const float centre = tabRowCentre(app);
+    app.brush->SetColor(edge);
+    app.renderTarget->FillRectangle(
+        D2D1::RectF(0, stripH - 1.0f, (float)app.width, stripH), app.brush);
 
     // App icon (16px, centered in a 40px cell)
     float iconCell = dpi(app, 40.0f);
@@ -800,7 +1094,7 @@ void renderTabStrip(App& app) {
     if (app.titleIconBitmap) {
         float iconSize = dpi(app, 16.0f);
         float ix = (iconCell - iconSize) * 0.5f;
-        float iy = (stripH - iconSize) * 0.5f;
+        float iy = centre - iconSize * 0.5f;
         app.renderTarget->DrawBitmap(
             app.titleIconBitmap,
             D2D1::RectF(ix, iy, ix + iconSize, iy + iconSize));
@@ -816,7 +1110,7 @@ void renderTabStrip(App& app) {
         if (!app.tabs.empty() && !app.tabs[0].title.empty() &&
             !startPageActive(app)) {
             title = app.tabs[0].title;
-            if (app.editMode && app.editorDirty) title = L"* " + title;
+            if (app.unsavedNow()) title = L"* " + title;
         }
         float textLeft = std::max(iconCell + dpi(app, 4.0f),
                                   editRailWidth(app) + dpi(app, 8.0f));
@@ -827,7 +1121,7 @@ void renderTabStrip(App& app) {
             app.brush->SetColor(muted);
             app.renderTarget->DrawText(
                 title.c_str(), (UINT32)title.size(), app.folderBrowserFormat,
-                D2D1::RectF(textLeft, (stripH - dpi(app, 17.0f)) * 0.5f,
+                D2D1::RectF(textLeft, centre - dpi(app, 9.0f),
                             labelRight, stripH),
                 app.brush);
             IDWriteTextLayout* layout = nullptr;
@@ -849,7 +1143,7 @@ void renderTabStrip(App& app) {
             float cbSize = dpi(app, 20.0f);
             float cbX = std::min(nextX, maxRight - dpi(app, 38.0f) -
                                             cbSize - dpi(app, 6.0f));
-            float cbY = (stripH - cbSize) * 0.5f;
+            float cbY = centre - cbSize * 0.5f;
             D2D1_RECT_F cb =
                 D2D1::RectF(cbX, cbY, cbX + cbSize, cbY + cbSize);
             bool closeHover =
@@ -914,31 +1208,28 @@ void renderTabStrip(App& app) {
                 float hi = pinned ? m.unpinnedLeft - gap : m.tabsRight;
                 x = std::max(lo, std::min(follow, hi - width));
             }
-            float top = active ? dpi(app, 6.0f) : dpi(app, 10.0f);
+            float top = active ? dpi(app, 4.0f) : dpi(app, 8.0f);
             D2D1_RECT_F r = D2D1::RectF(x, top, x + width, stripH);
+            const D2D1_COLOR_F ink = active ? app.theme.text : text;
+            D2D1_COLOR_F inkMuted = ink;
+            inkMuted.a = muted.a;
 
             if (active) {
-                // The active tab drops a soft shadow onto its neighbors
-                // instead of an underline: layered halos, clipped to the
-                // strip so they spread sideways over the inactive tabs
-                float shadowAlpha = app.theme.isDark ? 0.34f : 0.16f;
-                for (int ring = 3; ring >= 1; ring--) {
-                    float spread = dpi(app, (float)ring * 2.2f);
-                    D2D1_COLOR_F shadow =
-                        D2D1::ColorF(0.0f, 0.0f, 0.0f,
-                                     shadowAlpha / (float)(ring * ring));
-                    fillTabBody(app,
-                                D2D1::RectF(r.left - spread,
-                                            r.top - spread * 0.6f,
-                                            r.right + spread, r.bottom),
-                                radius + spread * 0.5f, shadow);
-                }
+                // The chosen tab is the page's colour with an edge of its
+                // own, which meets the line under the row at its feet (it
+                // had a shadow, a smudge at this size)
                 fillTabBody(app, r, radius, app.theme.background);
+                app.brush->SetColor(edge);
+                app.renderTarget->DrawRoundedRectangle(
+                    D2D1::RoundedRect(
+                        D2D1::RectF(r.left + 0.5f, r.top + 0.5f, r.right - 0.5f, r.bottom + radius * 2.0f),
+                        radius, radius),
+                    app.brush, 1.0f);
             } else if (hovered) {
                 fillTabBody(app, r, radius, faint);
             }
 
-            bool dirty = active ? (app.editMode && app.editorDirty)
+            bool dirty = active ? app.unsavedNow()
                                 : (app.tabs[i].editMode &&
                                    app.tabs[i].editorDirty);
             bool missing = app.tabs[i].fileMissing && !app.tabs[i].path.empty();
@@ -962,10 +1253,10 @@ void renderTabStrip(App& app) {
                 if (layout) {
                     DWRITE_TEXT_METRICS tm{};
                     layout->GetMetrics(&tm);
-                    app.brush->SetColor(active ? text : muted);
+                    app.brush->SetColor(active ? ink : muted);
                     app.renderTarget->DrawTextLayout(
                         D2D1::Point2F(r.left + (width - tm.width) * 0.5f,
-                                      top + (stripH - top - tm.height) * 0.5f),
+                                      centre - tm.height * 0.5f),
                         layout, app.brush);
                     layout->Release();
                 }
@@ -986,12 +1277,12 @@ void renderTabStrip(App& app) {
             // Label, ellipsis-trimmed, leaving room for the close/dot
             float labelRight = r.right - dpi(app, showClose ? 30.0f : 20.0f);
             if (app.folderBrowserFormat && labelRight > r.left + dpi(app, 12.0f)) {
-                app.brush->SetColor(active ? text : muted);
+                app.brush->SetColor(active ? ink : muted);
                 app.renderTarget->DrawText(
                     app.tabs[i].title.c_str(), (UINT32)app.tabs[i].title.size(),
                     app.folderBrowserFormat,
                     D2D1::RectF(r.left + dpi(app, 12.0f),
-                                top + (stripH - top - dpi(app, 17.0f)) * 0.5f,
+                                centre - dpi(app, 9.0f),
                                 labelRight, stripH),
                     app.brush);
             }
@@ -1006,14 +1297,14 @@ void renderTabStrip(App& app) {
             if (showClose) {
                 float cbSize = dpi(app, 20.0f);
                 float cbX = r.right - cbSize - dpi(app, 6.0f);
-                float cbY = top + (stripH - top - cbSize) * 0.5f;
+                float cbY = centre - cbSize * 0.5f;
                 D2D1_RECT_F cb = D2D1::RectF(cbX, cbY, cbX + cbSize,
                                              cbY + cbSize);
                 bool closeHover =
                     app.mouseX >= cb.left && app.mouseX <= cb.right &&
                     app.mouseY >= cb.top && app.mouseY <= cb.bottom;
                 if (closeHover || !active) {
-                    D2D1_COLOR_F cbBg = text;
+                    D2D1_COLOR_F cbBg = ink;
                     cbBg.a = closeHover ? 0.12f : 0.07f;
                     app.brush->SetColor(cbBg);
                     app.renderTarget->FillRoundedRectangle(
@@ -1033,7 +1324,7 @@ void renderTabStrip(App& app) {
                 } else {
                     drawCloseGlyph(app, (cb.left + cb.right) * 0.5f,
                                    (cb.top + cb.bottom) * 0.5f,
-                                   dpi(app, 3.6f), muted);
+                                   dpi(app, 3.6f), inkMuted);
                 }
                 hit.closeRect = cb;
                 hit.hasClose = true;
@@ -1043,18 +1334,34 @@ void renderTabStrip(App& app) {
                 float cx = r.right - dpi(app, 13.0f);
                 app.renderTarget->FillEllipse(
                     D2D1::Ellipse(
-                        D2D1::Point2F(cx, top + (stripH - top) * 0.5f),
+                        D2D1::Point2F(cx, centre),
                         dotR, dotR),
                     app.brush);
             }
             app.tabHits.push_back(hit);
         }
+        // A thin line between two tabs at rest gives each its place; none
+        // beside the chosen tab, a hovered one or one being dragged
+        if (!app.tabDragging) {
+            D2D1_COLOR_F line = text;
+            line.a = 0.16f;
+            app.brush->SetColor(line);
+            for (size_t k = 0; k + 1 < shown.size(); k++) {
+                const int left = shown[k], right = shown[k + 1];
+                const bool busy = left == app.activeTab || right == app.activeTab ||
+                                  left == app.hoveredTab || right == app.hoveredTab;
+                if (busy) continue;
+                const float x = std::floor(tabLeftAt(m, left) + tabWidthAt(m, left) + gap * 0.5f);
+                app.renderTarget->FillRectangle(
+                    D2D1::RectF(x, centre - dpi(app, 8.0f), x + 1.0f, centre + dpi(app, 8.0f)), app.brush);
+            }
+        }
         app.renderTarget->PopAxisAlignedClip();
 
         // + new tab
         drawPlusButton(app, m.plusX, stripH, faint, muted);
-        float plusSize = dpi(app, 30.0f);
-        float plusY = (stripH - plusSize) * 0.5f;
+        float plusSize = dpi(app, 28.0f);
+        float plusY = centre - plusSize * 0.5f;
 
         // Overflow chevron when compressed
         if (m.compressed) {
@@ -1105,7 +1412,7 @@ void renderTabStrip(App& app) {
                                  ? D2D1::ColorF(1.0f, 1.0f, 1.0f)
                                  : text;
         float cx = (r.left + r.right) * 0.5f;
-        float cy = (r.top + r.bottom) * 0.5f;
+        float cy = centre;
         app.brush->SetColor(glyph);
         if (b == 0) {
             app.renderTarget->DrawLine(
@@ -1147,8 +1454,8 @@ void renderTabStrip(App& app) {
             app.renderTarget->FillRectangle(r, app.brush);
         }
         float cx = (r.left + r.right) * 0.5f;
-        float cy = (r.top + r.bottom) * 0.5f - dpi(app, 1.0f);
-        D2D1_COLOR_F pin = app.alwaysOnTop ? app.theme.accent : text;
+        float cy = centre - dpi(app, 1.0f);
+        D2D1_COLOR_F pin = app.alwaysOnTop ? themeUiAccent(app.theme) : text;
         if (!app.alwaysOnTop && !hover) pin.a = 0.45f;
         app.brush->SetColor(pin);
         float bw = dpi(app, 3.0f);   // body half-width
@@ -1192,11 +1499,13 @@ void renderTabSwitcher(App& app) {
     if (x < dpi(app, 8.0f)) x = dpi(app, 8.0f);
     float y = stripH + dpi(app, 4.0f);
 
-    D2D1_COLOR_F text = app.theme.text;
+    D2D1_COLOR_F text = themeUiText(app.theme);
     D2D1_COLOR_F panel = stripBackground(app);
     panel.a = 0.97f;
+    panel = themeUiPanel(app.theme, panel);
     D2D1_COLOR_F border = text;
     border.a = 0.12f;
+    border = themeUiBorder(app.theme, border);
 
     D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(
         D2D1::RectF(x, y, x + width, y + height), dpi(app, 8.0f),
@@ -1239,7 +1548,7 @@ void renderTabSwitcher(App& app) {
                 app.brush);
         }
         if (active) {
-            app.brush->SetColor(app.theme.accent);
+            app.brush->SetColor(themeUiAccent(app.theme));
             app.renderTarget->FillRoundedRectangle(
                 D2D1::RoundedRect(
                     D2D1::RectF(row.left, rowY + dpi(app, 7.0f),
@@ -1260,7 +1569,7 @@ void renderTabSwitcher(App& app) {
                 dpi(app, 2.0f), dpi(app, 2.0f)),
             app.brush, 1.0f);
 
-        bool dirty = active ? (app.editMode && app.editorDirty)
+        bool dirty = active ? app.unsavedNow()
                             : (app.tabs[i].editMode && app.tabs[i].editorDirty);
         bool missing = app.tabs[i].fileMissing && !app.tabs[i].path.empty();
         bool showDot = dirty || missing;
@@ -1409,7 +1718,7 @@ TabHoverCardText tabHoverCardText(const App& app, int tab) {
         }
     }
     bool active = tab == app.activeTab;
-    card.dirty = active ? (app.editMode && app.editorDirty)
+    card.dirty = active ? app.unsavedNow()
                         : (doc.editMode && doc.editorDirty);
     if (card.dirty) {
         card.status = tr(app, "tabs.card.unsaved");
@@ -1541,7 +1850,7 @@ void renderTabHoverCard(App& app) {
     float radius = dpi(app, 8.0f);
 
     // A soft lift off the page underneath, then the strip's own surface
-    float shadowAlpha = app.theme.isDark ? 0.30f : 0.10f;
+    float shadowAlpha = themeUiDark(app.theme) ? 0.30f : 0.10f;
     for (int ring = 2; ring >= 1; ring--) {
         float spread = dpi(app, (float)ring * 2.0f);
         app.brush->SetColor(D2D1::ColorF(0.0f, 0.0f, 0.0f,
@@ -1553,11 +1862,13 @@ void renderTabHoverCard(App& app) {
                 radius + spread, radius + spread),
             app.brush);
     }
-    D2D1_COLOR_F text = app.theme.text;
+    D2D1_COLOR_F text = themeUiText(app.theme);
     D2D1_COLOR_F panel = stripBackground(app);
     panel.a = 1.0f;  // opaque: no page text ghosting through
+    panel = themeUiPanel(app.theme, panel);
     D2D1_COLOR_F border = text;
     border.a = 0.12f;
+    border = themeUiBorder(app.theme, border);
     D2D1_COLOR_F muted = text;
     muted.a = 0.62f;
     D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(rect, radius, radius);
@@ -1701,6 +2012,7 @@ enum TabMenuItem {
     TM_PIN,
     TM_COPY_PATH,
     TM_REVEAL,
+    TM_REOPEN,
     TM_ITEM_COUNT,
 };
 
@@ -1717,25 +2029,39 @@ const TabMenuEntry TAB_MENU[TM_ITEM_COUNT] = {
     { "tab.menu.close_right",  L"",       true  },
     { "tab.menu.pin",          L"",       true  },
     { "tab.menu.copy_path",    L"",       false },
-    { "ctx.reveal",            L"",       false },
+    { "ctx.reveal",            L"",       true  },
+    { "tab.menu.reopen",       L"Ctrl+Shift+T", false },
 };
 
-float tabMenuItemHeight(const App& app) { return dpi(app, 30.0f); }
-float tabMenuSeparator(const App& app) { return dpi(app, 9.0f); }
-float tabMenuWidth(const App& app) { return dpi(app, 235.0f); }
-float tabMenuPadding(const App& app) { return dpi(app, 6.0f); }
+// Below Reopen closed tab, the last few closed tabs by name, newest
+// first: rows TM_ITEM_COUNT and on
+constexpr int kTabMenuRecent = 5;
+
+int tabMenuRows(const App& app) {
+    return TM_ITEM_COUNT + std::min((int)app.closedTabs.size(), kTabMenuRecent);
+}
+
+// The closed tab a recent row names, as an index into app.closedTabs
+int tabMenuClosedEntry(const App& app, int row) {
+    return (int)app.closedTabs.size() - 1 - (row - TM_ITEM_COUNT);
+}
+
+float tabMenuItemHeight(const App& app) { return dpi(app, uiscale::rowMenu); }
+float tabMenuSeparator(const App& app) { return dpi(app, uiscale::menuSeparator); }
+float tabMenuWidth(const App& app) { return app.tabMenuW > 0 ? app.tabMenuW : dpi(app, 236.0f); }
+float tabMenuPadding(const App& app) { return dpi(app, uiscale::menuPad); }
 
 float tabMenuItemTop(const App& app, int index) {
     float y = tabMenuPadding(app);
     for (int i = 0; i < index; i++) {
         y += tabMenuItemHeight(app);
-        if (TAB_MENU[i].separatorAfter) y += tabMenuSeparator(app);
+        if (i < TM_ITEM_COUNT && TAB_MENU[i].separatorAfter) y += tabMenuSeparator(app);
     }
     return y;
 }
 
 float tabMenuTotalHeight(const App& app) {
-    return tabMenuItemTop(app, TM_ITEM_COUNT) + tabMenuPadding(app);
+    return tabMenuItemTop(app, tabMenuRows(app)) + tabMenuPadding(app);
 }
 
 // A tab in [from, to) that the sweeps would close: pinned ones stay (#312)
@@ -1749,7 +2075,9 @@ bool sweepable(const App& app, int from, int to, int skip) {
 bool tabMenuItemEnabled(const App& app, int item) {
     int index = app.tabMenuIndex;
     if (index < 0 || index >= (int)app.tabs.size()) return false;
+    if (item >= TM_ITEM_COUNT) return item < tabMenuRows(app);
     switch (item) {
+        case TM_REOPEN:       return !app.closedTabs.empty();
         case TM_CLOSE:        return true;
         case TM_CLOSE_OTHERS: return sweepable(app, 0, (int)app.tabs.size(), index);
         case TM_CLOSE_LEFT:   return sweepable(app, 0, index, index);
@@ -1773,6 +2101,7 @@ void tabBulkCloseBegin(App& app, HWND hwnd, int mode, int keepIndex) {
     if (keepIndex < 0 || keepIndex >= (int)app.tabs.size()) return;
     app.tabBulkCloseMode = mode;
     app.tabBulkKeepId = app.tabs[keepIndex].id;
+    app.tabBulkCloseGroup = ++app.closedTabGroups;  // one Ctrl+Shift+T reopens them all
     tabBulkCloseStep(app, hwnd);
 }
 
@@ -1815,7 +2144,22 @@ void tabBulkCloseStep(App& app, HWND hwnd) {
 }
 
 void openTabMenu(App& app, int tabIndex, float x, float y) {
-    float w = tabMenuWidth(app);
+    // Wide enough for the longest label and its shortcut in the interface
+    // language; a long closed file's name is trimmed instead
+    float w = dpi(app, 235.0f);
+    if (app.folderBrowserFormat) {
+        const float inset = dpi(app, 12.0f);
+        for (int i = 0; i <= TM_ITEM_COUNT; i++) {
+            const char* key = i < TM_ITEM_COUNT ? TAB_MENU[i].key : "tab.menu.unpin";
+            float need = measureText(app, tr(app, key), app.folderBrowserFormat);
+            if (i < TM_ITEM_COUNT && TAB_MENU[i].shortcut[0]) {
+                need += dpi(app, 24.0f) +
+                        measureText(app, TAB_MENU[i].shortcut, app.folderBrowserFormat);
+            }
+            w = std::max(w, need + 2.0f * inset);
+        }
+    }
+    app.tabMenuW = w;
     float h = tabMenuTotalHeight(app);
     app.tabMenuIndex = tabIndex;
     app.tabMenuX = std::max(0.0f, std::min(x, (float)app.width - w));
@@ -1836,7 +2180,7 @@ void closeTabMenu(App& app) {
 int tabMenuItemAt(const App& app, float x, float y) {
     if (x < app.tabMenuX || x > app.tabMenuX + tabMenuWidth(app)) return -1;
     float rel = y - app.tabMenuY;
-    for (int i = 0; i < TM_ITEM_COUNT; i++) {
+    for (int i = 0; i < tabMenuRows(app); i++) {
         float top = tabMenuItemTop(app, i);
         if (rel >= top && rel < top + tabMenuItemHeight(app)) return i;
     }
@@ -1857,81 +2201,33 @@ void renderTabMenu(App& app) {
     }
     float anim = app.tabMenuAnimation;
 
-    IDWriteTextFormat* format = app.folderBrowserFormat;
-    if (!format) return;
-
     float x = app.tabMenuX;
     float y = app.tabMenuY;
     float w = tabMenuWidth(app);
     float h = tabMenuTotalHeight(app);
-
-    D2D1_COLOR_F panelBg = app.theme.isDark ? hexColor(0x1E1E1E, 0.97f)
-                                            : hexColor(0xF8F8F8, 0.97f);
-    D2D1_COLOR_F borderColor = app.theme.isDark ? hexColor(0x3A3A40, 0.9f)
-                                                : hexColor(0xC8C8C8, 0.9f);
-    app.brush->SetColor(panelBg);
-    app.renderTarget->FillRoundedRectangle(
-        D2D1::RoundedRect(D2D1::RectF(x, y, x + w, y + h), 6, 6), app.brush);
-    app.brush->SetColor(borderColor);
-    app.renderTarget->DrawRoundedRectangle(
-        D2D1::RoundedRect(D2D1::RectF(x, y, x + w, y + h), 6, 6), app.brush,
-        1.0f);
+    paint::menuPanel(app, D2D1::RectF(x, y, x + w, y + h), anim);
 
     app.tabMenuHover = tabMenuItemAt(app, (float)app.mouseX, (float)app.mouseY);
 
     float pad = tabMenuPadding(app);
     float itemH = tabMenuItemHeight(app);
-    float inset = dpi(app, 12.0f);
-    for (int i = 0; i < TM_ITEM_COUNT; i++) {
+    for (int i = 0; i < tabMenuRows(app); i++) {
         float top = y + tabMenuItemTop(app, i);
         bool enabled = tabMenuItemEnabled(app, i);
-
-        if (i == app.tabMenuHover && enabled) {
-            D2D1_COLOR_F hoverColor = app.theme.accent;
-            hoverColor.a = 0.18f * anim;
-            app.brush->SetColor(hoverColor);
-            app.renderTarget->FillRoundedRectangle(
-                D2D1::RoundedRect(
-                    D2D1::RectF(x + pad, top, x + w - pad, top + itemH), 4, 4),
-                app.brush);
+        const D2D1_RECT_F row = D2D1::RectF(x + pad, top, x + w - pad, top + itemH);
+        if (i >= TM_ITEM_COUNT) {
+            // A recently closed tab: its name, set in under the command
+            const App::ClosedTab& closed = app.closedTabs[tabMenuClosedEntry(app, i)];
+            std::wstring name = titleForPath(app, closed.path);
+            if (closed.editorDirty) name += L" \x2022";
+            paint::menuRow(app, row, name.c_str(), nullptr, i == app.tabMenuHover, enabled, anim * 0.8f,
+                           dpi(app, uiscale::sp16));
+            continue;
         }
-
-        D2D1_COLOR_F textColor = app.theme.text;
-        textColor.a = (enabled ? 1.0f : 0.35f) * anim;
-        app.brush->SetColor(textColor);
-        float textY = top + (itemH - dpi(app, 18.0f)) / 2;
         const bool unpin = i == TM_PIN && app.tabs[app.tabMenuIndex].pinned;
         const wchar_t* label = tr(app, unpin ? "tab.menu.unpin" : TAB_MENU[i].key);
-        app.renderTarget->DrawText(
-            label, (UINT32)wcslen(label), format,
-            D2D1::RectF(x + inset, textY, x + w - inset, top + itemH),
-            app.brush);
-
-        if (TAB_MENU[i].shortcut[0]) {
-            IDWriteTextLayout* hint = nullptr;
-            app.dwriteFactory->CreateTextLayout(
-                TAB_MENU[i].shortcut, (UINT32)wcslen(TAB_MENU[i].shortcut),
-                format, 1000.0f, itemH, &hint);
-            if (hint) {
-                DWRITE_TEXT_METRICS metrics{};
-                hint->GetMetrics(&metrics);
-                D2D1_COLOR_F hintColor = app.theme.text;
-                hintColor.a = 0.4f * anim;
-                app.brush->SetColor(hintColor);
-                app.renderTarget->DrawTextLayout(
-                    D2D1::Point2F(x + w - inset - metrics.width, textY), hint,
-                    app.brush);
-                hint->Release();
-            }
-        }
-
-        if (TAB_MENU[i].separatorAfter) {
-            float sepY = top + itemH + tabMenuSeparator(app) * 0.5f;
-            app.brush->SetColor(borderColor);
-            app.renderTarget->DrawLine(D2D1::Point2F(x + pad, sepY),
-                                       D2D1::Point2F(x + w - pad, sepY),
-                                       app.brush, 1.0f);
-        }
+        paint::menuRow(app, row, label, TAB_MENU[i].shortcut, i == app.tabMenuHover, enabled, anim);
+        if (TAB_MENU[i].separatorAfter) paint::menuSeparator(app, x + pad, x + w - pad, top + itemH, anim);
     }
 }
 
@@ -1946,8 +2242,15 @@ bool tabMenuMouseDown(App& app, HWND hwnd, int x, int y) {
     // Re-validate against the surviving tab row (indices can shift while
     // the menu is up only via external means; the guard is cheap)
     App& a = app;
+    if (item >= TM_ITEM_COUNT) {
+        if (tabMenuItemEnabled(a, item)) tabReopenClosed(a, hwnd, tabMenuClosedEntry(a, item));
+        return true;
+    }
     const std::string& path = index == a.activeTab ? a.currentFile : a.tabs[index].path;
     switch (item) {
+        case TM_REOPEN:
+            tabReopenClosed(a, hwnd);
+            break;
         case TM_CLOSE:
             if (tabMenuItemEnabled(a, TM_CLOSE)) tabCloseIndex(a, hwnd, index);
             break;
@@ -2046,7 +2349,7 @@ void ghostCreate(App& app, const std::wstring& title, int screenX,
                                          (int)(radius * 2), (int)(radius * 2));
         HBRUSH fill = CreateSolidBrush(toColorref(tabStripBackground(app)));
         FillRgn(memory, region, fill);
-        D2D1_COLOR_F borderColor = app.theme.text;
+        D2D1_COLOR_F borderColor = themeUiBorder(app.theme, themeUiText(app.theme));
         HBRUSH border = CreateSolidBrush(toColorref(borderColor));
         FrameRgn(memory, region, border, 1, 1);
         DeleteObject(fill);
@@ -2061,7 +2364,7 @@ void ghostCreate(App& app, const std::wstring& title, int screenX,
                                  L"Segoe UI");
         HGDIOBJ oldFont = SelectObject(memory, font);
         SetBkMode(memory, TRANSPARENT);
-        SetTextColor(memory, toColorref(app.theme.text));
+        SetTextColor(memory, toColorref(themeUiText(app.theme)));
         RECT textRect = {(int)dpi(app, 12.0f), 0,
                          width - (int)dpi(app, 10.0f), height};
         DrawTextW(memory, title.c_str(), (int)title.size(), &textRect,
@@ -2114,8 +2417,9 @@ void dragCloseLocal(App& app, HWND hwnd, int index) {
         return;
     }
     // A transferred tab is clean; use the same guarded neighbor selection
-    // and launcher fallback as a normal close.
-    tabCloseIndex(app, hwnd, index);
+    // and launcher fallback as a normal close. It lives on elsewhere, so
+    // there is nothing to reopen here
+    tabCloseIndex(app, hwnd, index, TabClose::Internal);
 }
 
 }  // namespace
@@ -2137,7 +2441,7 @@ void tabDragMove(App& app, HWND hwnd, int x, int y) {
 
     int index = app.tabDragIndex;
     bool active = index == app.activeTab;
-    bool dirty = active ? (app.editMode && app.editorDirty)
+    bool dirty = active ? app.unsavedNow()
                         : (app.tabs[index].editMode &&
                            app.tabs[index].editorDirty);
     const std::string& path = active ? app.currentFile : app.tabs[index].path;
@@ -2251,7 +2555,7 @@ void tabWindowDropMerge(App& app, HWND hwnd) {
     // window's tab strip donates its document there (Notepad-style);
     // multi-tab windows hand tabs over through per-tab drags instead
     if (app.tabs.size() != 1) return;
-    if (app.editMode && app.editorDirty) return;
+    if (app.unsavedNow()) return;
     const std::string& path = app.currentFile;
     if (path.empty()) return;
 

@@ -80,7 +80,8 @@ void appendCountableText(const ElementPtr& element, std::wstring& out) {
     if (!element) return;
     switch (element->type) {
         case ElementType::Text:
-            out += widen(element->text);
+            // A section's number (Scholar) is no word of its heading
+            if (element->language != "section-number") out += widen(element->text);
             break;
         case ElementType::SoftBreak:
             out += L' ';
@@ -99,6 +100,10 @@ void appendCountableText(const ElementPtr& element, std::wstring& out) {
         case ElementType::FootnoteReference:
         case ElementType::FootnoteBacklink:
         case ElementType::HorizontalRule:
+        // Citations and the references count no more than footnote marks
+        // do (docs/specs/scholar.md)
+        case ElementType::Citation:
+        case ElementType::Bibliography:
             break;
         // Blocks and table cells end with a break, so words never join
         // across them

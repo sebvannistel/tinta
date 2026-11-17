@@ -141,9 +141,10 @@ int testEmphasisColours(App& app, const std::filesystem::path& dir) {
     const auto& invalid=themeAt(first+4);
     check(!invalid.boldText && !invalid.italicText && !invalid.boldItalicText && !invalid.selection && !invalid.rule,
           "#310: invalid colours keep inheritance");
+    // A built-in theme colours no emphasis and no selection; its rules are its hairline's colour
     for(int i=0;i<THEME_COUNT;++i)
         check(!themeAt(i).boldText && !themeAt(i).italicText && !themeAt(i).boldItalicText && !themeAt(i).selection &&
-              !themeAt(i).rule,"#310: built-in themes look as before");
+              themeAt(i).rule,"#310: built-in themes colour no emphasis");
     check(same(*themeEmphasisColor(themeAt(first+2),true,true),hexColor(0xAA2200)),"#310: bold and italic text takes bold= without bolditalic=");
     check(same(*themeEmphasisColor(themeAt(first+3),true,true),hexColor(0x007755)) && !themeEmphasisColor(themeAt(first+3),true,false),
           "#310: with italic= alone, text both takes it and bold keeps its colour");
@@ -288,12 +289,15 @@ int testHandEditedThemes(App& app, const std::filesystem::path& dir) {
     // An edit saved while Tinta runs shows on the theme in use at once
     applyTheme(app,first+1);
     check(!customThemesChangedOnDisk(),"#310: nothing changed since the themes loaded");
+    int saves=0;
+    const auto loadedAt=std::filesystem::last_write_time(ini);
     auto save=[&](const std::string& text) {
-        const auto previous=std::filesystem::last_write_time(ini);
         { std::ofstream f(ini,std::ios::binary); f << text; }
-        // Advance from the last observed timestamp, not the fresh write's
-        // clock time: two writes in one tick would otherwise both get now+2s.
-        std::filesystem::last_write_time(ini,previous+std::chrono::seconds(2));
+        // A clock that has not ticked between two writes still reads as a
+        // change: each save is two seconds after the one before it. (Two
+        // seconds after its own write was the same time for two saves in one
+        // tick of a fast machine's clock, and the second went unseen.)
+        std::filesystem::last_write_time(ini,loadedAt+std::chrono::seconds(2*++saves));
         check(customThemesChangedOnDisk(),"#310: each saved edit has a distinct timestamp");
     };
     std::string edited=read(ini);

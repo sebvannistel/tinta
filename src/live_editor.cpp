@@ -10,6 +10,7 @@
 // block it changed, or after a pause, as the source's preview is.
 
 #include "live_editor.h"
+#include "clipboard_keys.h"
 #include "d2d_init.h"
 #include "editor.h"
 #include "i18n.h"
@@ -18,6 +19,8 @@
 #include "live_text.h"
 #include "print.h"
 #include "render.h"
+#include "scholar.h"
+#include "search.h"
 #include "settings.h"
 #include "signals.h"
 #include "ui_paint.h"
@@ -72,7 +75,7 @@ struct LiveEditor {
     int first = -1, last = -1;     // -1: a line between blocks
     float top = 0, bottom = 0;
     float textX = 0, textY = 0, width = 0, height = 0, liveBottom = 0, shift = 0;
-    IDWriteTextLayout* layout = nullptr;  // owned by `region`
+    const live::Laid* layout = nullptr;   // owned by `region`
     // A diagram, a formula or a picture: what the page drew for it, under its Markdown
     bool preview = false;
     float previewTop = 0, previewBottom = 0, previewY = 0;
@@ -361,20 +364,10 @@ void refreshBlocks(App& app, LiveEditor& L) {
 
 // --- The live stretch ------------------------------------------------------------
 
-float firstBaseline(IDWriteTextLayout* layout) {
-    if (!layout) return 0;
-    UINT32 count = 0;
-    layout->GetLineMetrics(nullptr, 0, &count);
-    if (!count) return 0;
-    std::vector<DWRITE_LINE_METRICS> lines(count);
-    if (FAILED(layout->GetLineMetrics(lines.data(), count, &count))) return 0;
-    return lines[0].baseline;
-}
-
 // Where a block's text goes on the page: its first line on the page's
 // first baseline, a fenced block from its background's top
-float blockTextY(const Block& b, IDWriteTextLayout* layout) {
-    if (b.baseline >= 0 && !b.code) return std::max(b.top, b.baseline - firstBaseline(layout));
+float blockTextY(const Block& b, const live::Laid* layout) {
+    if (b.baseline >= 0 && !b.code) return std::max(b.top, b.baseline - live::firstBaseline(layout));
     return b.inkTop;
 }
 
@@ -461,7 +454,7 @@ void place(App& app, LiveEditor& L) {
     L.first = first;
     L.last = last;
     L.layout = live::layoutOf(app, L.e, L.from, L.to, L.width, look, L.region, live::caretLineOf(L.e, L.from, L.to));
-    L.height = L.layout ? paint::metrics(L.layout).height : 0;
+    L.height = L.layout ? L.layout->height : 0;
     L.preview = false;
     if (first >= 0) {
         const Block& fb = L.blocks[first];
@@ -521,7 +514,7 @@ size_t positionAtShown(App& app, LiveEditor& L, float x, float y, int direction)
     live::Look look = live::pageLook(app);
     float bx = 0, width = 0;
     columnOf(app, look, block.code, bx, width);
-    IDWriteTextLayout* layout = live::layoutOf(app, L.e, f, t, width, look, L.probe, (size_t)-1);
+    const live::Laid* layout = live::layoutOf(app, L.e, f, t, width, look, L.probe, (size_t)-1);
     if (!layout) return f;
     py = std::clamp(py, block.inkTop, std::max(block.inkTop, block.inkBottom - 1.0f));
     return live::positionAt(layout, f, t, x - bx, py - blockTextY(block, layout));
@@ -676,6 +669,7 @@ live::Host hostFor(App& app, HWND hwnd, LiveEditor& L) {
     };
     host.positionAt = [&app, &L](float x, float y, int direction) { return positionAtShown(app, L, x, y, direction); };
     host.names = [&app, &L](const std::wstring& typed) { return noteNames(app, L, typed); };
+    host.cites = [&app](const std::wstring& text, size_t from, size_t caret) { return citeChoices(app, text, from, caret); };
     host.pickImage = [&app, hwnd]() { return pickImage(app, hwnd); };
     host.undo = [&app, &L](bool redo) {
         editorUndoRedo(app, redo);
@@ -806,7 +800,12 @@ void renderLivePage(App& app) {
     D2D1_MATRIX_3X2_F saved;
     app.renderTarget->GetTransform(&saved);
     app.renderTarget->SetTransform(D2D1::Matrix3x2F::Translation(L.textX - sx, L.textY - sy) * saved);
-    live::draw(app, L.e, L.layout, L.region, L.from, look, app.cursorBlinkOn, 1.0f);
+    // What of the stretch the window shows: a block of thousands of lines
+    // draws the lines in view
+    const float drawnAt = L.textY - sy, scale = saved._22 > 0 ? saved._22 : 1.0f;
+    const float viewTop = (0.0f - saved._32) / scale - drawnAt;
+    const float viewBottom = (app.renderTarget->GetSize().height - saved._32) / scale - drawnAt;
+    live::draw(app, L.e, L.layout, L.from, look, app.cursorBlinkOn, 1.0f, viewTop, viewBottom);
     app.renderTarget->SetTransform(saved);
     // Under a diagram's, a formula's or a picture's Markdown, what the page
     // drew for it, caught up after each pause in the typing
@@ -905,6 +904,8 @@ bool liveKeyDown(App& app, HWND hwnd, WPARAM key, bool& consumed) {
         }
     }
     bool ctrl = keyDown(VK_CONTROL), shift = keyDown(VK_SHIFT);
+    // Shift+Insert pastes as Ctrl+V does, a picture or a table too (#320)
+    takeClipboardKey(key, ctrl, shift);
     // Ctrl+/ shows the source. Ctrl+E reads the page as the reader does,
     // and Ctrl+E there comes back (#308), as Ctrl+Shift+E does
     if (ctrl && key == VK_OEM_2) {
@@ -1030,6 +1031,27 @@ bool liveRailCommand(App& app, HWND hwnd, int id) {
     return true;
 }
 
+std::vector<LiveText::Choice> citeChoices(App& app, const std::wstring& text, size_t from, size_t caret) {
+    // The bibliography is found beside the document; an untitled note has none
+    const std::wstring folder =
+        app.currentFile.empty() ? std::wstring() : std::filesystem::path(toWide(app.currentFile)).parent_path().wstring();
+    std::vector<LiveText::Choice> list;
+    for (auto& row : scholar::suggest(text, from, caret, folder)) {
+        LiveText::Choice choice;
+        choice.label = std::move(row.key);
+        choice.detail = std::move(row.detail);
+        list.push_back(std::move(choice));
+    }
+    return list;
+}
+
+void liveTypeCitation(App& app, HWND hwnd) {
+    LiveEditor& L = begin(app);
+    live::replace(L.e, L"[@");
+    live::updatePopup(app, L.e, hostFor(app, hwnd, L));
+    finish(app, hwnd, L);
+}
+
 // --- The pointer -------------------------------------------------------------------
 
 bool liveMouseDown(App& app, HWND hwnd, int x, int y) {
@@ -1077,6 +1099,10 @@ bool liveMouseDown(App& app, HWND hwnd, int x, int y) {
             return true;
         }
     }
+    // A press on the page takes the keys from an open find bar, as a press
+    // in the source does: what is typed next goes where the caret went,
+    // and a selection dragged out is the one that is copied (#319)
+    releaseSearchInput(app);
     size_t at = positionAtShown(app, L, gx, gy, 0);
     unsigned long long now = GetTickCount64();
     bool again = now - L.e.lastClickMs < GetDoubleClickTime() && std::fabs(px - L.pressX) < dpi(app, 4.0f) &&
@@ -1138,6 +1164,8 @@ void liveCaptureLost(App& app) {
     L.dragging = false;
     L.e.selectingWithMouse = false;
 }
+
+bool liveDragging(const App& app) { return app.editMode && state(app).dragging; }
 
 bool liveMouseUp(App& app, HWND hwnd, int, int) {
     LiveEditor& L = state(app);

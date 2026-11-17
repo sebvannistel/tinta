@@ -6,8 +6,7 @@
 #pragma once
 
 #include "app.h"
-
-struct LiveText;
+#include "live_text.h"
 
 // Switches Source and Live (the rail's pill, Ctrl+/); the caret stays on
 // its character and at its height in the window
@@ -26,6 +25,8 @@ bool liveMouseMove(App& app, HWND hwnd, int x, int y);
 bool liveMouseUp(App& app, HWND hwnd, int x, int y);
 // The mouse went elsewhere mid-drag (WM_CAPTURECHANGED, WM_CANCELMODE)
 void liveCaptureLost(App& app);
+// A selection is being dragged out on Live's page
+bool liveDragging(const App& app);
 // A finger held on the page (touch.cpp) takes its word, as a double-click
 // does, without the mouse's capture; its moves grow the selection by words
 // (liveMouseMove) until it lifts (liveMouseUp). False off the page and on
@@ -48,6 +49,11 @@ void renderLiveMenu(App& app);
 const LiveText& liveText(const App& app);
 // A rail button on the Live text; false for the ones that insert through the source
 bool liveRailCommand(App& app, HWND hwnd, int id);
+// The citation keys and figure ids the document being edited offers for
+// the key typed in text[from, caret), after its @ (docs/citations.md)
+std::vector<LiveText::Choice> citeChoices(App& app, const std::wstring& text, size_t from, size_t caret);
+// [@ typed at the page's caret, its list open: the Cite button without Zotero
+void liveTypeCitation(App& app, HWND hwnd);
 // The caret on the screen, for the IME's windows
 bool liveCaretClientPoint(App& app, D2D1_POINT_2F& top, float& height);
 // Where the live stretch is on the page as shown: its top and bottom, and

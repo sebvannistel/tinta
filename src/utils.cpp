@@ -1,16 +1,20 @@
 #include "utils.h"
+#include <filesystem>
+#include "input.h"
 #include "editor.h"
 #include "link_target.h"
 #include "render.h"
 #include "folding.h"
 #include "i18n.h"
 #include "signals.h"
+#include "page_style.h"
 
 #include <windows.h>
 #include <shellapi.h>
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 std::wstring toWide(const std::string& str) {
     if (str.empty()) return L"";
@@ -32,11 +36,35 @@ float measureText(App& app, const std::wstring& text, IDWriteTextFormat* format)
     return metrics.widthIncludingTrailingWhitespace;
 }
 
+const wchar_t* caseFoldTable() {
+    // Zero-filled until the first search asks for it, so it adds nothing to
+    // the executable; 128 KB once built
+    static wchar_t table[65536];
+    static const bool built = [] {
+        for (unsigned c = 0; c < 65536; ++c) table[c] = (wchar_t)c;
+        for (unsigned c = L'A'; c <= L'Z'; ++c) table[c] = (wchar_t)(c + 32);
+        // Windows lowers the rest. A failed call leaves a range as it is,
+        // which still folds A to Z. Surrogates stay: half a pair has no case
+        std::vector<wchar_t> lowered(65536);
+        auto lower = [&](unsigned first, unsigned last) {
+            int count = (int)(last - first + 1);
+            if (LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, table + first, count,
+                              lowered.data(), count, nullptr, nullptr, 0) == count) {
+                std::copy(lowered.begin(), lowered.begin() + count, table + first);
+            }
+        };
+        lower(0x80, 0xD7FF);
+        lower(0xE000, 0xFFFF);
+        return true;
+    }();
+    (void)built;
+    return table;
+}
+
 std::wstring toLower(const std::wstring& str) {
+    const wchar_t* fold = caseFoldTable();
     std::wstring result = str;
-    for (auto& c : result) {
-        c = towlower(c);
-    }
+    for (auto& c : result) c = fold[c];
     return result;
 }
 
@@ -217,6 +245,13 @@ bool scrollToHeadingId(App& app, const std::string& id) {
 
 void handleLinkClick(App& app) {
     if (app.hoveredLink.empty()) return;
+    // The page's tinta.css chip turns the folder sheet off for this
+    // document, or on again (page_style.h)
+    if (app.hoveredLink == "tinta:folder-sheet") {
+        page::setFolderSheetOff(app, !page::folderSheetOff(app));
+        if (app.hwnd) InvalidateRect(app.hwnd, nullptr, FALSE);
+        return;
+    }
     if (app.hoveredLink[0] == '#') {
         if (scrollToHeadingId(app, qmd::decodeLinkComponent(app.hoveredLink.substr(1))) && app.editMode) {
             // The next frame follows the source pane. Move it with the
@@ -224,7 +259,9 @@ void handleLinkClick(App& app) {
             editorFollowPreview(app);
         }
     } else {
-        openUrl(app.hoveredLink);
+        // Not as written: a document does not get to pick a program
+        openFromDocument(app, app.hwnd, app.hoveredLink,
+                         std::filesystem::path(toWide(app.currentFile)).parent_path().wstring());
     }
 }
 

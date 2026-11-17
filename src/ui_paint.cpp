@@ -3,6 +3,7 @@
 #pragma optimize("s", on)
 
 #include "ui_paint.h"
+#include "ui_scale.h"
 #include "d2d_init.h"
 
 #include <algorithm>
@@ -31,6 +32,20 @@ IDWriteTextFormat* textFormat(App& app, const wchar_t* family, float px, DWRITE_
         }
         cache.clear();
         owner = app.dwriteFactory;
+    }
+    // The interface language moved to other CJK faces, or away from them:
+    // the formats made before follow (nullptr is the system's fallback)
+    static int fallbackOrder = -2;
+    if (fallbackOrder != app.uiFontFallbackOrder) {
+        fallbackOrder = app.uiFontFallbackOrder;
+        for (auto& entry : cache) {
+            IDWriteTextFormat1* format1 = nullptr;
+            if (entry.second && SUCCEEDED(entry.second->QueryInterface(__uuidof(IDWriteTextFormat1),
+                                                                      reinterpret_cast<void**>(&format1)))) {
+                format1->SetFontFallback(app.uiFontFallback);
+                format1->Release();
+            }
+        }
     }
     px = std::max(1.0f, std::round(px * 4.0f) / 4.0f);
     std::wstring key = std::wstring(family) + L"|" + std::to_wstring((int)(px * 4)) + L"|" + std::to_wstring((int)weight) +
@@ -125,7 +140,7 @@ void shadow(App& app, const D2D1_RECT_F& r, float radius, D2D1_COLOR_F color, fl
     }
 }
 
-Surface surface(const App& app) {
+Surface pageSurface(const App& app) {
     const D2DTheme& th = app.theme;
     const D2D1_COLOR_F white = D2D1::ColorF(1, 1, 1, 1);
     Surface s;
@@ -139,4 +154,152 @@ Surface surface(const App& app) {
     return s;
 }
 
+Surface surface(const App& app) {
+    // A CSS theme's --ui-* colours where it sets them (docs/css-themes.md)
+    const D2DTheme& th = app.theme;
+    Surface s = pageSurface(app);
+    s.fill = themeUiPanel(th, s.fill);
+    s.text = themeUiText(th);
+    s.border = themeUiBorder(th, alpha(s.text, th.isDark ? 0.16f : 0.15f));
+    s.muted = alpha(s.text, 0.56f);
+    s.accent = themeUiAccent(th);
+    s.shadow = D2D1::ColorF(0, 0, 0, themeUiDark(th) ? 0.40f : 0.12f);
+    return s;
+}
+
+void label(App& app, const wchar_t* text, uiscale::Type role, const D2D1_RECT_F& box, D2D1_COLOR_F color,
+           DWRITE_TEXT_ALIGNMENT align) {
+    IDWriteTextFormat* fmt = uiscale::font(app, role);
+    if (!fmt || !text || box.right <= box.left) return;
+    fmt->SetTextAlignment(align);
+    app.brush->SetColor(color);
+    app.renderTarget->DrawText(text, (UINT32)wcslen(text), fmt, box, app.brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    fmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+}
+
+float labelWidth(App& app, const wchar_t* text, uiscale::Type role) {
+    if (!text || !text[0]) return 0.0f;
+    IDWriteTextLayout* layout = makeLayout(app, text, uiscale::font(app, role), 100000.0f, 100.0f);
+    if (!layout) return 0.0f;
+    const float w = metrics(layout).widthIncludingTrailingWhitespace;
+    layout->Release();
+    return w;
+}
+
+float lineTop(const App& app, float top, float height, uiscale::Type role) {
+    return top + (height - dpi(app, uiscale::lineHeight(role))) * 0.5f;
+}
+
+void sectionLabel(App& app, const wchar_t* text, float x, float y, float maxW, D2D1_COLOR_F color) {
+    std::wstring upper = text ? text : L"";
+    if (upper.empty() || maxW <= 0.0f) return;
+    CharUpperBuffW(upper.data(), (DWORD)upper.size());
+    IDWriteTextLayout* layout = nullptr;
+    app.dwriteFactory->CreateTextLayout(upper.c_str(), (UINT32)upper.size(), uiscale::font(app, uiscale::Type::Micro),
+                                        maxW, dpi(app, 16.0f), &layout);
+    if (!layout) return;
+    IDWriteTextLayout1* spaced = nullptr;
+    if (SUCCEEDED(layout->QueryInterface(__uuidof(IDWriteTextLayout1), reinterpret_cast<void**>(&spaced)))) {
+        spaced->SetCharacterSpacing(0.0f, dpi(app, 0.6f), 0.0f, {0, (UINT32)upper.size()});
+        spaced->Release();
+    }
+    app.brush->SetColor(color);
+    app.renderTarget->DrawTextLayout(D2D1::Point2F(x, y + dpi(app, 1.0f)), layout, app.brush,
+                                     D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    layout->Release();
+}
+
+D2D1_COLOR_F ink(const D2DTheme& theme, float share, float alpha) {
+    D2D1_COLOR_F c = themeUiText(theme);
+    c.a = share * alpha;
+    return c;
+}
+
+D2D1_RECT_F toggle(App& app, const D2D1_RECT_F& slot, bool on, const D2DTheme& theme, float alpha) {
+    const float w = dpi(app, 40.0f), h = dpi(app, 20.0f);
+    const float x = slot.right - w, y = (slot.top + slot.bottom - h) * 0.5f;
+    D2D1_COLOR_F track = on ? themeUiAccent(theme) : themeUiText(theme);
+    track.a = (on ? 0.9f : 0.25f) * alpha;
+    app.brush->SetColor(track);
+    app.renderTarget->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x, y, x + w, y + h), h / 2, h / 2),
+                                           app.brush);
+    const float knobR = h / 2 - dpi(app, uiscale::sp2);
+    const float knobX = on ? x + w - h / 2 : x + h / 2;
+    app.brush->SetColor(D2D1::ColorF(1, 1, 1, alpha));
+    app.renderTarget->FillEllipse(D2D1::Ellipse(D2D1::Point2F(knobX, y + h / 2), knobR, knobR), app.brush);
+    return D2D1::RectF(x, y, x + w, y + h);
+}
+
+void closeCross(App& app, const D2D1_RECT_F& box, D2D1_COLOR_F color) {
+    const float cx = (box.left + box.right) * 0.5f, cy = (box.top + box.bottom) * 0.5f;
+    const float arm = dpi(app, uiscale::sp4);
+    app.brush->SetColor(color);
+    app.renderTarget->DrawLine(D2D1::Point2F(cx - arm, cy - arm), D2D1::Point2F(cx + arm, cy + arm), app.brush,
+                               dpi(app, 1.5f));
+    app.renderTarget->DrawLine(D2D1::Point2F(cx + arm, cy - arm), D2D1::Point2F(cx - arm, cy + arm), app.brush,
+                               dpi(app, 1.5f));
+}
+
+void menuPanel(App& app, const D2D1_RECT_F& box, float alpha) {
+    const Surface s = surface(app);
+    const float radius = dpi(app, uiscale::radiusCard);
+    shadow(app, box, radius, paint::alpha(s.shadow, alpha), 1.5f);
+    fillRound(app, box, radius, paint::alpha(s.fill, alpha));
+    strokeRound(app, box, radius, paint::alpha(s.border, alpha), dpi(app, 1.0f));
+}
+
+void menuRow(App& app, const D2D1_RECT_F& row, const wchar_t* label, const wchar_t* keys, bool lit, bool enabled,
+             float alpha, float indent) {
+    using namespace uiscale;
+    if (lit && enabled) {
+        fillRound(app, row, dpi(app, radiusControl), paint::alpha(themeUiAccent(app.theme), 0.18f * alpha));
+    }
+    const float h = row.bottom - row.top;
+    float right = row.right - dpi(app, sp8);
+    if (keys && keys[0]) {
+        const float kw = labelWidth(app, keys, Type::Small);
+        paint::label(app, keys, Type::Small,
+                     D2D1::RectF(right - kw - 1.0f, lineTop(app, row.top, h, Type::Small), right, row.bottom),
+                     ink(app.theme, enabled ? inkSecondary : inkDisabled, alpha));
+        right -= kw + dpi(app, sp12);
+    }
+    paint::label(app, label, Type::Body,
+                 D2D1::RectF(row.left + dpi(app, sp8) + indent, lineTop(app, row.top, h, Type::Body), right, row.bottom),
+                 ink(app.theme, enabled ? inkPrimary : inkDisabled, alpha));
+}
+
+void menuSeparator(App& app, float left, float right, float top, float alpha) {
+    const float y = std::floor(top + dpi(app, uiscale::menuSeparator) * 0.5f) + 0.5f;
+    line(app, D2D1::Point2F(left, y), D2D1::Point2F(right, y), paint::alpha(surface(app).border, alpha), dpi(app, 1.0f));
+}
+
 }  // namespace paint
+
+// The interface's type roles (ui_scale.h)
+namespace uiscale {
+
+namespace {
+struct Role {
+    float size, line;
+    bool semibold;
+};
+constexpr Role kRoles[] = {
+    {11.0f, 14.0f, true},   // Micro
+    {12.0f, 16.0f, false},  // Small
+    {13.0f, 18.0f, false},  // Body
+    {13.0f, 18.0f, true},   // Strong
+    {16.0f, 22.0f, true},   // Subtitle
+    {20.0f, 28.0f, true},   // Title
+};
+}  // namespace
+
+float fontSize(Type role) { return kRoles[(int)role].size; }
+float lineHeight(Type role) { return kRoles[(int)role].line; }
+bool semibold(Type role) { return kRoles[(int)role].semibold; }
+
+IDWriteTextFormat* font(App& app, Type role, bool wrap) {
+    return paint::textFormat(app, paint::uiFace(), dpi(app, fontSize(role)),
+                             semibold(role) ? DWRITE_FONT_WEIGHT_SEMI_BOLD : DWRITE_FONT_WEIGHT_NORMAL, wrap);
+}
+
+}  // namespace uiscale

@@ -22,6 +22,9 @@
 
 int testThemeColours(App& app, const std::filesystem::path& dir);
 int testEmphasisColours(App& app, const std::filesystem::path& dir);
+int testCssThemes(App& app, const std::filesystem::path& dir);
+int testPageStyles(App& app, const std::filesystem::path& dir);
+int testThemeChrome(App& app, const std::filesystem::path& dir);
 int testHandEditedThemes(App& app, const std::filesystem::path& dir);
 
 
@@ -114,8 +117,10 @@ void themeEditorFonts(const std::filesystem::path& dir) {
     };
 
     open(L"Editor fonts");
-    check(app.themeEditorFont == L"Segoe UI" && app.themeEditorHeadingFont.empty() &&
-          app.themeEditorCodeFont == L"Consolas", "the editor starts from Paper's faces");
+    check(app.themeEditorFont == themeAt(0).fontFamily &&
+              app.themeEditorHeadingFont == (themeAt(0).headingFontFamily ? themeAt(0).headingFontFamily : L"") &&
+              app.themeEditorCodeFont == themeAt(0).codeFontFamily,
+          "the editor starts from Paper's faces");
     pick(TE_FONT_HEADING, L"Georgia");
     pick(TE_FONT_CODE, L"Courier New");
     pick(TE_FONT_TEXT, L"Verdana");
@@ -127,6 +132,9 @@ void themeEditorFonts(const std::filesystem::path& dir) {
           section.find("\nheadingfont=Georgia\n") != std::string::npos &&
           section.find("\ncodefont=Courier New\n") != std::string::npos,
           "themes.ini holds the text, heading and code faces");
+    // Made from Paper: the built-in themes' design goes with it (D2DTheme::design)
+    check(section.find("\ndesign=1\n") != std::string::npos && app.theme.design == 1 && app.theme.headingSize[0] == 34,
+          "a theme made in the editor from a built-in one keeps that theme's design");
     check(_wcsicmp(app.theme.fontFamily, L"Verdana") == 0 &&
           _wcsicmp(themeHeadingFont(app.theme), L"Georgia") == 0 &&
           _wcsicmp(app.theme.codeFontFamily, L"Courier New") == 0,
@@ -646,6 +654,9 @@ int main(int argc, char** argv) {
               "DOCX linked code preserves the link color");
         failures += testThemeColours(app, dir);
         failures += testEmphasisColours(app, dir);
+        failures += testCssThemes(app, dir);
+        failures += testPageStyles(app, dir);
+        failures += testThemeChrome(app, dir);
         failures += testHandEditedThemes(app, dir);
         themeEditorFontsApply(app, read(TINTA_THEME_FONTS_FIXTURE));
     }

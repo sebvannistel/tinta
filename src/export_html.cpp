@@ -5,6 +5,9 @@
 // no external assets: local images are embedded as data URIs.
 
 #include "export.h"
+#include "css.h"
+#include "page_style.h"
+#include "font_faces.h"
 
 #include "editor.h"
 #include "file_utils.h"
@@ -188,8 +191,9 @@ WrappedLines wrapLines(App& app, const std::wstring& text, float wrapWidth,
     if (text.empty() || !app.dwriteFactory) return out;
     constexpr float kHuge = 100000.0f;
     IDWriteTextFormat* format = nullptr;
+    const wchar_t* family = style.mono ? app.theme.codeFontFamily : app.theme.fontFamily;
     app.dwriteFactory->CreateTextFormat(
-        style.mono ? app.theme.codeFontFamily : app.theme.fontFamily, nullptr,
+        fontfaces::name(family), fontfaces::collection(family),
         style.bold ? DWRITE_FONT_WEIGHT_SEMI_BOLD : DWRITE_FONT_WEIGHT_NORMAL,
         style.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
         DWRITE_FONT_STRETCH_NORMAL, diagramFontSize(style, scale), L"en-us",
@@ -316,15 +320,15 @@ struct FlowStyle {
     float strokeWidth = 1.5f;
     bool customFill = false;
     bool customStroke = false;
-    bool customText = false;
 };
 
 FlowStyle flowResolveStyle(const App& app, const mermaid::Diagram& diagram,
                            const mermaid::Node& node, float scale) {
     FlowStyle resolved;
-    resolved.fill = app.theme.codeBackground;
-    resolved.stroke = app.theme.accent;
-    resolved.text = app.theme.text;
+    const FlowchartColors colors = flowchartColors(app);
+    resolved.fill = colors.nodeFill;
+    resolved.stroke = colors.nodeBorder;
+    resolved.text = colors.nodeText;
     resolved.strokeWidth = 1.5f * scale;
     auto apply = [&](const mermaid::Style& style) {
         if (style.hasFill) {
@@ -335,10 +339,7 @@ FlowStyle flowResolveStyle(const App& app, const mermaid::Diagram& diagram,
             resolved.stroke = flowColor(style.stroke);
             resolved.customStroke = true;
         }
-        if (style.hasText) {
-            resolved.text = flowColor(style.text);
-            resolved.customText = true;
-        }
+        if (style.hasText) resolved.text = flowColor(style.text);
         if (style.hasStrokeWidth) {
             resolved.strokeWidth = style.strokeWidth * scale;
         }
@@ -547,16 +548,12 @@ mermaidext::Built buildFlowchartPrims(App& app, const std::string& source,
         }
     }
 
-    D2D1_COLOR_F connectorColor = app.theme.text;
-    connectorColor.a = app.theme.isDark ? 0.7f : 0.6f;
-    D2D1_COLOR_F chipStroke = connectorColor;
-    chipStroke.a *= 0.6f;
-    D2D1_COLOR_F groupFill = app.theme.codeBackground;
-    groupFill.a *= 0.55f;
-    D2D1_COLOR_F groupBorder = app.theme.text;
-    groupBorder.a = 0.28f;
-    D2D1_COLOR_F groupTitle = app.theme.text;
-    groupTitle.a = 0.78f;
+    const FlowchartColors colors = flowchartColors(app);
+    D2D1_COLOR_F connectorColor = colors.line;
+    D2D1_COLOR_F chipStroke = colors.labelBorder;
+    D2D1_COLOR_F groupFill = colors.clusterFill;
+    D2D1_COLOR_F groupBorder = colors.clusterBorder;
+    D2D1_COLOR_F groupTitle = colors.clusterText;
 
     struct FlowConn {
         std::vector<D2D1_POINT_2F> points;
@@ -847,13 +844,24 @@ mermaidext::Built buildFlowchartPrims(App& app, const std::string& source,
         box.stroke = Role::Custom;
         primCustom(box, chipStroke);
         box.strokeWidth = 1.2f * scale;
+        if (app.theme.mermaid.edgeLabel) {
+            // A fill of its own (--mermaid-edge-label-background): a prim
+            // holds one custom colour, so the fill goes first on its own
+            Prim fill = box;
+            fill.fill = Role::Custom;
+            fill.stroke = Role::None;
+            primCustom(fill, colors.labelFill);
+            result.prims.push_back(std::move(fill));
+            box.fill = Role::None;
+        }
         result.prims.push_back(std::move(box));
 
         Prim label;
         label.type = PrimType::Text;
         label.text = toUtf8(chip.text);
         label.style = textStyle;
-        label.fill = Role::Text;
+        label.fill = Role::Custom;
+        primCustom(label, colors.labelText);
         label.x1 = chip.rect.left + labelPadX;
         label.y1 = chip.rect.top + labelPadY;
         label.x2 = chip.rect.right - labelPadX;
@@ -906,12 +914,9 @@ mermaidext::Built buildFlowchartPrims(App& app, const std::string& source,
         label.type = PrimType::Text;
         label.text = toUtf8(labels[i]);
         label.style = textStyle;
-        if (style.customText) {
-            label.fill = Role::Custom;
-            primCustom(label, style.text);
-        } else {
-            label.fill = Role::Text;
-        }
+        // A node's own text colour, else the flowchart's
+        label.fill = Role::Custom;
+        primCustom(label, style.text);
         label.x1 = rect.left +
                    mermaid::leftNotch(node.shape, rect.bottom - rect.top) + insetX;
         label.y1 = rect.top + insetY;
@@ -959,7 +964,7 @@ mermaidext::Built buildDiagramPrims(App& app, const std::string& sourceUtf8,
         const wchar_t* family =
             style.mono ? app.theme.codeFontFamily : app.theme.fontFamily;
         app.dwriteFactory->CreateTextFormat(
-            family, nullptr,
+            fontfaces::name(family), fontfaces::collection(family),
             style.bold ? DWRITE_FONT_WEIGHT_SEMI_BOLD
                        : DWRITE_FONT_WEIGHT_NORMAL,
             style.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
@@ -1068,6 +1073,7 @@ struct ExportCtx {
     // Cumulative PlantUML render time left in this export; shared across
     // all fences through the recursion (see plantumlFenceSvg).
     int plantumlBudgetMsLeft = kPlantumlExportBudgetMs;
+    std::map<std::string, int> headingSlugs;  // ids given so far, as the page counts them
 };
 
 void walk(ExportCtx& ctx, const ElementPtr& elem);
@@ -1113,16 +1119,12 @@ std::string plantumlFenceSvg(ExportCtx& ctx, const std::string& code) {
     const std::wstring toolPath = ctx.app.plantumlTool.isJar
                                       ? ctx.app.plantumlTool.jar
                                       : ctx.app.plantumlTool.program;
-    mermaidext::Prim colorPrim{};
     const std::string preambleText = plantuml::preamble(
         wideToUtf8Str(ctx.app.theme.fontFamily), kDiagramFontSize,
-        colorHexNoHash(
-            resolveDiagramRole(ctx.app, colorPrim, mermaidext::Role::Text)),
+        colorHexNoHash(plantumlRoleColor(ctx.app, mermaidext::Role::Text)),
         ctx.app.theme.isDark,
-        colorHexNoHash(
-            resolveDiagramRole(ctx.app, colorPrim, mermaidext::Role::Fill)),
-        colorHexNoHash(
-            resolveDiagramRole(ctx.app, colorPrim, mermaidext::Role::Stroke)));
+        colorHexNoHash(plantumlRoleColor(ctx.app, mermaidext::Role::Fill)),
+        colorHexNoHash(plantumlRoleColor(ctx.app, mermaidext::Role::Stroke)));
 
     std::string sourceWithPreamble = code;
     if (!plantuml::injectPreamble(sourceWithPreamble, preambleText)) return {};
@@ -1250,6 +1252,47 @@ void walk(ExportCtx& ctx, const ElementPtr& elem) {
             break;
         case ElementType::Properties:
             break;  // frontmatter stays out of the export, like print
+        case ElementType::Figure:
+            ctx.out += elem->language == "tbl" ? "<figure class=\"table\"" : "<figure";
+            if (!elem->title.empty()) ctx.out += " id=\"" + htmlEscape(elem->title) + "\"";
+            ctx.out += ">\n";
+            walkChildren(ctx, elem);
+            ctx.out += "</figure>\n";
+            break;
+        case ElementType::Caption:
+            ctx.out += "<figcaption>";
+            walkChildren(ctx, elem);
+            ctx.out += "</figcaption>\n";
+            break;
+        // Citations and references in pandoc's own markup
+        case ElementType::Citation:
+            ctx.out += "<span class=\"citation\" data-cites=\"" + htmlEscape(elem->language) + "\">";
+            if (!elem->url.empty()) ctx.out += "<a href=\"" + htmlEscape(elem->url) + "\" role=\"doc-biblioref\">";
+            walkChildren(ctx, elem);
+            if (!elem->url.empty()) ctx.out += "</a>";
+            ctx.out += "</span>";
+            break;
+        case ElementType::CrossReference:
+            if (!elem->url.empty()) ctx.out += "<a href=\"" + htmlEscape(elem->url) + "\">";
+            walkChildren(ctx, elem);
+            if (!elem->url.empty()) ctx.out += "</a>";
+            break;
+        case ElementType::Bibliography:
+            ctx.out += std::string("<div id=\"refs\" class=\"references csl-bib-body") +
+                       (elem->language == "hanging" ? " hanging-indent" : "") + "\" role=\"list\">\n";
+            walkChildren(ctx, elem);
+            ctx.out += "</div>\n";
+            break;
+        case ElementType::BibEntry:
+            ctx.out += "<div id=\"" + htmlEscape(elem->title) + "\" class=\"csl-entry\" role=\"listitem\">";
+            if (!elem->text.empty()) {
+                ctx.out += "<div class=\"csl-left-margin\">" + htmlEscape(elem->text) +
+                           "</div><div class=\"csl-right-inline\">";
+            }
+            walkChildren(ctx, elem);
+            if (!elem->text.empty()) ctx.out += "</div>";
+            ctx.out += "</div>\n";
+            break;
         case ElementType::Paragraph:
             ctx.out += elem->language == "footnote-backlinks" ? "<p class=\"footnote-backlinks\">" : "<p>";
             walkChildren(ctx, elem);
@@ -1257,7 +1300,26 @@ void walk(ExportCtx& ctx, const ElementPtr& elem) {
             break;
         case ElementType::Heading: {
             int level = std::max(1, std::min(6, elem->level));
-            ctx.out += "<h" + std::to_string(level) + ">";
+            // The id the page gives it, so links to #a-heading and #sec:id
+            // work in the browser too: its {#id}, else its slug
+            std::string id = elem->title;
+            if (id.empty()) {
+                std::wstring words;
+                std::function<void(const ElementPtr&)> collect = [&](const ElementPtr& e) {
+                    if (e->type == ElementType::Text) {
+                        if (e->language != "section-number") words += toWide(e->text);
+                    } else {
+                        for (const auto& c : e->children) collect(c);
+                    }
+                };
+                collect(elem);
+                words.erase(0, words.find_first_not_of(L' '));  // the space after a number
+                const std::string base = slugifyHeading(words);
+                int& n = ctx.headingSlugs[base];
+                id = n == 0 ? base : base + "-" + std::to_string(n);
+                ++n;
+            }
+            ctx.out += "<h" + std::to_string(level) + (id.empty() ? std::string() : " id=\"" + htmlEscape(id) + "\"") + ">";
             walkChildren(ctx, elem);
             ctx.out += "</h" + std::to_string(level) + ">\n";
             break;
@@ -1408,7 +1470,11 @@ void walk(ExportCtx& ctx, const ElementPtr& elem) {
             walkChildren(ctx, elem);
             break;
         case ElementType::Text:
-            ctx.out += htmlEscape(elem->text);
+            if (elem->language == "section-number") {
+                ctx.out += "<span class=\"header-section-number\">" + htmlEscape(elem->text) + "</span>";
+            } else {
+                ctx.out += htmlEscape(elem->text);
+            }
             break;
         case ElementType::Code:
             ctx.out += "<code>";
@@ -1544,6 +1610,9 @@ std::string themeCss(const App& app, const std::string& bodyFont,
            ";padding:2px 6px;border-radius:4px;font-size:0.9em;}";
     css += "pre{background:" + colorCss(t.codeBackground) +
            ";padding:14px 16px;border-radius:8px;overflow-x:auto;}";
+    // Long lines wrap as they do in the viewer (#324); off, the block
+    // scrolls sideways
+    if (app.wrapCode) css += "pre{white-space:pre-wrap;overflow-wrap:anywhere;}";
     css += "pre code{background:none;padding:0;}";
     if (t.inlineCode) {
         css += "pre code{color:" + colorCss(t.code) + ";}";
@@ -1577,6 +1646,16 @@ std::string themeCss(const App& app, const std::string& bodyFont,
         }
     }
     css += "table{border-collapse:collapse;margin:1em 0;}";
+    // Scholar's numbered figures and captioned tables
+    D2D1_COLOR_F captionText = t.text;
+    captionText.a = 0.8f;
+    css += "figure{margin:1em 0;}figure p{margin:0;}figure table{margin:.4em 0;}"
+           "figcaption{color:" + colorCss(captionText) + ";margin:.4em 0 1em;}";
+    // ... and its references, as pandoc lays them out
+    css += ".citation a,a[role=doc-biblioref]{text-decoration:none;}"
+           ".csl-entry{margin:.5em 0;}.hanging-indent .csl-entry{padding-left:2em;text-indent:-2em;}"
+           ".csl-left-margin{float:left;min-width:2.5em;padding-right:.5em;}"
+           ".csl-right-inline{margin-left:3em;}";
     css += "th,td{border:1px solid " + colorCss(border) +
            ";padding:6px 13px;}";
     css += "th{background:" + colorCss(t.codeBackground) + ";}";
@@ -1637,6 +1716,50 @@ bool exportHtmlFile(App& app, const std::wstring& path) {
                "initial-scale=1\"/>\n";
     ctx.out += "<title>" + htmlEscape(title) + "</title>\n";
     ctx.out += "<style>" + themeCss(app, bodyFont, monoFont) + "</style>\n";
+    // A CSS theme's own sheet follows, so a browser draws what Tinta does
+    // and what Tinta leaves to it (docs/specs/theming.md)
+    if (std::string sheet = themeSheetCss(app.currentThemeIndex); !sheet.empty()) {
+        ctx.out += "<style>\n" + sheet + "</style>\n";
+    }
+    // and the folder's tinta.css after it, as on screen
+    if (std::string local = page::folderSheetCss(app); !local.empty()) {
+        ctx.out += "<style>\n" + local + "</style>\n";
+    }
+    // Its @font-face files go beside the page, in a folder named for it,
+    // and faces declared after the sheet's own point a browser there
+    if (std::shared_ptr<const css::Sheet> parsed = themeSheet(app.currentThemeIndex)) {
+        const size_t slash = path.find_last_of(L"/\\");
+        const std::wstring dir = slash == std::wstring::npos ? std::wstring(L".") : path.substr(0, slash);
+        std::wstring stem = slash == std::wstring::npos ? path : path.substr(slash + 1);
+        if (const size_t dot = stem.find_last_of(L'.'); dot != std::wstring::npos) stem.resize(dot);
+        const std::wstring folder = stem + L"_fonts";
+        std::string faces;
+        for (const css::FontFace& face : css::fontFaces(*parsed)) {
+            for (const auto& source : face.sources) {
+                if (source.rfind("local:", 0) == 0) continue;
+                const std::wstring from = toWide(source);
+                const size_t cut = from.find_last_of(L"/\\");
+                const std::wstring name = cut == std::wstring::npos ? from : from.substr(cut + 1);
+                CreateDirectoryW((dir + L"\\" + folder).c_str(), nullptr);
+                if (!CopyFileW(from.c_str(), (dir + L"\\" + folder + L"\\" + name).c_str(), FALSE)) continue;
+                std::string family;
+                for (char c : face.family) {
+                    if (c == '"' || c == '\\') family += '\\';
+                    family += c;
+                }
+                faces += "@font-face{font-family:\"" + family + "\";src:url(\"" + toUtf8(folder + L"/" + name) +
+                         "\");font-weight:" + std::to_string(face.weightMin) +
+                         (face.weightMax != face.weightMin ? " " + std::to_string(face.weightMax) : std::string()) +
+                         ";font-style:" +
+                         (face.style == css::FontStyle::Italic    ? "italic"
+                          : face.style == css::FontStyle::Oblique ? "oblique"
+                                                                  : "normal") +
+                         "}\n";
+                break;
+            }
+        }
+        if (!faces.empty()) ctx.out += "<style>\n" + faces + "</style>\n";
+    }
     if (std::any_of(app.root->children.begin(), app.root->children.end(), [](const ElementPtr& e) { return e->type == ElementType::Footnotes; }))
         ctx.out += "<style>.footnote{position:relative;padding-left:2em}.footnote>span{position:absolute;left:0}.footnote>p:first-of-type{margin-top:0}.footnote-backlinks{font-size:.8em}</style>\n";
     ctx.out += "</head>\n<body>\n";

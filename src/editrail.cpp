@@ -3,6 +3,8 @@
 // Line numbers live in the editor's own slim gutter beside it, and the
 // thread seam (also here) ties source blocks to their render.
 
+#include "ui_paint.h"
+#include "ui_scale.h"
 #include "editrail.h"
 #include "d2d_init.h"
 #include "overlays.h"
@@ -120,6 +122,9 @@ static const RailBtn kInsertBtns[] = {
      DWRITE_FONT_STYLE_NORMAL, L"Segoe UI", false, "rail.diagram", L""},
     {22, L"\U0001F5BC", 12.0f, DWRITE_FONT_WEIGHT_NORMAL,
      DWRITE_FONT_STYLE_NORMAL, L"Segoe UI", false, "rail.image", L""},
+    // A citation: Zotero's picker, or [@ and the bibliography's keys
+    {24, L"@", 13.5f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+     L"Segoe UI", false, "rail.cite", L""},
 };
 // Source | Live (docs/live-editor.md): the pill at the rail's top
 static const RailBtn kModeBtns[] = {
@@ -173,11 +178,14 @@ void renderEditRail(App& app) {
     float slide = railW * (1.0f - app.editRailAnim);
     float H = (float)app.height;
 
+    // Part of the window's frame, as the strip is: a CSS theme's
+    // --ui-background, --ui-text and --ui-accent
     D2D1_COLOR_F railBg =
         th.isDark ? railMix(th.background, D2D1::ColorF(0, 0, 0, 1), 0.45f)
                   : railMix(th.background, D2D1::ColorF(0, 0, 0, 1), 0.06f);
-    D2D1_COLOR_F text = th.text;
-    D2D1_COLOR_F accent = th.accent;
+    if (th.uiBackground) railBg = *th.uiBackground;
+    D2D1_COLOR_F text = themeUiText(th);
+    D2D1_COLOR_F accent = themeUiAccent(th);
     float accentLum =
         0.299f * accent.r + 0.587f * accent.g + 0.114f * accent.b;
     D2D1_COLOR_F onAccent = accentLum > 0.45f
@@ -193,7 +201,7 @@ void renderEditRail(App& app) {
 
     app.brush->SetColor(railBg);
     app.renderTarget->FillRectangle(D2D1::RectF(0, 0, railW, H), app.brush);
-    app.brush->SetColor(railA(text, 0.07f));
+    app.brush->SetColor(themeUiBorder(th, railA(text, 0.07f)));
     app.renderTarget->FillRectangle(
         D2D1::RectF(railW - 1.0f, 0, railW, H), app.brush);
 
@@ -356,11 +364,11 @@ void renderEditRail(App& app) {
                                    : railMix(th.background,
                                              D2D1::ColorF(1, 1, 1, 1), 0.5f);
             fbg.a = 0.96f;
-            app.brush->SetColor(fbg);
+            app.brush->SetColor(themeUiPanel(th, fbg));
             app.renderTarget->FillRoundedRectangle(
                 D2D1::RoundedRect(fr, dpi(app, 7.0f), dpi(app, 7.0f)),
                 app.brush);
-            app.brush->SetColor(railA(text, 0.14f));
+            app.brush->SetColor(themeUiBorder(th, railA(text, 0.14f)));
             app.renderTarget->DrawRoundedRectangle(
                 D2D1::RoundedRect(fr, dpi(app, 7.0f), dpi(app, 7.0f)),
                 app.brush, 1.0f);
@@ -510,18 +518,19 @@ void renderEditCtxMenu(App& app) {
     if (!app.editCtxOpen || !app.renderTarget || !app.dwriteFactory) return;
 
     const D2DTheme& th = app.theme;
-    D2D1_COLOR_F text = th.text;
-    D2D1_COLOR_F accent = th.accent;
+    D2D1_COLOR_F text = themeUiText(th);
+    D2D1_COLOR_F accent = themeUiAccent(th);
     D2D1_COLOR_F menuBg =
         th.isDark ? railMix(th.background, D2D1::ColorF(0, 0, 0, 1), 0.25f)
                   : railMix(th.background, D2D1::ColorF(1, 1, 1, 1), 0.55f);
     menuBg.a = 0.97f;
+    menuBg = themeUiPanel(th, menuBg);
 
     float w = dpi(app, 232.0f);
-    float rowH = dpi(app, 34.0f);
-    float hdH = dpi(app, 24.0f);
-    float sepH = dpi(app, 9.0f);
-    float padV = dpi(app, 4.0f);
+    float rowH = dpi(app, uiscale::rowMenu);
+    float hdH = dpi(app, uiscale::menuLabelRow);
+    float sepH = dpi(app, uiscale::menuSeparator);
+    float padV = dpi(app, uiscale::menuPad);
 
     float totalH = padV * 2.0f;
     for (const ECtxItem& it : kECtx) {
@@ -544,27 +553,12 @@ void renderEditCtxMenu(App& app) {
 
     if (!app.editCtxRailOnly) {
     D2D1_RECT_F panel = D2D1::RectF(mx, my, mx + w, my + totalH);
-    // Soft shadow, then the acrylic-ish panel
-    app.brush->SetColor(D2D1::ColorF(0, 0, 0, 0.30f));
-    app.renderTarget->FillRoundedRectangle(
-        D2D1::RoundedRect(D2D1::RectF(panel.left + dpi(app, 2.0f),
-                                      panel.top + dpi(app, 4.0f),
-                                      panel.right + dpi(app, 2.0f),
-                                      panel.bottom + dpi(app, 4.0f)),
-                          dpi(app, 8.0f), dpi(app, 8.0f)),
-        app.brush);
-    app.brush->SetColor(menuBg);
-    app.renderTarget->FillRoundedRectangle(
-        D2D1::RoundedRect(panel, dpi(app, 8.0f), dpi(app, 8.0f)), app.brush);
-    app.brush->SetColor(railA(text, 0.12f));
-    app.renderTarget->DrawRoundedRectangle(
-        D2D1::RoundedRect(panel, dpi(app, 8.0f), dpi(app, 8.0f)), app.brush,
-        1.0f);
+    paint::menuPanel(app, panel);
 
     float cy = my + padV;
     for (const ECtxItem& it : kECtx) {
         if (it.id == 0) {
-            IDWriteTextLayout* hl = railLayout(app, tr(app, it.label), 10.0f,
+            IDWriteTextLayout* hl = railLayout(app, tr(app, it.label), uiscale::fontSize(uiscale::Type::Micro),
                                                DWRITE_FONT_WEIGHT_SEMI_BOLD);
             if (hl) {
                 DWRITE_TEXT_METRICS m{};
@@ -587,7 +581,7 @@ void renderEditCtxMenu(App& app) {
             app.brush->SetColor(subOpen ? railA(accent, 0.16f)
                                         : railA(text, 0.08f));
             app.renderTarget->FillRoundedRectangle(
-                D2D1::RoundedRect(r, dpi(app, 5.0f), dpi(app, 5.0f)),
+                D2D1::RoundedRect(r, dpi(app, uiscale::radiusControl), dpi(app, uiscale::radiusControl)),
                 app.brush);
         }
         float alpha = disabled ? 0.38f : 1.0f;
@@ -604,22 +598,23 @@ void renderEditCtxMenu(App& app) {
         if (ll) {
             DWRITE_TEXT_METRICS m{};
             ll->GetMetrics(&m);
-            railDraw(app, ll, r.left + dpi(app, 34.0f),
+            railDraw(app, ll, r.left + dpi(app, uiscale::sp32),
                      cy + (rowH - m.height) * 0.5f,
                      subOpen ? railA(accent, 0.95f)
                              : railA(text, 0.92f * alpha));
             ll->Release();
         }
         if (it.hint[0]) {
-            IDWriteTextLayout* hl = railLayout(app, it.hint, 11.0f,
+            const bool shortcut = wcsncmp(it.hint, L"Ctrl", 4) == 0;
+            IDWriteTextLayout* hl = railLayout(app, it.hint, shortcut ? 12.0f : 11.0f,
                                                DWRITE_FONT_WEIGHT_NORMAL,
-                                               L"Consolas");
+                                               shortcut ? L"Segoe UI" : L"Consolas");
             if (hl) {
                 DWRITE_TEXT_METRICS m{};
                 hl->GetMetrics(&m);
-                railDraw(app, hl, r.right - dpi(app, 10.0f) - m.width,
+                railDraw(app, hl, r.right - dpi(app, uiscale::sp8) - m.width,
                          cy + (rowH - m.height) * 0.5f,
-                         railA(text, 0.45f * alpha));
+                         railA(text, (disabled ? uiscale::inkDisabled : uiscale::inkSecondary)));
                 hl->Release();
             }
         }
@@ -642,31 +637,24 @@ void renderEditCtxMenu(App& app) {
     // Submenus, anchored beside their parent row
     if (app.editCtxSub == 2) {
         float sw = dpi(app, 240.0f);
-        float srowH = dpi(app, 34.0f);
-        float sh = dpi(app, 30.0f) + 10 * (srowH + dpi(app, 2.0f)) +
-                   dpi(app, 8.0f);
+        float srowH = dpi(app, uiscale::rowMenu);
+        float sh = dpi(app, uiscale::menuPad + uiscale::menuLabelRow) + 10 * srowH +
+                   dpi(app, uiscale::menuPad);
         float sx = std::min(mx + w + dpi(app, 4.0f),
                             (float)app.width - sw - dpi(app, 8.0f));
         float sy = std::min(subAnchorY,
                             (float)app.height - sh - dpi(app, 8.0f));
         D2D1_RECT_F sp = D2D1::RectF(sx, sy, sx + sw, sy + sh);
-        app.brush->SetColor(menuBg);
-        app.renderTarget->FillRoundedRectangle(
-            D2D1::RoundedRect(sp, dpi(app, 8.0f), dpi(app, 8.0f)),
-            app.brush);
-        app.brush->SetColor(railA(text, 0.12f));
-        app.renderTarget->DrawRoundedRectangle(
-            D2D1::RoundedRect(sp, dpi(app, 8.0f), dpi(app, 8.0f)),
-            app.brush, 1.0f);
+        paint::menuPanel(app, sp);
         IDWriteTextLayout* hl = railLayout(app, tr(app, "ectx.templates"),
-                                           10.5f,
+                                           11.0f,
                                            DWRITE_FONT_WEIGHT_SEMI_BOLD);
         if (hl) {
             railDraw(app, hl, sx + dpi(app, 14.0f), sy + dpi(app, 8.0f),
                      railA(text, 0.5f));
             hl->Release();
         }
-        float ry = sy + dpi(app, 30.0f);
+        float ry = sy + dpi(app, uiscale::menuPad + uiscale::menuLabelRow);
         for (int i = 0; i < 10; i++) {
             D2D1_RECT_F r = D2D1::RectF(sx + dpi(app, 4.0f), ry,
                                         sx + sw - dpi(app, 4.0f),
@@ -675,7 +663,7 @@ void renderEditCtxMenu(App& app) {
             if (hov) {
                 app.brush->SetColor(railA(text, 0.08f));
                 app.renderTarget->FillRoundedRectangle(
-                    D2D1::RoundedRect(r, dpi(app, 5.0f), dpi(app, 5.0f)),
+                    D2D1::RoundedRect(r, dpi(app, uiscale::radiusControl), dpi(app, uiscale::radiusControl)),
                     app.brush);
             }
             railGlyph(app, kEDiag[i].icon, 12.0f,
@@ -690,53 +678,46 @@ void renderEditCtxMenu(App& app) {
             if (ll) {
                 DWRITE_TEXT_METRICS m{};
                 ll->GetMetrics(&m);
-                railDraw(app, ll, r.left + dpi(app, 34.0f),
+                railDraw(app, ll, r.left + dpi(app, uiscale::sp32),
                          ry + (srowH - m.height) * 0.5f,
                          railA(text, 0.92f));
                 ll->Release();
             }
-            IDWriteTextLayout* hint = railLayout(app, kEDiag[i].hint, 10.5f,
+            IDWriteTextLayout* hint = railLayout(app, kEDiag[i].hint, 11.0f,
                                                  DWRITE_FONT_WEIGHT_NORMAL,
                                                  L"Consolas");
             if (hint) {
                 DWRITE_TEXT_METRICS m{};
                 hint->GetMetrics(&m);
-                railDraw(app, hint, r.right - dpi(app, 10.0f) - m.width,
+                railDraw(app, hint, r.right - dpi(app, uiscale::sp8) - m.width,
                          ry + (srowH - m.height) * 0.5f, railA(text, 0.4f));
                 hint->Release();
             }
             app.editCtxSubHits.push_back({r, 130 + i});
-            ry += srowH + dpi(app, 2.0f);
+            ry += srowH;
         }
     } else if (app.editCtxSub == 3) {
         // Pandoc export formats (rail flyout only)
         float sw = dpi(app, 220.0f);
-        float srowH = dpi(app, 34.0f);
-        float sh = dpi(app, 30.0f) +
-                   PANDOC_FORMAT_COUNT * (srowH + dpi(app, 2.0f)) +
-                   dpi(app, 8.0f);
+        float srowH = dpi(app, uiscale::rowMenu);
+        float sh = dpi(app, uiscale::menuPad + uiscale::menuLabelRow) +
+                   PANDOC_FORMAT_COUNT * srowH +
+                   dpi(app, uiscale::menuPad);
         float sx = std::min(mx + w + dpi(app, 4.0f),
                             (float)app.width - sw - dpi(app, 8.0f));
         float sy = std::min(subAnchorY,
                             (float)app.height - sh - dpi(app, 8.0f));
         D2D1_RECT_F sp = D2D1::RectF(sx, sy, sx + sw, sy + sh);
-        app.brush->SetColor(menuBg);
-        app.renderTarget->FillRoundedRectangle(
-            D2D1::RoundedRect(sp, dpi(app, 8.0f), dpi(app, 8.0f)),
-            app.brush);
-        app.brush->SetColor(railA(text, 0.12f));
-        app.renderTarget->DrawRoundedRectangle(
-            D2D1::RoundedRect(sp, dpi(app, 8.0f), dpi(app, 8.0f)),
-            app.brush, 1.0f);
+        paint::menuPanel(app, sp);
         IDWriteTextLayout* hl = railLayout(app, tr(app, "rail.export"),
-                                           10.5f,
+                                           11.0f,
                                            DWRITE_FONT_WEIGHT_SEMI_BOLD);
         if (hl) {
             railDraw(app, hl, sx + dpi(app, 14.0f), sy + dpi(app, 8.0f),
                      railA(text, 0.5f));
             hl->Release();
         }
-        float ry = sy + dpi(app, 30.0f);
+        float ry = sy + dpi(app, uiscale::menuPad + uiscale::menuLabelRow);
         for (int i = 0; i < PANDOC_FORMAT_COUNT; i++) {
             D2D1_RECT_F r = D2D1::RectF(sx + dpi(app, 4.0f), ry,
                                         sx + sw - dpi(app, 4.0f),
@@ -745,7 +726,7 @@ void renderEditCtxMenu(App& app) {
             if (hov) {
                 app.brush->SetColor(railA(text, 0.08f));
                 app.renderTarget->FillRoundedRectangle(
-                    D2D1::RoundedRect(r, dpi(app, 5.0f), dpi(app, 5.0f)),
+                    D2D1::RoundedRect(r, dpi(app, uiscale::radiusControl), dpi(app, uiscale::radiusControl)),
                     app.brush);
             }
             IDWriteTextLayout* ll = railLayout(app, pandocFormatLabel(i),
@@ -766,12 +747,12 @@ void renderEditCtxMenu(App& app) {
             if (hint) {
                 DWRITE_TEXT_METRICS m{};
                 hint->GetMetrics(&m);
-                railDraw(app, hint, r.right - dpi(app, 10.0f) - m.width,
+                railDraw(app, hint, r.right - dpi(app, uiscale::sp8) - m.width,
                          ry + (srowH - m.height) * 0.5f, railA(text, 0.4f));
                 hint->Release();
             }
             app.editCtxSubHits.push_back({r, 150 + i});
-            ry += srowH + dpi(app, 2.0f);
+            ry += srowH;
         }
     } else if (app.editCtxSub == 1) {
         float cell = dpi(app, 20.0f);
@@ -784,14 +765,7 @@ void renderEditCtxMenu(App& app) {
         float sy = std::min(subAnchorY,
                             (float)app.height - sh - dpi(app, 8.0f));
         D2D1_RECT_F sp = D2D1::RectF(sx, sy, sx + sw, sy + sh);
-        app.brush->SetColor(menuBg);
-        app.renderTarget->FillRoundedRectangle(
-            D2D1::RoundedRect(sp, dpi(app, 8.0f), dpi(app, 8.0f)),
-            app.brush);
-        app.brush->SetColor(railA(text, 0.12f));
-        app.renderTarget->DrawRoundedRectangle(
-            D2D1::RoundedRect(sp, dpi(app, 8.0f), dpi(app, 8.0f)),
-            app.brush, 1.0f);
+        paint::menuPanel(app, sp);
         for (int r = 0; r < 6; r++) {
             for (int c = 0; c < 8; c++) {
                 bool in = r < app.editCtxGridR && c < app.editCtxGridC;

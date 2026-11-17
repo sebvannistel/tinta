@@ -2,12 +2,13 @@
 // The editing engine Tinta's Live editor and sheet cards share: the text,
 // its caret and selection, undo, the edits Markdown's rules call for, the
 // keys and characters that make them, the text laid out live (the caret's
-// line as typed, the others as they read), the slash menu and [[ names
-// under the caret, the format bar over a selection, and the menu a
-// right-click opens on the text.
+// line as typed, the others as they read), the slash menu, [[ names and
+// citation keys under the caret, the format bar over a selection, and the
+// menu a right-click opens on the text.
 #pragma once
 
 #include "app.h"
+#include "syntax.h"
 
 #include <d2d1.h>
 #include <dwrite.h>
@@ -54,8 +55,8 @@ struct LiveText {
     unsigned long long lastClickMs = 0;
     size_t pressFrom = 0, pressTo = 0;  // the word or line a double or triple click took
 
-    // The slash menu and [[ names under the caret
-    enum class Popup { None, Slash, Names };
+    // The slash menu, [[ names and citation keys under the caret
+    enum class Popup { None, Slash, Names, Cite };
     struct Choice {
         std::wstring label, detail;     // what the row says, and what it says beside it
         int insert = -1;                // Slash: the block it makes (live::Insert)
@@ -64,6 +65,8 @@ struct LiveText {
     Popup popup = Popup::None;
     size_t popupFrom = 0;               // where what is typed for it starts
     size_t dismissedSlash = (size_t)-1; // a / whose menu Esc put away
+    size_t dismissedCite = (size_t)-1;  // an @ whose keys Esc put away
+    unsigned long long popupRevision = 0;  // the text's revision the popup last followed
     std::vector<Choice> choices;
     int choice = 0;
     int popupTop = 0;                   // the first row shown
@@ -181,6 +184,7 @@ enum InlineKind {
     INL_MATH_MARK, INL_MATH,            // $x$
     INL_WIKI_MARK, INL_WIKI,            // [[name|words]]: the brackets and the name, the words shown
     INL_FOOTNOTE,                       // [^1]
+    INL_CITE,                           // [see @key, p. 4] and @fig:id (docs/specs/scholar.md)
     INL_LINK_MARK, INL_LINK,            // [words](address): [ and ](address), the words
     INL_IMAGE_MARK, INL_IMAGE,          // ![words](address)
     INL_STRONG_MARK, INL_STRONG,        // **bold**
@@ -289,6 +293,9 @@ struct Host {
     // [[ names for what was typed after the brackets, and one picked (Ctrl held)
     std::function<std::vector<LiveText::Choice>(const std::wstring& typed)> names;
     std::function<void(const LiveText::Choice& choice, bool ctrl)> picked;
+    // Citation keys and the document's own ids for the key typed in
+    // text[from, caret) after an @ (docs/citations.md); none: no list
+    std::function<std::vector<LiveText::Choice>(const std::wstring& text, size_t from, size_t caret)> cites;
     // An image to insert, as the text will link it (empty: none)
     std::function<std::wstring()> pickImage;
     // Undo and redo kept by the host instead
@@ -311,6 +318,19 @@ void updatePopup(App& app, LiveText& e, const Host& host);
 void closePopup(LiveText& e);
 void pickChoice(App& app, LiveText& e, int index, bool ctrl, const Host& host);
 
+// Citations (docs/citations.md). The @ whose key the caret is typing: at a
+// line's start or after a space, [ or ;, a - between them too ([-@key), and
+// not in code
+bool citeAt(const std::wstring& text, size_t caret, size_t& at);
+// A key picked for the one typed from `from`, after its @: it replaces what
+// was typed and the rest of the key after the caret, and a ] follows it in
+// brackets nothing closes yet. `after`: where the caret goes, past them
+MarkEdit citeEdit(const std::wstring& text, size_t caret, size_t from, const std::wstring& key, size_t& after);
+// The citation list alone, for a host keeping its own text (the source
+// editor). Typing a key after an @ opens it, moving along the key keeps it,
+// leaving the key closes it; `edited`: the text changed since it last followed
+void followCites(LiveText& e, const std::wstring& text, size_t caret, bool edited, const Host& host);
+
 // --- Layout and drawing --------------------------------------------------------
 
 // How live text looks, sizes in layout units
@@ -330,45 +350,90 @@ struct Look {
 };
 // The look of the page around it: the reading view's faces, sizes and colours
 Look pageLook(const App& app);
-// The layout of text[from, to), made again when the text, the width, the
-// look, the caret's line or the render target change
+// The layout of text[from, to): its lines in parts stacked down the page,
+// each a layout of its own. A range set on a DirectWrite layout costs time
+// with the ranges the layout already holds, so one layout for a table or a
+// list of thousands of lines costs their square at every key. Parts keep
+// that to the lines, and a key lays out only the part it changed.
+struct Laid {
+    // Drawn behind the text: inline code and ==marks== (a part's positions)
+    struct Back {
+        size_t at, length;
+        D2D1_COLOR_F color;
+        bool block;                     // a fenced block: across the box's width
+        bool on;                        // and on into the next part
+    };
+    // What a line leaves open for the lines after it
+    struct Carry {
+        bool inFence = false, inMath = false, inFront = false;
+        bool frontCloses = false;       // the front matter ends in this text: it has a background
+        int language = 0;
+        SyntaxState syntax;
+        std::vector<size_t> items;      // the marks' indents of the items a line's item sits in
+    };
+    struct Part {
+        Microsoft::WRL::ComPtr<IDWriteTextLayout> layout;
+        size_t at = 0, length = 0;      // its text, with the break after its last line when lines follow
+        size_t lines = 0;
+        size_t caretLine = (size_t)-1;  // the line shown as typed, counted from the part's first
+        bool first = false;             // the text starts with it
+        bool broken = false;            // its text ends with that break
+        float top = 0, height = 0;
+        double tall = 0;                // its height, as exact as its lines' heights add up
+        Carry in, out;
+        std::vector<Back> backs;
+    };
+    std::vector<Part> parts;
+    size_t length = 0;                  // the text's
+    float width = 0, height = 0;
+    float factor = 1.0f;                // line spacing over the font's own
+};
+// What a layout is made from and with. The width, the look or the render
+// target changing makes all of it again; a change of the text or of the
+// caret's line keeps the parts it leaves alone
 struct LayoutCache {
-    Microsoft::WRL::ComPtr<IDWriteTextLayout> layout;
+    Laid laid;
+    bool made = false;
+    bool dressed = false;               // as Markdown, not as plain text
     std::wstring text;
     float width = -1;
     size_t from = 0;
     size_t caretLine = (size_t)-1;
     std::wstring key;                   // the look it was made for
     unsigned generation = 0;
-    float factor = 1.0f;                // line spacing over the font's own
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> markBrush, linkBrush, glyphBrush, codeBrush;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> headingBrush[6];
     // A code block's colours, as the page gives its tokens
     std::vector<std::pair<unsigned, Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>>> tokenBrushes;
-    // Spans drawn behind the text: inline code and ==marks== (layout positions)
-    struct Back {
-        size_t at, length;
-        D2D1_COLOR_F color;
-        bool block;                     // a fenced block: across the box's width
-    };
-    std::vector<Back> backs;
 };
-// `caretLine`: the line shown as typed, counted from `from`; -1 for none
-IDWriteTextLayout* layoutOf(App& app, const LiveText& e, size_t from, size_t to, float width, const Look& look,
-                            LayoutCache& cache, size_t caretLine);
+// `caretLine`: the line shown as typed, counted from `from`; -1 for none.
+// The layout is the cache's, good until the next call with it
+const Laid* layoutOf(App& app, const LiveText& e, size_t from, size_t to, float width, const Look& look,
+                     LayoutCache& cache, size_t caretLine);
 // That line for e: the caret's, or a selection's anchor's
 size_t caretLineOf(const LiveText& e, size_t from, size_t to);
 // Where text position `at` is in a layout of text from `from`
-bool caretPoint(IDWriteTextLayout* layout, size_t from, size_t at, float& x, float& y, float& height);
+bool caretPoint(const Laid* laid, size_t from, size_t at, float& x, float& y, float& height);
 // The text position at a layout point
-size_t positionAt(IDWriteTextLayout* layout, size_t from, size_t to, float x, float y);
+size_t positionAt(const Laid* laid, size_t from, size_t to, float x, float y);
 // Draws the backgrounds, the selection, the text, the caret (when on) and
 // the mark where a #word wants its space. The target's transform is in
-// layout units with the layout's origin at 0,0; `pixel` is one pixel there
-void draw(App& app, const LiveText& e, IDWriteTextLayout* layout, const LayoutCache& cache, size_t from,
-          const Look& look, bool caretOn, float pixel);
+// layout units with the layout's origin at 0,0; `pixel` is one pixel there.
+// Only what lies between `viewTop` and `viewBottom` needs drawing
+void draw(App& app, const LiveText& e, const Laid* laid, size_t from, const Look& look, bool caretOn, float pixel,
+          float viewTop = -1.0e9f, float viewBottom = 1.0e9f);
 // The task box drawn at a layout point, or (size_t)-1: its line's start
-size_t taskBoxAt(IDWriteTextLayout* layout, const LiveText& e, size_t from, size_t to, float x, float y);
+size_t taskBoxAt(const Laid* laid, const LiveText& e, size_t from, size_t to, float x, float y);
+// The first line's baseline, from the layout's top
+float firstBaseline(const Laid* laid);
+// The lines a part holds. Tests lay one text out in parts of several sizes
+size_t& partLines();
+// The parts laid out and the lines dressed since the program began: what a
+// key costs, counted for tests
+struct LayoutWork {
+    unsigned long long parts = 0, lines = 0;
+};
+LayoutWork& layoutWork();
 
 // The popup under a caret at `caret` (its top and bottom, client pixels),
 // kept inside `bounds`; rows hit by the pointer go in e.popupHits

@@ -1,4 +1,7 @@
 #include "document.h"
+#include "scholar.h"
+
+#include <windows.h>
 
 #include <chrono>
 #include <memory>
@@ -99,7 +102,7 @@ bool isPlainTextPath(std::basic_string_view<Character> path) {
     std::string ext = extensionLower(path);
     return ext == ".txt" || ext == ".json" || ext == ".yaml" ||
            ext == ".yml" || ext == ".toml" || ext == ".ini" ||
-           ext == ".csv" || ext == ".log";
+           ext == ".csv" || ext == ".log" || ext == ".css";
 }
 
 // Fence language tag for a plain-text document's code block
@@ -112,6 +115,7 @@ const char* plainTextLanguage(std::basic_string_view<Character> path) {
     if (ext == ".ini") return "ini";
     if (ext == ".csv") return "csv";
     if (ext == ".log") return "log";
+    if (ext == ".css") return "css";  // a CSS theme's sheet (docs/specs/theming.md)
     return "";
 }
 
@@ -258,7 +262,35 @@ static void insertProperties(qmd::ParseResult& result, const std::string& conten
     auto props = std::make_shared<qmd::Element>(qmd::ElementType::Properties);
     props->parent = result.root.get();
     props->properties = std::move(doc.properties);
+    // The YAML between the fences as written, for what the properties
+    // leave opaque: a paper's block scalars and author lists (paper.h)
+    const size_t opener = content.find('\n', doc.begin);
+    if (opener != std::string::npos && doc.closing > opener)
+        props->text = content.substr(opener + 1, doc.closing - opener - 1);
     result.root->children.insert(result.root->children.begin(), std::move(props));
+}
+
+// Markdown with Scholar (docs/specs/scholar.md): the front matter's
+// bibliography is read before the parse, so a bare @key knows whether it
+// cites; afterwards figures, tables and equations are numbered and the
+// citations and references formatted, and what went wrong rides along
+static qmd::ParseResult parseMarkdown(qmd::MarkdownParser& parser, const std::string& content,
+                                      const std::wstring& path) {
+    const size_t slash = path.find_last_of(L"\\/");
+    const std::wstring folder = slash == std::wstring::npos ? std::wstring() : path.substr(0, slash);
+    const scholar::Session session = scholar::begin(fm::parse(content).properties, folder, content);
+    parser.setCitationFinder(scholar::finder(session));
+    std::string cleaned;
+    qmd::ParseResult result;
+    if (blankPreamble(content, cleaned)) {
+        result = parser.parse(cleaned);
+        insertProperties(result, content);
+    } else {
+        result = parser.parse(content);
+    }
+    parser.setCitationFinder({});
+    if (result.success && result.root) result.problems = scholar::finish(result.root, session);
+    return result;
 }
 
 qmd::ParseResult parseDocument(qmd::MarkdownParser& parser,
@@ -269,13 +301,9 @@ qmd::ParseResult parseDocument(qmd::MarkdownParser& parser,
     if (isPlainTextDocumentPath(path)) {
         return createPlainTextDocument(content, plainTextLanguage(path));
     }
-    std::string cleaned;
-    if (blankPreamble(content, cleaned)) {
-        auto result = parser.parse(cleaned);
-        insertProperties(result, content);
-        return result;
-    }
-    return parser.parse(content);
+    std::wstring wide(path.size(), L'\0');
+    wide.resize((size_t)MultiByteToWideChar(CP_UTF8, 0, path.data(), (int)path.size(), wide.data(), (int)wide.size()));
+    return parseMarkdown(parser, content, wide);
 }
 
 qmd::ParseResult parseDocument(qmd::MarkdownParser& parser,
@@ -286,11 +314,5 @@ qmd::ParseResult parseDocument(qmd::MarkdownParser& parser,
     if (isPlainTextDocumentPath(path)) {
         return createPlainTextDocument(content, plainTextLanguage(path));
     }
-    std::string cleaned;
-    if (blankPreamble(content, cleaned)) {
-        auto result = parser.parse(cleaned);
-        insertProperties(result, content);
-        return result;
-    }
-    return parser.parse(content);
+    return parseMarkdown(parser, content, std::wstring(path));
 }

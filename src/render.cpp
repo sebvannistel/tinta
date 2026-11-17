@@ -3,6 +3,8 @@
 #include "file_utils.h"
 #include "folding.h"
 #include "inline_style.h"
+#include "font_faces.h"
+#include "page_style.h"
 #include "utils.h"
 #include "syntax.h"
 #include "search.h"
@@ -13,6 +15,7 @@
 #include "i18n.h"
 #include "link_target.h"
 #include "network_path.h"
+#include "paper.h"
 #include "plantuml_app.h"
 #include "plantuml_queue.h"
 
@@ -74,7 +77,8 @@ struct LayoutInfo {
 };
 
 static LayoutInfo createLayout(App& app, std::wstring_view text, IDWriteTextFormat* format,
-                               float lineHeight, IDWriteTypography* typography) {
+                               float lineHeight, IDWriteTypography* typography,
+                               float letterSpacing = 0.0f) {
     LayoutInfo info;
     if (!format || text.empty()) return info;
 
@@ -83,6 +87,15 @@ static LayoutInfo createLayout(App& app, std::wstring_view text, IDWriteTextForm
     if (info.layout) {
         if (typography) {
             info.layout->SetTypography(typography, {0, (UINT32)text.length()});
+        }
+        // A CSS theme's letter-spacing (page_style.h): after each letter
+        if (letterSpacing != 0.0f) {
+            IDWriteTextLayout1* spaced = nullptr;
+            if (SUCCEEDED(info.layout->QueryInterface(__uuidof(IDWriteTextLayout1),
+                    reinterpret_cast<void**>(&spaced)))) {
+                spaced->SetCharacterSpacing(0.0f, letterSpacing, 0.0f, {0, (UINT32)text.length()});
+                spaced->Release();
+            }
         }
         // Apply font fallback for emoji support
         if (app.fontFallback) {
@@ -101,6 +114,9 @@ static LayoutInfo createLayout(App& app, std::wstring_view text, IDWriteTextForm
     return info;
 }
 
+// The run of text being laid out, for the inspector's record (page_style.h)
+static const StyledRun* g_inspectedRun = nullptr;
+
 // A cell laid out only to be measured, then taken back by rollbackTo: its
 // text joins no line of the selection's, so the page's first lines are
 // left alone and nothing has to be taken back out of them (#318)
@@ -115,6 +131,7 @@ static bool bucketAbove(const App::LineBucket& bucket, float top) { return bucke
 static void addTextRect(App& app, const D2D1_RECT_F& rect, size_t docStart, size_t docLength,
                         size_t runIndex = (size_t)-1) {
     if (app.layoutMeasuring > 0) return;
+    if (g_inspectedRun && page::recording(app)) page::recordRun(app, rect, g_inspectedRun->style.css, g_inspectedRun->elem.get());
     size_t idx = app.textRects.size();
     app.textRects.push_back({rect, docStart, docLength, runIndex});
 
@@ -380,6 +397,270 @@ static float getSpaceWidth(App& app, IDWriteTextFormat* format) {
     return measureText(app, L" ", format);
 }
 
+// The bucket extents of the text rects laid out since `from`, after a move
+static void refreshBuckets(App& app, const LayoutSnapshot& from) {
+    for (auto& bucket : app.lineBuckets) {
+        bool affected = false;
+        for (size_t idx : bucket.textRectIndices) affected = affected || idx >= from.textRects;
+        if (!affected) continue;
+        bucket.minX = std::numeric_limits<float>::max();
+        bucket.maxX = std::numeric_limits<float>::lowest();
+        for (size_t idx : bucket.textRectIndices) {
+            bucket.minX = std::min(bucket.minX, app.textRects[idx].rect.left);
+            bucket.maxX = std::max(bucket.maxX, app.textRects[idx].rect.right);
+        }
+    }
+}
+
+// A CSS theme's text-align (page_style.h) for text laid out since `from`
+// between startX and startX + width: each line moved to the centre or the
+// right, or, justified, its spaces widened to fill the line (but the last
+// line's, and a line a hard break ends)
+static void alignLines(App& app, const LayoutSnapshot& from, float startX, float width, const page::Style& css) {
+    if (!css.has(css::Prop::TextAlign)) return;
+    const css::TextAlign align = css->textAlign;
+    if (align != css::TextAlign::Center && align != css::TextAlign::Right && align != css::TextAlign::Justify) return;
+
+    // Lines by the tops of their words
+    std::vector<float> lines;
+    for (size_t i = from.textRects; i < app.textRects.size(); ++i) lines.push_back(app.textRects[i].rect.top);
+    for (size_t i = from.bitmaps; i < app.layoutBitmaps.size(); ++i) lines.push_back(app.layoutBitmaps[i].destRect.top);
+    if (lines.empty()) return;
+    std::sort(lines.begin(), lines.end());
+    lines.erase(std::unique(lines.begin(), lines.end(), [](float a, float b) { return b - a < 0.5f; }), lines.end());
+    auto lineOf = [&](float top, float bottom) {
+        size_t k = (size_t)(std::upper_bound(lines.begin(), lines.end(), (top + bottom) * 0.5f) - lines.begin());
+        return k ? k - 1 : 0;
+    };
+    std::vector<float> minX(lines.size(), std::numeric_limits<float>::max());
+    std::vector<float> maxX(lines.size(), std::numeric_limits<float>::lowest());
+    auto extend = [&](const D2D1_RECT_F& r) {
+        const size_t k = lineOf(r.top, r.bottom);
+        minX[k] = std::min(minX[k], r.left);
+        maxX[k] = std::max(maxX[k], r.right);
+    };
+    for (size_t i = from.textRects; i < app.textRects.size(); ++i) extend(app.textRects[i].rect);
+    for (size_t i = from.bitmaps; i < app.layoutBitmaps.size(); ++i) extend(app.layoutBitmaps[i].destRect);
+    for (size_t i = from.rects; i < app.layoutRects.size(); ++i) extend(app.layoutRects[i].rect);
+
+    // Where each line's x goes: a shift, and for a justified line the
+    // widened spaces at or left of x
+    std::vector<float> shift(lines.size(), 0.0f), per(lines.size(), 0.0f);
+    std::vector<std::vector<float>> points(lines.size());
+    if (align == css::TextAlign::Justify) {
+        for (size_t k = 0; k + 1 < lines.size(); ++k) {
+            if (maxX[k] <= minX[k]) continue;
+            const float extra = startX + width - maxX[k];
+            if (extra <= 0.5f) continue;
+            std::vector<size_t> runs;
+            for (size_t i = from.textRuns; i < app.layoutTextRuns.size(); ++i) {
+                const auto& r = app.layoutTextRuns[i];
+                if (lineOf(r.bounds.top, r.bounds.bottom) == k && r.layout) runs.push_back(i);
+            }
+            std::sort(runs.begin(), runs.end(), [&](size_t a, size_t b) {
+                return app.layoutTextRuns[a].pos.x < app.layoutTextRuns[b].pos.x;
+            });
+            if (runs.empty()) continue;
+            const auto& last = app.layoutTextRuns[runs.back()];
+            const size_t lineEnd = last.docStart + last.docLength;
+            if (lineEnd < app.docText.size() && app.docText[lineEnd] == L'\n') continue;
+            struct Gap { float x; size_t run; UINT32 index; };
+            std::vector<Gap> gaps;
+            for (size_t n = 0; n < runs.size(); ++n) {
+                const auto& r = app.layoutTextRuns[runs[n]];
+                for (size_t c = 0; c + 1 < r.docLength && r.docStart + c < app.docText.size(); ++c) {
+                    if (app.docText[r.docStart + c] != L' ') continue;
+                    FLOAT hx = 0, hy = 0;
+                    DWRITE_HIT_TEST_METRICS m{};
+                    if (SUCCEEDED(r.layout->HitTestTextPosition((UINT32)c, TRUE, &hx, &hy, &m)))
+                        gaps.push_back({r.pos.x + hx, runs[n], (UINT32)c});
+                }
+                if (n + 1 < runs.size()) {
+                    const auto& next = app.layoutTextRuns[runs[n + 1]];
+                    for (size_t at = r.docStart + r.docLength; at < next.docStart && at < app.docText.size(); ++at) {
+                        if (app.docText[at] == L' ') {
+                            gaps.push_back({next.pos.x, SIZE_MAX, 0});
+                            break;
+                        }
+                    }
+                }
+            }
+            if (gaps.empty()) continue;
+            per[k] = extra / (float)gaps.size();
+            for (const Gap& g : gaps) {
+                points[k].push_back(g.x);
+                if (g.run == SIZE_MAX) continue;
+                IDWriteTextLayout1* spaced = nullptr;
+                if (SUCCEEDED(app.layoutTextRuns[g.run].layout->QueryInterface(__uuidof(IDWriteTextLayout1),
+                        reinterpret_cast<void**>(&spaced)))) {
+                    spaced->SetCharacterSpacing(0.0f, per[k], 0.0f, {g.index, 1});
+                    spaced->Release();
+                }
+            }
+            std::sort(points[k].begin(), points[k].end());
+        }
+    } else {
+        for (size_t k = 0; k < lines.size(); ++k) {
+            if (maxX[k] <= minX[k]) continue;
+            const float room = align == css::TextAlign::Center
+                ? (startX + width * 0.5f) - (minX[k] + maxX[k]) * 0.5f
+                : startX + width - maxX[k];
+            shift[k] = std::max(0.0f, room);
+        }
+    }
+    auto moved = [&](size_t k, float x) {
+        if (points[k].empty()) return x + shift[k];
+        const size_t n = (size_t)(std::upper_bound(points[k].begin(), points[k].end(), x + 0.01f) - points[k].begin());
+        return x + per[k] * (float)n;
+    };
+    auto moveRect = [&](D2D1_RECT_F& r) {
+        const size_t k = lineOf(r.top, r.bottom);
+        const float left = moved(k, r.left);
+        r.right = moved(k, r.right);
+        r.left = left;
+    };
+    for (size_t i = from.textRuns; i < app.layoutTextRuns.size(); ++i) {
+        auto& r = app.layoutTextRuns[i];
+        const size_t k = lineOf(r.bounds.top, r.bounds.bottom);
+        const float dx = moved(k, r.pos.x) - r.pos.x;
+        r.pos.x += dx;
+        r.bounds.right = moved(k, r.bounds.right);
+        r.bounds.left += dx;
+    }
+    for (size_t i = from.rects; i < app.layoutRects.size(); ++i) moveRect(app.layoutRects[i].rect);
+    for (size_t i = from.lines; i < app.layoutLines.size(); ++i) {
+        auto& l = app.layoutLines[i];
+        const size_t k = lineOf(std::min(l.p1.y, l.p2.y), std::max(l.p1.y, l.p2.y));
+        l.p1.x = moved(k, l.p1.x);
+        l.p2.x = moved(k, l.p2.x);
+    }
+    for (size_t i = from.shapes; i < app.layoutShapes.size(); ++i) moveRect(app.layoutShapes[i].rect);
+    for (size_t i = from.bitmaps; i < app.layoutBitmaps.size(); ++i) moveRect(app.layoutBitmaps[i].destRect);
+    for (size_t i = from.links; i < app.linkRects.size(); ++i) moveRect(app.linkRects[i].bounds);
+    for (size_t i = from.textRects; i < app.textRects.size(); ++i) moveRect(app.textRects[i].rect);
+    refreshBuckets(app, from);
+}
+
+// A CSS theme's box-shadow under a box (page_style.h): the first shadow
+// that is not inset, its blur as rings that fade outwards. Inserted at
+// `at`, under the box drawn there
+static void addShadow(App& app, size_t at, const D2D1_RECT_F& box, float radius, const page::Style& css) {
+    if (!css.has(css::Prop::BoxShadow)) return;
+    for (const css::Shadow& shadow : css->boxShadow) {
+        if (shadow.inset || shadow.color.a <= 0) continue;
+        const float x = page::px(app, shadow.x), y = page::px(app, shadow.y);
+        const float blur = page::px(app, shadow.blur), spread = page::px(app, shadow.spread);
+        const int rings = blur > 0 ? 4 : 1;
+        std::vector<App::LayoutRect> layers;
+        for (int k = rings; k >= 1; --k) {
+            const float grow = spread + blur * (float)k / (float)rings * 0.5f;
+            App::LayoutRect r;
+            r.rect = D2D1::RectF(box.left + x - grow, box.top + y - grow, box.right + x + grow, box.bottom + y + grow);
+            r.color = page::color(shadow.color);
+            r.color.a = shadow.color.a / (float)rings;
+            r.radius = radius + grow;
+            layers.push_back(r);
+        }
+        app.layoutRects.insert(app.layoutRects.begin() + (ptrdiff_t)std::min(at, app.layoutRects.size()), layers.begin(),
+                               layers.end());
+        return;
+    }
+}
+
+// A block's box as a CSS theme draws it (page_style.h): background,
+// padding and borders around its content. It opens before the content,
+// narrowing the room the content has, and closes after it. Nothing is
+// drawn or moved when the theme sets none of these
+struct BlockBox {
+    App& app;
+    bool open = false;
+    float left = 0, right = 0, top = 0;
+    float edge[4] = {}, pad[4] = {};
+    D2D1_COLOR_F edgeColor[4] = {};
+    bool edgeColored[4] = {};
+    size_t background = SIZE_MAX;
+
+    BlockBox(App& app, const page::Style& css, float& y, float& indent, float& maxWidth) : app(app) {
+        using css::Prop;
+        if (!css) return;
+        bool any = css.has(Prop::BackgroundColor) && css->backgroundColor.a > 0.0f;
+        for (int side = 0; side < 4; ++side) {
+            if (css.has((Prop)((int)Prop::PaddingTop + side))) {
+                pad[side] = page::px(app, css->padding[side]);
+                any = any || pad[side] != 0.0f;
+            }
+            const Prop width = (Prop)((int)Prop::BorderTopWidth + side * 3);
+            if (css.has(width) || css.has((Prop)((int)width + 1))) {
+                const css::Border& b = css->border[side];
+                edge[side] = b.style == css::LineStyle::None ? 0.0f : page::px(app, b.width);
+                edgeColored[side] = css.has((Prop)((int)width + 2));
+                edgeColor[side] = page::color(b.color);
+                any = any || edge[side] > 0.0f;
+            }
+        }
+        if (!any) return;
+        open = true;
+        left = indent;
+        right = indent + maxWidth;
+        top = y;
+        if (css.has(Prop::BackgroundColor) && css->backgroundColor.a > 0.0f) {
+            background = app.layoutRects.size();
+            App::LayoutRect r;
+            r.rect = D2D1::RectF(left, top, right, top);
+            r.color = page::color(css->backgroundColor);
+            if (css.has(Prop::BorderTopLeftRadius)) r.radius = page::px(app, css->radius[0]);
+            app.layoutRects.push_back(r);
+        }
+        y += edge[0] + pad[0];
+        indent += edge[3] + pad[3];
+        maxWidth = std::max(1.0f, maxWidth - edge[3] - pad[3] - edge[1] - pad[1]);
+        if (edge[0] + pad[0] > 0.0f) page::boundary(app);
+    }
+
+    // `ink` colours a border the theme gave no colour of its own, as CSS's
+    // currentColor does
+    void close(float& y, D2D1_COLOR_F ink) {
+        if (!open) return;
+        y += pad[2] + edge[2];
+        if (pad[2] + edge[2] > 0.0f) page::boundary(app);
+        if (background < app.layoutRects.size()) {
+            app.layoutRects[background].rect.bottom = y;
+            addShadow(app, background, app.layoutRects[background].rect, app.layoutRects[background].radius,
+                      page::current(app));
+        }
+        auto color = [&](int side) { return edgeColored[side] ? edgeColor[side] : ink; };
+        if (edge[0] > 0) app.layoutLines.push_back({{left, top + edge[0] / 2}, {right, top + edge[0] / 2}, color(0), edge[0]});
+        if (edge[2] > 0) app.layoutLines.push_back({{left, y - edge[2] / 2}, {right, y - edge[2] / 2}, color(2), edge[2]});
+        if (edge[3] > 0) app.layoutLines.push_back({{left + edge[3] / 2, top}, {left + edge[3] / 2, y}, color(3), edge[3]});
+        if (edge[1] > 0) app.layoutLines.push_back({{right - edge[1] / 2, top}, {right - edge[1] / 2, y}, color(1), edge[1]});
+    }
+};
+
+// A CSS theme's ::before and ::after content around a block's inline
+// children (page_style.h): runs of their own, which flattenInline styles
+// as the pseudo-elements; their counters step as the block is laid out
+static std::vector<ElementPtr> withGenerated(App& app, const page::Style& css, const std::vector<ElementPtr>& children,
+                                             std::wstring* before = nullptr) {
+    if (!css) return children;
+    const std::wstring first = page::generated(app, css, css::Pseudo::Before, true);
+    const std::wstring last = page::generated(app, css, css::Pseudo::After, true);
+    if (before) *before = first;
+    if (first.empty() && last.empty()) return children;
+    auto text = [](const std::wstring& t, const char* which) {
+        auto e = std::make_shared<Element>(ElementType::Text);
+        const int n = WideCharToMultiByte(CP_UTF8, 0, t.c_str(), (int)t.size(), nullptr, 0, nullptr, nullptr);
+        e->text.assign((size_t)std::max(0, n), '\0');
+        WideCharToMultiByte(CP_UTF8, 0, t.c_str(), (int)t.size(), e->text.data(), n, nullptr, nullptr);
+        e->language = which;
+        return e;
+    };
+    std::vector<ElementPtr> out;
+    if (!first.empty()) out.push_back(text(first, "css-before"));
+    out.insert(out.end(), children.begin(), children.end());
+    if (!last.empty()) out.push_back(text(last, "css-after"));
+    return out;
+}
+
 static void layoutElement(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth);
 static void layoutImage(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth);
 
@@ -556,12 +837,15 @@ static const Element* highlightSpanOf(const Element* elem) {
     return nullptr;
 }
 
+// firstLineX, when set, starts the first line left of startX, where the
+// lines after it wrap: a hanging indent (a bibliography's entries)
 static void layoutInlineContent(App& app, const std::vector<ElementPtr>& elements,
                                 float startX, float& y, float maxWidth,
                                 IDWriteTextFormat* baseFormat, D2D1_COLOR_F baseColor,
-                                const std::string& baseLinkUrl = {}, float customLineHeight = 0.0f) {
-    float x = startX;
-    float lineHeight = customLineHeight > 0 ? customLineHeight : baseFormat->GetFontSize() * 1.7f;
+                                const std::string& baseLinkUrl = {}, float customLineHeight = 0.0f,
+                                float firstLineX = -1.0f, const page::Style* blockCss = nullptr) {
+    float x = firstLineX >= 0.0f ? firstLineX : startX;
+    float lineHeight = customLineHeight > 0 ? customLineHeight : baseFormat->GetFontSize() * themeLineHeight(app.theme);
     const float normalLineHeight = lineHeight;
     float mathTextOffset = 0;
     float maxX = startX + maxWidth;
@@ -598,6 +882,8 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
 
     std::string inlineAnchor;
     bool linkUnderInsertion = false;  // a link inside <ins> shares its rule
+    int8_t linkRule = -1;             // a CSS theme's text-decoration on the link
+    std::optional<D2D1_COLOR_F> linkRuleColor;
     auto addLinkSegment = [&](float lineStartX, float lineEndX, float lineY,
                               const std::string& linkUrl, D2D1_COLOR_F color) {
         if (lineEndX <= lineStartX) return;
@@ -619,14 +905,15 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                                            D2D1::Point2F(ex, underlineY),
                                            dashColor, 1.0f});
             }
-        } else if (inlineAnchor.empty() && !linkUnderInsertion) {
+        } else if ((inlineAnchor.empty() || linkRule == 1) && !linkUnderInsertion && linkRule != 0) {
             app.layoutLines.push_back({D2D1::Point2F(lineStartX, underlineY),
                                        D2D1::Point2F(lineEndX, underlineY),
-                                       color, 1.0f});
+                                       linkRuleColor.value_or(color), 1.0f});
         }
         App::LinkRect lr;
         lr.bounds = D2D1::RectF(lineStartX, lineY, lineEndX, lineY + lineHeight);
         lr.url = linkUrl;
+        lr.anchor = inlineAnchor;
         app.linkRects.push_back(lr);
     };
 
@@ -635,6 +922,7 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
     rootStyle.color = baseColor;
     rootStyle.linkUrl = baseLinkUrl;
     rootStyle.isLink = !baseLinkUrl.empty();
+    rootStyle.css = blockCss ? *blockCss : page::current(app);
     std::vector<StyledRun> runs;
     flattenInline(app, elements, rootStyle, lineHeight, runs);
 
@@ -704,14 +992,21 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
         app.layoutRects.push_back({rect, color});
     };
 
+    // The inspector's record (page_style.h) knows each word's run
+    struct InspectedRun {
+        ~InspectedRun() { g_inspectedRun = nullptr; }
+    } inspectedRun;
     for (size_t runIndex = 0; runIndex < runs.size(); runIndex++) {
         const auto& run = runs[runIndex];
+        g_inspectedRun = &run;
         const ElementPtr& elem = run.elem;
         IDWriteTextFormat* format = run.style.format;
         IDWriteTextFormat* textFormat = format ? format : baseFormat;
         D2D1_COLOR_F color = run.style.color;
         const std::string& linkUrl = run.style.linkUrl;
         inlineAnchor = run.style.anchorId;
+        linkRule = run.style.linkRule;
+        linkRuleColor = run.style.ruleColor;
         bool isLink = run.style.isLink;
         bool hasBg = run.style.hasBg;
         bool hasStrike = run.style.hasStrike;
@@ -734,12 +1029,14 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
 
         switch (elem->type) {
             case ElementType::Text:
-                text = toWide(elem->text);
+                text = run.style.css ? page::transform(toWide(elem->text), run.style.css) : toWide(elem->text);
                 break;
 
             case ElementType::Code: {
-                format = inlineCodeFormat(app, run.style.bold, run.style.italic);
-                if (!isLink) color = themeInlineCodeColor(app.theme);
+                format = run.style.codeFormat ? run.style.codeFormat
+                                              : inlineCodeFormat(app, run.style.bold, run.style.italic);
+                if (run.style.codeColor) color = *run.style.codeColor;
+                else if (!isLink) color = themeInlineCodeColor(app.theme);
                 for (const auto& child : elem->children) {
                     if (child->type == ElementType::Text) {
                         text += toWide(child->text);
@@ -747,59 +1044,75 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                 }
 
                 size_t codeDocStart = app.docText.size();
-                LayoutInfo info = createLayout(app, text, format, lineHeight, app.codeTypography);
+                if (run.style.css) text = page::transform(std::move(text), run.style.css);
+                LayoutInfo info = createLayout(app, text, format, lineHeight,
+                                               page::typography(app, run.style.css, app.codeTypography),
+                                               page::letterSpacing(app, run.style.css));
                 float textWidth = info.width;
+                // A CSS theme's padding puts the chip after the space before
+                // it, the text inside; Tinta's own overhangs that space by 2
+                const bool padded = run.style.codePadLeft >= 0.0f || run.style.codePadRight >= 0.0f;
+                const float padLeft = padded ? (run.style.codePadLeft >= 0.0f ? run.style.codePadLeft : 2.0f) : 0.0f;
+                const float advance = padded
+                    ? padLeft + textWidth + (run.style.codePadRight >= 0.0f ? run.style.codePadRight : kCodeSpanPadding)
+                    : textWidth + kCodeSpanPadding;
 
                 // Keep fitting code spans atomic. Oversized ones share the
                 // Unicode/cluster-aware wrapping path below, including during
                 // table row measurement, so their chips cannot cover the next
                 // column (#239).
-                if (textWidth + kCodeSpanPadding > maxWidth) {
+                if (advance > maxWidth) {
                     if (info.layout) info.layout->Release();
                     wrappedCode = true;
                     drawYOffset += baselineOf(textFormat) - baselineOf(format);
                     break;
                 }
 
-                if (x + textWidth + kCodeSpanPadding > maxX && x > startX) {
+                if (x + advance > maxX && x > startX) {
                     x = startX;
                     y += lineHeight;
                 }
 
                 // The span keeps its padding without a background (#278)
-                const D2D1_COLOR_F codeBox = themeInlineCodeBackground(app.theme);
-                if (codeBox.a > 0.0f) {
-                    app.layoutRects.push_back({D2D1::RectF(x - 2, y + mathTextOffset,
-                                                          x + textWidth + kCodeSpanPadding,
-                                                          y + mathTextOffset + normalLineHeight),
-                                               codeBox});
+                const D2D1_COLOR_F codeBox = run.style.codeBox.value_or(themeInlineCodeBackground(app.theme));
+                if (codeBox.a > 0.0f || run.style.codeEdgeWidth > 0.0f) {
+                    App::LayoutRect chip;
+                    chip.rect = padded ? D2D1::RectF(x, y + mathTextOffset, x + advance, y + mathTextOffset + normalLineHeight)
+                                       : D2D1::RectF(x - 2, y + mathTextOffset, x + textWidth + kCodeSpanPadding,
+                                                     y + mathTextOffset + normalLineHeight);
+                    chip.color = codeBox;
+                    chip.radius = run.style.codeRadius;
+                    chip.strokeWidth = run.style.codeEdgeWidth;
+                    chip.stroke = run.style.codeEdge.value_or(color);
+                    app.layoutRects.push_back(chip);
                 }
+                const float textX = x + padLeft;
 
                 // The run's own baseline counts any fallback font it uses
                 float codeTop = drawYOffset + baselineOf(textFormat) -
                                 runBaseline(app, info.layout, format);
-                D2D1_POINT_2F pos = D2D1::Point2F(x, y + codeTop);
-                D2D1_RECT_F bounds = D2D1::RectF(x, y, x + textWidth, y + lineHeight);
+                D2D1_POINT_2F pos = D2D1::Point2F(textX, y + codeTop);
+                D2D1_RECT_F bounds = D2D1::RectF(textX, y, textX + textWidth, y + lineHeight);
                 addTextRun(app, std::move(info), pos, bounds, color,
                            codeDocStart, text.length(), true);
 
                 app.docText += text;
                 markStyles(app, run.style, isLink, linkUrl, codeDocStart, app.docText.size());
-                if (isLink) addLinkSegment(x, x + textWidth, y, linkUrl, color);
+                if (isLink) addLinkSegment(textX, textX + textWidth, y, linkUrl, color);
                 if (hasUnderline) {
-                    addUnderline(run.style, x, x + textWidth, y, y + drawYOffset + baselineOf(textFormat),
+                    addUnderline(run.style, textX, textX + textWidth, y, y + drawYOffset + baselineOf(textFormat),
                                  color);
                 }
                 // ~~`code`~~ and <del>`code`</del>: struck like the text around it
                 if (hasStrike) {
-                    float strikeY = y + mathTextOffset + normalLineHeight * 0.55f;
-                    app.layoutLines.push_back({D2D1::Point2F(x, strikeY),
-                                               D2D1::Point2F(x + textWidth, strikeY), color, 1.0f});
+                    float strikeY = y + mathTextOffset + baselineOf(textFormat) - textFormat->GetFontSize() * 0.28f;
+                    app.layoutLines.push_back({D2D1::Point2F(textX, strikeY),
+                                               D2D1::Point2F(textX + textWidth, strikeY), color, 1.0f});
                 }
                 // Advance by the pill's own padding only: the surrounding text
                 // already carries the source's spacing, so a full space width
                 // here would double it and shove a following comma off the span
-                x += textWidth + kCodeSpanPadding;
+                x += advance;
                 continue;
             }
 
@@ -834,7 +1147,7 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                         bgColor, bgSpan);
                 }
                 if (hasStrike) {
-                    float strikeY = y + mathTextOffset + normalLineHeight * 0.55f;
+                    float strikeY = y + mathTextOffset + baselineOf(textFormat) - textFormat->GetFontSize() * 0.28f;
                     app.layoutLines.push_back({D2D1::Point2F(x, strikeY),
                                                D2D1::Point2F(x + w, strikeY), color, 1.0f});
                 }
@@ -974,7 +1287,9 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
 
         const float runWidth = std::max(0.0f, maxWidth - (wrappedCode ? kCodeSpanPadding : 0.0f));
         const float runMaxX = startX + runWidth;
-        IDWriteTypography* typography = wrappedCode ? app.codeTypography : app.bodyTypography;
+        IDWriteTypography* typography =
+            page::typography(app, run.style.css, wrappedCode ? app.codeTypography : app.bodyTypography);
+        const float spacing = page::letterSpacing(app, run.style.css);
         size_t textDocStart = app.docText.size();
         float linkLineStartX = x;
         float linkLineY = y;
@@ -989,7 +1304,7 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
         cumW[0] = 0.0f;
         isBoundary[0] = true;
         isBoundary[text.length()] = true;
-        LayoutInfo measureInfo = createLayout(app, text, format, lineHeight, typography);
+        LayoutInfo measureInfo = createLayout(app, text, format, lineHeight, typography, spacing);
         {
             if (measureInfo.layout) {
                 UINT32 clusterCount = 0;
@@ -1045,11 +1360,11 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                 info = measureInfo;
                 measureInfo.layout = nullptr;
             } else {
-                info = createLayout(app, segText, format, lineHeight, typography);
+                info = createLayout(app, segText, format, lineHeight, typography, spacing);
             }
             float segWidth = widthOf(segStart, segEnd);
             if (wrappedCode) {
-                const D2D1_COLOR_F codeBox = themeInlineCodeBackground(app.theme);
+                const D2D1_COLOR_F codeBox = run.style.codeBox.value_or(themeInlineCodeBackground(app.theme));
                 if (codeBox.a > 0.0f) {
                     app.layoutRects.push_back({
                         D2D1::RectF(segX - 2, y + mathTextOffset, segX + segWidth + kCodeSpanPadding,
@@ -1062,7 +1377,7 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                              bgColor, bgSpan);
             }
             if (hasStrike) {
-                float strikeY = y + mathTextOffset + normalLineHeight * 0.55f;
+                float strikeY = y + mathTextOffset + baselineOf(textFormat) - textFormat->GetFontSize() * 0.28f;
                 app.layoutLines.push_back({D2D1::Point2F(segX, strikeY),
                                            D2D1::Point2F(segX + segWidth, strikeY),
                                            color, 1.0f});
@@ -1215,6 +1530,14 @@ static void layoutMathBlock(App& app, const ElementPtr& elem, float& y,
     }
     float scale = app.contentScale * app.zoomFactor;
     y += 6 * scale;
+    // Its \label names, {#eq:id} among them, are places @eq:id and
+    // #eq:id links scroll to (Scholar)
+    for (size_t at = elem->text.find("\\label{"); at != std::string::npos;
+         at = elem->text.find("\\label{", at + 7)) {
+        const size_t close = elem->text.find('}', at + 7);
+        if (close == std::string::npos) break;
+        app.footnoteAnchors[elem->text.substr(at + 7, close - at - 7)] = y;
+    }
     float w = mathBoxWidth(box);
     float x = indent + std::max(0.0f, (maxWidth - w) / 2);
     // Its \tag's number at the line's right (#314). The equation moves off
@@ -1282,6 +1605,16 @@ static bool pinAnchorsOnly(App& app, const std::vector<ElementPtr>& children, fl
 
 static void layoutInlineRun(App& app, std::vector<ElementPtr>& run, float& y, float indent, float maxWidth);
 
+// What an element reads as, its inline children's text run together
+static std::string plainText(const ElementPtr& elem) {
+    if (elem->type == ElementType::Text) return elem->text;
+    if (elem->type == ElementType::SoftBreak) return " ";
+    std::string out;
+    for (const auto& child : elem->children) out += plainText(child);
+    return out;
+}
+
+
 static void layoutParagraph(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
     // A $$...$$ equation stands on its own line, centered, wherever it sits
     // in the paragraph: two in a row ran on as one line of text (#314). The
@@ -1306,11 +1639,22 @@ static void layoutParagraph(App& app, const ElementPtr& elem, float& y, float in
         return;
     }
     if (pinAnchorsOnly(app, elem->children, y)) return;
-    auto format = elem->language == "footnote-backlinks" && app.supSubFormat ? app.supSubFormat : app.textFormat;
-    layoutInlineContent(app, elem->children, indent, y, maxWidth, format, app.theme.text);
+    // A CSS theme's paragraph (page_style.h): its margins, box, face,
+    // colour, line height, first-line indent and alignment
+    const page::Style& css = page::current(app);
+    auto format = elem->language == "footnote-backlinks" && app.supSubFormat ? app.supSubFormat
+                                                                             : page::format(app, css, app.textFormat);
+    const D2D1_COLOR_F color = page::textColor(css, app.theme.text);
+    y += page::before(app, 0);
+    BlockBox box(app, css, y, indent, maxWidth);
+    const LayoutSnapshot start = takeSnapshot(app);
+    const float textIndent = css.has(css::Prop::TextIndent) ? page::px(app, css->textIndent) : 0.0f;
+    layoutInlineContent(app, withGenerated(app, css, elem->children), indent, y, maxWidth, format, color, {},
+                        page::lineHeight(app, css, format, 0.0f), textIndent != 0.0f ? indent + textIndent : -1.0f);
+    alignLines(app, start, indent, maxWidth, css);
+    box.close(y, color);
     app.docText += L"\n\n";
-    float scale = app.contentScale * app.zoomFactor;
-    y += 14 * scale;
+    y += page::after(app, 14);
 }
 
 // Inline content outside any paragraph, the bare text of a raw HTML block
@@ -1318,30 +1662,46 @@ static void layoutParagraph(App& app, const ElementPtr& elem, float& y, float in
 static void layoutInlineRun(App& app, std::vector<ElementPtr>& run, float& y, float indent, float maxWidth) {
     if (run.empty()) return;
     if (!pinAnchorsOnly(app, run, y)) {
-        layoutInlineContent(app, run, indent, y, maxWidth, app.textFormat, app.theme.text);
+        // The block the text sits in styles it
+        const page::Style& css = page::current(app);
+        IDWriteTextFormat* format = page::format(app, css, app.textFormat);
+        const LayoutSnapshot start = takeSnapshot(app);
+        layoutInlineContent(app, run, indent, y, maxWidth, format, page::textColor(css, app.theme.text), {},
+                            page::lineHeight(app, css, format, 0.0f));
+        alignLines(app, start, indent, maxWidth, css);
         app.docText += L"\n\n";
-        float scale = app.contentScale * app.zoomFactor;
-        y += 14 * scale;
+        y += page::after(app, 14);
     }
     run.clear();
 }
 
 // Counts a heading for Contents and anchor links: its text, and a
 // GitHub-style slug numbered when the same text came before
-static size_t registerHeading(App& app, const ElementPtr& elem, float y) {
-    std::wstring headingText;
+// A section number (Scholar) shows in Contents but stays out of the slug,
+// and an id given as {#id} is the heading's own. `number` is a CSS theme's
+// generated number, for Contents too
+static size_t registerHeading(App& app, const ElementPtr& elem, float y, const std::wstring& number = {}) {
+    std::wstring headingText, slugText;
     std::function<void(const ElementPtr&)> extract = [&](const ElementPtr& e) {
         if (!e) return;
-        if (e->type == ElementType::Text) headingText += toWide(e->text);
-        else for (const auto& c : e->children) extract(c);
+        if (e->type == ElementType::Text) {
+            headingText += toWide(e->text);
+            if (e->language != "section-number") slugText += toWide(e->text);
+        } else {
+            for (const auto& c : e->children) extract(c);
+        }
     };
     for (const auto& child : elem->children) extract(child);
 
-    std::string baseId = slugifyHeading(headingText);
-    int& n = app.headingSlugCounts[baseId];
-    std::string id = (n == 0) ? baseId : (baseId + "-" + std::to_string(n));
-    n++;
-    app.headings.push_back({headingText, elem->level, y, id});
+    std::string id = elem->title;
+    if (id.empty()) {
+        slugText.erase(0, slugText.find_first_not_of(L' '));  // the space after a number
+        std::string baseId = slugifyHeading(slugText);
+        int& n = app.headingSlugCounts[baseId];
+        id = (n == 0) ? baseId : (baseId + "-" + std::to_string(n));
+        n++;
+    }
+    app.headings.push_back({number + headingText, elem->level, y, id});
     return app.headings.size() - 1;
 }
 
@@ -1367,20 +1727,37 @@ static void registerHidden(App& app, const ElementPtr& elem, size_t under) {
 static void layoutHeading(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
     float scale = app.contentScale * app.zoomFactor;
     int levelIndex = std::min(elem->level - 1, 5);
-    IDWriteTextFormat* format = app.headingFormats[levelIndex] ? app.headingFormats[levelIndex] : app.textFormat;
+    // A CSS theme's heading (page_style.h): margins, box, face, colour,
+    // alignment, and a border under it in place of Tinta's rule
+    const page::Style& css = page::current(app);
+    IDWriteTextFormat* format = page::format(
+        app, css, app.headingFormats[levelIndex] ? app.headingFormats[levelIndex] : app.textFormat);
+    const D2D1_COLOR_F color = page::textColor(css, themeHeadingColor(app.theme, elem->level));
+    const bool themedRule = css.has(css::Prop::BorderBottomWidth) || css.has(css::Prop::BorderBottomStyle);
 
-    if (elem->level == 1) {
-        y += 16 * scale;
-    } else {
-        y += 20 * scale;
-    }
+    y += page::before(app, elem->level == 1 ? 16.0f : 20.0f);
+    BlockBox box(app, css, y, indent, maxWidth);
+    // Heading separators, the setting (#154), decides the line under a
+    // level 1 or 2 heading whoever draws it: off, a theme's own border
+    // there goes too, with the room it kept for it
+    if (elem->level <= 2 && !app.headingRules) box.edge[2] = box.pad[2] = 0.0f;
+    std::wstring number;  // a CSS theme's ::before, its counter() a heading number
+    const std::vector<ElementPtr> children = withGenerated(app, css, elem->children, &number);
 
     // All Markdown heading levels participate in Contents and anchor navigation (#210).
-    if (elem->level >= 1 && elem->level <= 6) registerHeading(app, elem, y);
+    if (elem->level >= 1 && elem->level <= 6) registerHeading(app, elem, y, number);
 
-    layoutInlineContent(app, elem->children, indent, y, maxWidth, format, themeHeadingColor(app.theme, elem->level));
+    const LayoutSnapshot start = takeSnapshot(app);
+    layoutInlineContent(app, children, indent, y, maxWidth, format, color, {},
+                        page::lineHeight(app, css, format, 0.0f));
+    alignLines(app, start, indent, maxWidth, css);
+    // On paper a theme's colours stay behind (page_style.h), its border's
+    // too: the line under a heading is then as faint as Tinta's own
+    D2D1_COLOR_F edgeInk = color;
+    if (app.printLayout) edgeInk.a *= 0.3f;
+    box.close(y, edgeInk);
 
-    if (elem->level <= 2 && app.headingRules) {
+    if (elem->level <= 2 && app.headingRules && !themedRule) {
         y += 6 * scale;
         D2D1_COLOR_F lineColor = themeHeadingColor(app.theme, elem->level);
         lineColor.a = 0.3f;
@@ -1392,7 +1769,7 @@ static void layoutHeading(App& app, const ElementPtr& elem, float& y, float inde
     }
 
     app.docText += L"\n\n";
-    y += 12 * scale;
+    y += page::after(app, 12);
 }
 
 static LayoutInfo createWrappedLayout(App& app, std::wstring_view text,
@@ -1445,9 +1822,10 @@ static ResolvedMermaidStyle resolveMermaidStyle(
         const App& app, const mermaid::Diagram& diagram,
         const mermaid::Node& node, float scale) {
     ResolvedMermaidStyle resolved;
-    resolved.fill = app.theme.codeBackground;
-    resolved.stroke = app.theme.accent;
-    resolved.text = app.theme.text;
+    const FlowchartColors colors = flowchartColors(app);
+    resolved.fill = colors.nodeFill;
+    resolved.stroke = colors.nodeBorder;
+    resolved.text = colors.nodeText;
     resolved.strokeWidth = 1.5f * scale;
 
     auto apply = [&](const mermaid::Style& style) {
@@ -1626,8 +2004,8 @@ static bool layoutMermaidDiagram(App& app, const std::string& source,
     std::vector<MermaidTextItem> textItems;
     textItems.reserve(diagram.nodes.size() + diagram.edges.size());
 
-    D2D1_COLOR_F connectorColor = app.theme.text;
-    connectorColor.a = app.theme.isDark ? 0.7f : 0.6f;
+    const FlowchartColors colors = flowchartColors(app);
+    D2D1_COLOR_F connectorColor = colors.line;
 
     // Subgraph group boxes: fill goes through layoutRects (drawn before the
     // connectors), the border rides with the node shapes, the title with the
@@ -1662,12 +2040,9 @@ static bool layoutMermaidDiagram(App& app, const std::string& source,
             boxes[s].right += boxPad;
             boxes[s].bottom += boxPad;
         }
-        D2D1_COLOR_F groupFill = app.theme.codeBackground;
-        groupFill.a *= 0.55f;
-        D2D1_COLOR_F groupBorder = app.theme.text;
-        groupBorder.a = 0.28f;
-        D2D1_COLOR_F groupTitle = app.theme.text;
-        groupTitle.a = 0.78f;
+        D2D1_COLOR_F groupFill = colors.clusterFill;
+        D2D1_COLOR_F groupBorder = colors.clusterBorder;
+        D2D1_COLOR_F groupTitle = colors.clusterText;
         for (size_t s = 0; s < diagram.subgraphs.size(); s++) {
             if (boxes[s].left == kEmpty) continue;
             app.layoutRects.push_back({boxes[s], groupFill});
@@ -1885,13 +2260,11 @@ static bool layoutMermaidDiagram(App& app, const std::string& source,
             // Draw the label as a visible chip on the edge — an invisible
             // background-colored pill erases the line under it, which makes
             // edges look disconnected and labels look like floating text
-            D2D1_COLOR_F chipStroke = connectorColor;
-            chipStroke.a *= 0.6f;
             app.layoutShapes.push_back({
                 App::LayoutShapeType::RoundedRectangle,
                 labelRect,
-                app.theme.codeBackground,
-                chipStroke,
+                colors.labelFill,
+                colors.labelBorder,
                 1.2f * scale,
                 4.0f * scale,
             });
@@ -1904,7 +2277,7 @@ static bool layoutMermaidDiagram(App& app, const std::string& source,
                 labelRect.top + labelPaddingY,
                 labelRect.right - labelPaddingX,
                 labelRect.bottom - labelPaddingY);
-            textItems.push_back({edgeLabel.text, textRect, app.theme.text});
+            textItems.push_back({edgeLabel.text, textRect, colors.labelText});
         }
     }
 
@@ -2062,8 +2435,14 @@ static void hslToRgb(float h, float s, float l, float& r, float& g, float& b) {
 }
 
 // Categorical palette derived from the theme accent: golden-angle hue steps
-// keep neighboring series distinct in any theme
-static D2D1_COLOR_F diagramSeriesColor(const App& app, int index) {
+// keep neighboring series distinct in any theme. A CSS theme's
+// --mermaid-pie1 to --mermaid-pie12 take the places they name, in turn
+static D2D1_COLOR_F diagramSeriesColor(const App& app, int index,
+                                       const DiagramColors* mermaid) {
+    if (mermaid && index >= 0) {
+        const auto& own = mermaid->series[index % 12];
+        if (own) return *own;
+    }
     float h, s, l;
     rgbToHsl(app.theme.accent.r, app.theme.accent.g, app.theme.accent.b,
              h, s, l);
@@ -2075,40 +2454,57 @@ static D2D1_COLOR_F diagramSeriesColor(const App& app, int index) {
     return D2D1::ColorF(r, g, b, 1.0f);
 }
 
-D2D1_COLOR_F resolveDiagramRoleImpl(const App& app,
-                                const mermaidext::Prim& prim,
-                                mermaidext::Role role) {
+// A role's colour. `mermaid` holds a CSS theme's --mermaid-* variables
+// (docs/css-themes.md); null keeps the page's, as PlantUML does
+static D2D1_COLOR_F diagramRoleColor(const App& app,
+                                     const mermaidext::Prim& prim,
+                                     mermaidext::Role role,
+                                     const DiagramColors* mermaid) {
+    static const DiagramColors pageOnly;
+    const DiagramColors& m = mermaid ? *mermaid : pageOnly;
+    // The diagram's text, which its dimmed text and lines derive from
+    const D2D1_COLOR_F text = m.text.value_or(app.theme.text);
     int seriesIndex = prim.seriesIndex;
-    D2D1_COLOR_F color = app.theme.text;
+    D2D1_COLOR_F color = text;
     switch (role) {
         case mermaidext::Role::Text:
-            color = app.theme.text;
+            color = text;
             break;
         case mermaidext::Role::Muted:
-            color = app.theme.text;
+            // Lines, arrows and frames take the line colour; text stays
+            // dimmed text
+            if (m.line && prim.type != mermaidext::PrimType::Text) {
+                color = *m.line;
+                break;
+            }
+            color = text;
             color.a = app.theme.isDark ? 0.72f : 0.62f;
             break;
         case mermaidext::Role::Stroke:
-            color = app.theme.accent;
+            color = m.nodeBorder.value_or(app.theme.accent);
             break;
         case mermaidext::Role::Fill:
-            color = app.theme.codeBackground;
+            color = m.nodeFill.value_or(app.theme.codeBackground);
             break;
         case mermaidext::Role::Accent:
             color = app.theme.accent;
             break;
         case mermaidext::Role::AccentSoft:
+            if (m.secondary) {
+                color = *m.secondary;
+                break;
+            }
             color = app.theme.accent;
             color.a = app.theme.isDark ? 0.20f : 0.13f;
             break;
         case mermaidext::Role::Background:
-            color = app.theme.background;
+            color = m.background.value_or(app.theme.background);
             break;
         case mermaidext::Role::Series:
-            color = diagramSeriesColor(app, seriesIndex);
+            color = diagramSeriesColor(app, seriesIndex, mermaid);
             break;
         case mermaidext::Role::SeriesSoft:
-            color = diagramSeriesColor(app, seriesIndex);
+            color = diagramSeriesColor(app, seriesIndex, mermaid);
             color.a = 0.30f;
             break;
         case mermaidext::Role::Custom:
@@ -2120,6 +2516,12 @@ D2D1_COLOR_F resolveDiagramRoleImpl(const App& app,
             break;
     }
     return color;
+}
+
+D2D1_COLOR_F resolveDiagramRoleImpl(const App& app,
+                                    const mermaidext::Prim& prim,
+                                    mermaidext::Role role) {
+    return diagramRoleColor(app, prim, role, &app.theme.mermaid);
 }
 
 // Per-layout-pass cache of text formats for the diagram text styles
@@ -2148,7 +2550,7 @@ struct DiagramFormats {
         float size = (style.mono ? 13.0f : 14.0f) * scale * style.scale;
         IDWriteTextFormat* format = nullptr;
         app.dwriteFactory->CreateTextFormat(
-            family, nullptr,
+            fontfaces::name(family), fontfaces::collection(family),
             style.bold ? DWRITE_FONT_WEIGHT_SEMI_BOLD
                        : DWRITE_FONT_WEIGHT_NORMAL,
             style.italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
@@ -2508,6 +2910,55 @@ static std::string colorHexNoHash(const D2D1_COLOR_F& c) {
     return buf;
 }
 
+// A row of a code line too long for its block (#324): where it starts in
+// the line, how much of the line it takes, and how much of that is drawn.
+// The spaces a row ends on hang past the edge unseen, as in any wrapped
+// text, so they are left out of what is drawn.
+struct CodeRow {
+    size_t start = 0, length = 0, drawn = 0;
+};
+
+// White space a row may end on without drawing it. DirectWrite lets a tab
+// hang past the edge as it does a space, but counts only the spaces.
+static bool codeRowHangs(wchar_t c) {
+    return c == L' ' || c == L'\t' || c == L'\r' || c == L'\v' || c == L'\f' || c == 0x85 || c == 0x1680 ||
+           (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029 || c == 0x3000;
+}
+
+// Where a code line goes over to its next rows: at a space or another
+// place a line may break where the row has one, inside a word where it has
+// none. DirectWrite decides, with the block's own font, features and
+// fallback, so a row of mixed scripts is measured as it is drawn.
+static void codeRows(App& app, const std::wstring& line, float width, float lineHeight, std::vector<CodeRow>& rows) {
+    rows.clear();
+    IDWriteTextLayout* layout = nullptr;
+    app.dwriteFactory->CreateTextLayout(line.data(), (UINT32)line.length(), app.codeFormat, width, lineHeight,
+                                        &layout);
+    if (!layout) return;
+    if (app.codeTypography) layout->SetTypography(app.codeTypography, {0, (UINT32)line.length()});
+    if (app.fontFallback) {
+        IDWriteTextLayout2* layout2 = nullptr;
+        if (SUCCEEDED(layout->QueryInterface(__uuidof(IDWriteTextLayout2), reinterpret_cast<void**>(&layout2)))) {
+            layout2->SetFontFallback(app.fontFallback);
+            layout2->Release();
+        }
+    }
+    layout->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);  // which cuts a word longer than the row
+    UINT32 count = 0;
+    layout->GetLineMetrics(nullptr, 0, &count);
+    std::vector<DWRITE_LINE_METRICS> lines(count);
+    if (count > 0 && SUCCEEDED(layout->GetLineMetrics(lines.data(), count, &count))) {
+        size_t at = 0;
+        for (UINT32 i = 0; i < count; i++) {
+            size_t drawn = lines[i].length - std::min(lines[i].length, lines[i].trailingWhitespaceLength);
+            while (drawn > 0 && codeRowHangs(line[at + drawn - 1])) --drawn;
+            rows.push_back({at, lines[i].length, drawn});
+            at += lines[i].length;
+        }
+    }
+    layout->Release();
+}
+
 static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
     std::string code;
     for (const auto& child : elem->children) {
@@ -2589,16 +3040,12 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
             // The print layout swaps app.theme for the light Paper palette
             // before reaching here, so printed diagrams stay on that light
             // path by design.
-            mermaidext::Prim colorPrim{};
             const std::string preambleText = plantuml::preamble(
                 wideToUtf8(app.theme.fontFamily), 14.0f,
-                colorHexNoHash(resolveDiagramRoleImpl(
-                    app, colorPrim, mermaidext::Role::Text)),
+                colorHexNoHash(plantumlRoleColor(app, mermaidext::Role::Text)),
                 app.theme.isDark,
-                colorHexNoHash(resolveDiagramRoleImpl(
-                    app, colorPrim, mermaidext::Role::Fill)),
-                colorHexNoHash(resolveDiagramRoleImpl(
-                    app, colorPrim, mermaidext::Role::Stroke)));
+                colorHexNoHash(plantumlRoleColor(app, mermaidext::Role::Fill)),
+                colorHexNoHash(plantumlRoleColor(app, mermaidext::Role::Stroke)));
             std::string sourceWithPreamble = code;
             // No @startuml anchor: nothing to render, fall through to the
             // existing source-code rendering unchanged.
@@ -2723,8 +3170,17 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
     int language = detectLanguage(langHint);
 
     float scale = app.contentScale * app.zoomFactor;
-    float lineHeight = 20.0f * scale;
-    float padding = 12.0f * scale;
+    // A CSS theme's block (page_style.h): padding, line height, colours,
+    // corners and an edge
+    using css::Prop;
+    const page::Style& css = page::current(app);
+    float lineHeight = page::lineHeight(app, css, app.codeFormat, 20.0f * scale);
+    float pad[4] = {12.0f * scale, 12.0f * scale, 12.0f * scale, 12.0f * scale};
+    for (int side = 0; side < 4; ++side) {
+        if (css.has((Prop)((int)Prop::PaddingTop + side))) pad[side] = page::px(app, css->padding[side]);
+    }
+    const D2D1_COLOR_F codeText = page::textColor(css, app.theme.code);
+    y += page::before(app, 0);
 
     // A terminal newline ends the last row; it does not start another.
     // Count earlier blank rows normally and keep the empty-block minimum.
@@ -2733,28 +3189,30 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
 
     app.docText += L"\n";
 
-    float blockHeight = lineCount * lineHeight + padding * 2;
-    size_t bgRectIndex = app.layoutRects.size();
-    // Peeking a plain-text file: the panel already frames the content,
-    // so the whole-file wrapper block skips its own card
-    bool frameless = app.peekFrameless;
-    if (!frameless) {
-        app.layoutRects.push_back({D2D1::RectF(indent, y, indent + maxWidth, y + blockHeight),
-                                   app.theme.codeBackground});
-    }
-
     std::wstring wcode = toWide(code);
 
-    // Track code block for copy button
-    app.codeBlocks.push_back({
-        D2D1::RectF(indent, y, indent + maxWidth, y + blockHeight),
-        wcode
-    });
-    float textY = y + padding;
+    // Long lines wrap at the block's inner edge (#324). With the setting
+    // off, or in a block too narrow for a few letters, the block grows as
+    // wide as its longest line and the page scrolls sideways.
+    const float innerWidth = maxWidth - pad[1] - pad[3];
+    const bool wraps = app.wrapCode && innerWidth >= lineHeight * 2.0f;
+    int wrappedRows = 0;  // the rows after each line's first
+
+    const float blockTop = y;
+    float textY = y + pad[0];
     SyntaxState syntaxState;
     size_t codeDocStart = app.docText.size();
     size_t lineStart = 0;
     float maxLineWidth = 0.0f;
+
+    // A stretch of a line in one colour, and its layout until a row takes it
+    struct Piece {
+        size_t start = 0, length = 0;
+        D2D1_COLOR_F color{};
+        LayoutInfo info;
+    };
+    std::vector<Piece> pieces;
+    std::vector<CodeRow> rows;
 
     while (lineStart < wcode.length()) {
         size_t lineEnd = wcode.find(L'\n', lineStart);
@@ -2762,14 +3220,13 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
 
         std::wstring wline = wcode.substr(lineStart, lineEnd - lineStart);
         if (!wline.empty() && wline.back() == L'\r') wline.pop_back();
+        const std::wstring_view lineView(wline);
 
         size_t lineDocStart = codeDocStart + lineStart;
-        float lineWidth = 0.0f;
-        size_t lineRun = (size_t)-1;
 
+        pieces.clear();
         if (language > 0) {
             std::vector<SyntaxToken> tokens = tokenizeLine(wline, language, syntaxState);
-            float tokenX = indent + padding;
 
             // Merge consecutive same-color tokens into one layout — a line
             // typically collapses to a handful of color runs instead of one
@@ -2795,51 +3252,122 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
                     tj++;
                 }
 
-                LayoutInfo info = createLayout(app, runText, app.codeFormat, lineHeight, app.codeTypography);
-                float runWidth = info.width;
-
-                D2D1_POINT_2F pos = D2D1::Point2F(tokenX, textY);
-                D2D1_RECT_F bounds = D2D1::RectF(tokenX, textY, tokenX + runWidth, textY + lineHeight);
-                addTextRun(app, std::move(info), pos, bounds, runColor,
-                           lineDocStart, 0, false);
-
-                tokenX += runWidth;
-                lineWidth += runWidth;
+                Piece piece;
+                piece.start = (size_t)(runText.data() - wline.data());
+                piece.length = runText.size();
+                piece.color = runColor;
+                pieces.push_back(std::move(piece));
                 ti = tj;
             }
-        } else {
-            LayoutInfo info = createLayout(app, wline, app.codeFormat, lineHeight, app.codeTypography);
-            lineWidth = info.width;
-            D2D1_POINT_2F pos = D2D1::Point2F(indent + padding, textY);
-            D2D1_RECT_F bounds = D2D1::RectF(indent + padding, textY,
-                                             indent + padding + lineWidth, textY + lineHeight);
-            size_t runsBefore = app.layoutTextRuns.size();
-            addTextRun(app, std::move(info), pos, bounds, app.theme.code,
-                       lineDocStart, wline.length(), false);
-            if (app.layoutTextRuns.size() > runsBefore) {
-                lineRun = app.layoutTextRuns.size() - 1;
+        } else if (!wline.empty()) {
+            Piece piece;
+            piece.length = wline.length();
+            piece.color = codeText;
+            pieces.push_back(std::move(piece));
+        }
+
+        // The line as it is: most lines fit their block and are done
+        float lineWidth = 0.0f;
+        for (Piece& piece : pieces) {
+            piece.info = createLayout(app, lineView.substr(piece.start, piece.length), app.codeFormat, lineHeight,
+                                      app.codeTypography);
+            lineWidth += piece.info.width;
+        }
+
+        // One row: the pieces of [from, from + drawn) side by side, and the
+        // row's place in the document, which runs on over the spaces a
+        // wrapped row ends on
+        auto layRow = [&](size_t from, size_t length, size_t drawn) {
+            float x = indent + pad[3];
+            float rowWidth = 0.0f;
+            size_t rowRun = (size_t)-1;
+            for (Piece& piece : pieces) {
+                const size_t a = std::max(piece.start, from);
+                const size_t b = std::min(piece.start + piece.length, from + drawn);
+                if (a >= b) continue;
+                LayoutInfo info;
+                if (a == piece.start && b == piece.start + piece.length) {
+                    info = piece.info;
+                    piece.info = {};
+                } else {
+                    info = createLayout(app, lineView.substr(a, b - a), app.codeFormat, lineHeight,
+                                        app.codeTypography);
+                }
+                const float runWidth = info.width;
+                D2D1_POINT_2F pos = D2D1::Point2F(x, textY);
+                D2D1_RECT_F bounds = D2D1::RectF(x, textY, x + runWidth, textY + lineHeight);
+                if (language > 0) {
+                    addTextRun(app, std::move(info), pos, bounds, piece.color, lineDocStart, 0, false);
+                } else {
+                    size_t runsBefore = app.layoutTextRuns.size();
+                    addTextRun(app, std::move(info), pos, bounds, piece.color, lineDocStart + a, b - a, false);
+                    if (app.layoutTextRuns.size() > runsBefore) rowRun = app.layoutTextRuns.size() - 1;
+                }
+                x += runWidth;
+                rowWidth += runWidth;
             }
+            if (length > 0) {
+                D2D1_RECT_F rowBounds = D2D1::RectF(indent + pad[3], textY,
+                    indent + pad[3] + rowWidth, textY + lineHeight);
+                // Syntax-highlighted lines have no single covering layout;
+                // monospace interpolation stays accurate there
+                addTextRect(app, rowBounds, lineDocStart + from, length, rowRun);
+            }
+            textY += lineHeight;
+            maxLineWidth = std::max(maxLineWidth, rowWidth);
+        };
+
+        rows.clear();
+        if (wraps && lineWidth > innerWidth) codeRows(app, wline, innerWidth, lineHeight, rows);
+        if (!rows.empty()) {
+            for (const CodeRow& row : rows) layRow(row.start, row.length, row.drawn);
+            wrappedRows += (int)rows.size() - 1;
+            // What no row took whole was laid out again in its parts
+            for (Piece& piece : pieces) {
+                if (piece.info.layout) piece.info.layout->Release();
+                piece.info = {};
+            }
+        } else {
+            layRow(0, wline.length(), wline.length());
         }
 
-        if (!wline.empty()) {
-            D2D1_RECT_F lineBounds = D2D1::RectF(indent + padding, textY,
-                indent + padding + lineWidth, textY + lineHeight);
-            // Syntax-highlighted lines have no single covering layout;
-            // monospace interpolation stays accurate there
-            addTextRect(app, lineBounds, lineDocStart, wline.length(), lineRun);
-        }
-
-        maxLineWidth = std::max(maxLineWidth, lineWidth);
-        textY += lineHeight;
         if (lineEnd == wcode.length()) break;
         lineStart = lineEnd + 1;
     }
 
+    float blockHeight = (lineCount + wrappedRows) * lineHeight + pad[0] + pad[2];
+    size_t bgRectIndex = app.layoutRects.size();
+    // Peeking a plain-text file: the panel already frames the content,
+    // so the whole-file wrapper block skips its own card
+    bool frameless = app.peekFrameless;
+    if (!frameless) {
+        App::LayoutRect card;
+        card.rect = D2D1::RectF(indent, blockTop, indent + maxWidth, blockTop + blockHeight);
+        card.color = css.has(Prop::BackgroundColor) ? page::color(css->backgroundColor) : app.theme.codeBackground;
+        if (css.has(Prop::BorderTopLeftRadius)) card.radius = page::px(app, css->radius[0]);
+        if (css.has(Prop::BorderTopWidth) || css.has(Prop::BorderTopStyle)) {
+            const css::Border& edge = css->border[0];
+            card.strokeWidth = edge.style == css::LineStyle::None ? 0.0f : page::px(app, edge.width);
+            card.stroke = css.has(Prop::BorderTopColor) ? page::color(edge.color) : app.theme.blockquoteBorder;
+        }
+        app.layoutRects.push_back(card);
+        const size_t before = app.layoutRects.size();
+        addShadow(app, bgRectIndex, card.rect, card.radius, css);
+        bgRectIndex += app.layoutRects.size() - before;  // the card moved up past its shadow
+    }
+
+    // Track code block for copy button
+    app.codeBlocks.push_back({
+        D2D1::RectF(indent, blockTop, indent + maxWidth, blockTop + blockHeight),
+        wcode
+    });
+
     // Long code lines used to be clipped at the block edge with no way to
     // reach them — extend the block background and the document width so
-    // wide code participates in horizontal scrolling like diagrams do
-    float widestExtent = maxLineWidth + padding * 2;
-    if (widestExtent > maxWidth) {
+    // wide code participates in horizontal scrolling like diagrams do.
+    // Wrapped rows fit; one that is a rounding wider leaves the block alone.
+    float widestExtent = maxLineWidth + pad[1] + pad[3];
+    if (widestExtent > maxWidth + (wraps ? 1.0f : 0.0f)) {
         if (!frameless) {
             app.layoutRects[bgRectIndex].rect.right = indent + widestExtent;
         }
@@ -2848,7 +3376,8 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
 
     app.docText += wcode;
     app.docText += L"\n\n";
-    y += blockHeight + 14 * scale;
+    y += blockHeight;
+    y += page::after(app, 14);
 }
 
 static bool isInlineElement(ElementType type) {
@@ -2872,6 +3401,8 @@ static bool isInlineElement(ElementType type) {
         case ElementType::Strikethrough:
         case ElementType::Underline:
         case ElementType::MathInline:
+        case ElementType::Citation:
+        case ElementType::CrossReference:
             return true;
         case ElementType::MathDisplay:
             // Tight lists expose $$...$$ directly; route it through inline layout.
@@ -2882,9 +3413,35 @@ static bool isInlineElement(ElementType type) {
 }
 
 static void layoutBlockquote(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
+    using css::Prop;
     float scale = app.contentScale * app.zoomFactor;
     float quoteIndent = 20.0f * scale;
+    // A CSS theme's quote (page_style.h): its left border is the bar, the
+    // border and padding its indent; a background or vertical padding
+    // makes it a box the bar runs the height of
+    const page::Style& css = page::current(app);
+    y += page::before(app, 0);
+    float barWidth = 4.0f;
+    const bool themedBar = css.has(Prop::BorderLeftWidth) || css.has(Prop::BorderLeftStyle);
+    if (themedBar) barWidth = css->border[3].style == css::LineStyle::None ? 0.0f : page::px(app, css->border[3].width);
+    if (css.has(Prop::PaddingLeft)) quoteIndent = barWidth + page::px(app, css->padding[3]);
+    else if (themedBar) quoteIndent = std::max(quoteIndent, barWidth + 16.0f * scale);
+    const float padRight = css.has(Prop::PaddingRight) ? page::px(app, css->padding[1]) : 0.0f;
+    const bool filled = css.has(Prop::BackgroundColor) && css->backgroundColor.a > 0.0f;
+    const bool boxed = filled || css.has(Prop::PaddingTop) || css.has(Prop::PaddingBottom);
+    size_t fill = SIZE_MAX;
+    if (filled) {
+        fill = app.layoutRects.size();
+        App::LayoutRect r;
+        r.rect = D2D1::RectF(indent, y, indent + maxWidth, y);
+        r.color = page::color(css->backgroundColor);
+        if (css.has(Prop::BorderTopLeftRadius)) r.radius = page::px(app, css->radius[0]);
+        app.layoutRects.push_back(r);
+    }
     float startY = y;
+    if (css.has(Prop::PaddingTop)) y += page::px(app, css->padding[0]);
+    if (boxed) page::boundary(app);
+    maxWidth -= padRight;
     const LayoutSnapshot contentStart = takeSnapshot(app);
 
     // GitHub alert callouts: accent-colored bar plus a bold title line.
@@ -2905,6 +3462,24 @@ static void layoutBlockquote(App& app, const ElementPtr& elem, float& y, float i
     if (elem->alertKind >= 1 && elem->alertKind <= 5) {
         const auto& style = ALERT_STYLES[elem->alertKind - 1];
         barColor = hexColor(app.theme.isDark ? style.dark : style.light);
+        // A callout keeps its own colour unless the theme has a word for
+        // callouts: a rule for every quote's bar (blockquote { border-left-color })
+        // reaches it too, and is not that word
+        if (css.has(Prop::BorderLeftColor)) {
+            const page::Style plain = page::lookup(app, {"blockquote"});
+            const css::Color& bar = css->border[3].color;
+            const bool quotes = plain.has(Prop::BorderLeftColor) && plain->border[3].color.r == bar.r && plain->border[3].color.g == bar.g &&
+                                plain->border[3].color.b == bar.b && plain->border[3].color.a == bar.a;
+            if (!quotes) barColor = page::color(bar);
+        }
+        css::Element titleElement;
+        titleElement.tag = "p";
+        titleElement.classes = {"alert-title"};
+        titleElement.index = titleElement.typeIndex = 1;
+        titleElement.count = titleElement.typeCount = 1;
+        page::Block titleBlock(app, titleElement);
+        // Its title in the bar's colour, unless a rule names the title itself
+        const D2D1_COLOR_F titleColor = titleBlock.style().own(Prop::Color) ? page::color(titleBlock.style()->color) : barColor;
 
         std::wstring title = style.title;
         LayoutInfo info = createLayout(app, title, app.textFormat, 24.0f, app.bodyTypography);
@@ -2915,8 +3490,10 @@ static void layoutBlockquote(App& app, const ElementPtr& elem, float& y, float i
         D2D1_POINT_2F pos = D2D1::Point2F(indent + quoteIndent, y);
         D2D1_RECT_F bounds = D2D1::RectF(indent + quoteIndent, y,
                                          indent + maxWidth, y + 24 * scale);
-        addTextRun(app, std::move(info), pos, bounds, barColor, 0, 0, false);
+        addTextRun(app, std::move(info), pos, bounds, titleColor, 0, 0, false);
         y += 30 * scale;
+    } else if (css.has(Prop::BorderLeftColor)) {
+        barColor = page::color(css->border[3].color);
     }
 
     // A raw HTML quote can hold its text bare, with no <p> around it
@@ -2955,7 +3532,22 @@ static void layoutBlockquote(App& app, const ElementPtr& elem, float& y, float i
     for (size_t i = contentStart.bitmaps; i < app.layoutBitmaps.size(); ++i)
         contentBottom = std::max(contentBottom, app.layoutBitmaps[i].destRect.bottom);
 
-    app.layoutRects.push_back({D2D1::RectF(indent, startY, indent + 4, std::min(y, contentBottom)), barColor});
+    if (boxed) {
+        // A box holds its children's margins, as CSS's padding does
+        if (css.has(Prop::PaddingBottom)) y += page::px(app, css->padding[2]);
+        if (fill < app.layoutRects.size()) {
+            app.layoutRects[fill].rect.bottom = y;
+            addShadow(app, fill, app.layoutRects[fill].rect, app.layoutRects[fill].radius, css);
+        }
+        if (barWidth > 0.0f) app.layoutRects.push_back({D2D1::RectF(indent, startY, indent + barWidth, y), barColor});
+        page::boundary(app);
+        y += page::afterContainer(app, 14);
+        return;
+    }
+    if (barWidth > 0.0f) {
+        app.layoutRects.push_back({D2D1::RectF(indent, startY, indent + barWidth, std::min(y, contentBottom)), barColor});
+    }
+    y += page::afterContainer(app, 0);
 }
 
 // HTML wrappers and anchor-only content do not determine a list marker's baseline.
@@ -2979,8 +3571,13 @@ static const Element* firstListContent(const std::vector<ElementPtr>& children) 
 }
 
 static void layoutList(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
+    using css::Prop;
     float scale = app.contentScale * app.zoomFactor;
-    float listIndent = 24.0f * scale;
+    // A CSS theme's list (page_style.h): padding-left is the indent its
+    // markers hang in, list-style-type and ::marker the markers
+    const page::Style& listCss = page::current(app);
+    float listIndent = listCss.has(Prop::PaddingLeft) ? page::px(app, listCss->padding[3]) : 24.0f * scale;
+    y += page::before(app, 0);
     int itemNum = elem->start;
     // How deep this list sits in other lists, for the copy's nesting
     static int listDepth = 0;
@@ -2991,6 +3588,42 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
 
     for (const auto& child : elem->children) {
         if (child->type != ElementType::ListItem) continue;
+        page::Block item(app, child.get());
+        const page::Style& css = item.style();
+        y += page::before(app, 0);
+        IDWriteTextFormat* itemFormat = page::format(app, css, app.textFormat);
+        const D2D1_COLOR_F itemColor = page::textColor(css, app.theme.text);
+        // The theme's marker: ::marker's content, or the list-style-type
+        // (a bullet's shape, a counter, a string or none)
+        const css::ComputedStyle* markerCss = css ? page::pseudo(app, css, css::Pseudo::Marker) : nullptr;
+        D2D1_COLOR_F markerColor = itemColor;
+        if (markerCss && markerCss->has(Prop::Color)) markerColor = page::color(markerCss->color);
+        int themedBullet = -1;
+        bool themedText = false, themedNone = false;
+        std::wstring themedMarker;
+        if (markerCss && !markerCss->content.empty()) {
+            themedText = true;
+            for (const auto& part : markerCss->content) {
+                if (part.kind == css::ContentPart::Text) themedMarker += toWide(part.text);
+                else if (part.kind == css::ContentPart::Counter || part.kind == css::ContentPart::Counters)
+                    themedMarker += page::counterText(itemNum, part.style);
+            }
+        } else if (css.has(Prop::ListStyleType)) {
+            switch (css->listStyle) {
+                case css::ListStyle::Disc: themedBullet = 0; break;
+                case css::ListStyle::Circle: themedBullet = 1; break;
+                case css::ListStyle::Square: themedBullet = 2; break;
+                case css::ListStyle::None: themedNone = true; break;
+                case css::ListStyle::String:
+                    themedText = true;
+                    themedMarker = toWide(css->listString);
+                    break;
+                default:
+                    themedText = true;
+                    themedMarker = page::counterText(itemNum, css->listStyle) + L".";
+                    break;
+            }
+        }
 
         const LayoutSnapshot markerStart = takeSnapshot(app);
         size_t markerIndex = SIZE_MAX, bulletIndex = SIZE_MAX;
@@ -3033,6 +3666,22 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
                                 boxX + box + 4 * scale, boxY + box + 4 * scale),
                     child->taskMarkOffset, child->taskChecked});
             }
+        } else if (themedNone) {
+            itemNum++;
+        } else if (themedText) {
+            itemNum++;
+            LayoutInfo info = createLayout(app, themedMarker, itemFormat, 24.0f, app.bodyTypography);
+            D2D1_POINT_2F pos = D2D1::Point2F(indent, y);
+            // A marker wider than the indent ends where the text begins
+            if (info.width > listIndent) pos.x = indent + listIndent - info.width - 4.0f * scale;
+            D2D1_RECT_F bounds = D2D1::RectF(pos.x, y, indent + listIndent, y + 24);
+            if (info.layout) markerIndex = app.layoutTextRuns.size();
+            addTextRun(app, std::move(info), pos, bounds, markerColor, 0, 0, false);
+        } else if (themedBullet >= 0 && itemFormat) {
+            bulletBaseline = y + formatBaseline(app, itemFormat);
+            bulletIndex = app.layoutShapes.size();
+            app.layoutShapes.push_back(listBullet(indent + listIndent, bulletBaseline,
+                itemFormat->GetFontSize(), themedBullet, markerColor));
         } else if (elem->ordered) {
             std::wstring marker = std::to_wstring(itemNum++) + L".";
 
@@ -3040,12 +3689,12 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
             D2D1_POINT_2F pos = D2D1::Point2F(indent, y);
             D2D1_RECT_F bounds = D2D1::RectF(indent, y, indent + listIndent, y + 24);
             if (info.layout) markerIndex = app.layoutTextRuns.size();
-            addTextRun(app, std::move(info), pos, bounds, app.theme.text, 0, 0, false);
+            addTextRun(app, std::move(info), pos, bounds, markerColor, 0, 0, false);
         } else if (app.textFormat) {
-            bulletBaseline = y + formatBaseline(app, app.textFormat);
+            bulletBaseline = y + formatBaseline(app, itemFormat);
             bulletIndex = app.layoutShapes.size();
             app.layoutShapes.push_back(listBullet(indent + listIndent, bulletBaseline,
-                app.textFormat->GetFontSize(), listDepth - 1, app.theme.text));
+                itemFormat->GetFontSize(), listDepth - 1, markerColor));
         }
 
         const LayoutSnapshot contentStart = takeSnapshot(app);
@@ -3054,15 +3703,18 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
 
         // MD4C omits paragraph wrappers in tight lists.
         // Hence list items can mix direct inline children with block children.
+        // A CSS theme's li::before and li::after go around the item's text
         std::vector<ElementPtr> inlineElements;
-        for (const auto& itemChild : child->children) {
+        const std::vector<ElementPtr> itemChildren = withGenerated(app, css, child->children);
+        for (const auto& itemChild : itemChildren) {
             if (isInlineElement(itemChild->type)) {
                 inlineElements.push_back(itemChild);
             } else {
                 if (!inlineElements.empty()) {
                     if (!pinAnchorsOnly(app, inlineElements, y)) {
                         layoutInlineContent(app, inlineElements, indent + listIndent, y,
-                            maxWidth - listIndent, app.textFormat, app.theme.text);
+                            maxWidth - listIndent, itemFormat, itemColor, {},
+                            page::lineHeight(app, css, itemFormat, 0.0f));
                         // The item's text ends its line before a nested list, as
                         // on screen (a copy read "Water it.morning")
                         app.docText += L"\n";
@@ -3073,8 +3725,11 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
             }
         }
         if (!inlineElements.empty() && !pinAnchorsOnly(app, inlineElements, y)) {
+            const LayoutSnapshot textStart = takeSnapshot(app);
             layoutInlineContent(app, inlineElements, indent + listIndent, y,
-                maxWidth - listIndent, app.textFormat, app.theme.text);
+                maxWidth - listIndent, itemFormat, itemColor, {},
+                page::lineHeight(app, css, itemFormat, 0.0f));
+            alignLines(app, textStart, indent + listIndent, maxWidth - listIndent, css);
         }
 
         const auto* first = firstListContent(child->children);
@@ -3118,8 +3773,9 @@ static void layoutList(App& app, const ElementPtr& elem, float& y, float indent,
         if (y < itemStartY + 28 * scale) {
             y = itemStartY + 28 * scale;
         }
+        y += page::afterContainer(app, 0);
     }
-    y += 8 * scale;
+    y += page::afterContainer(app, 8);
 }
 
 // Result of a background image download+decode, handed to the UI thread
@@ -3431,7 +4087,7 @@ static void layoutImage(App& app, const ElementPtr& elem, float& y, float indent
         }
         altText += L"]";
 
-        float lineHeight = app.italicFormat->GetFontSize() * 1.7f;
+        float lineHeight = app.italicFormat->GetFontSize() * themeLineHeight(app.theme);
         size_t docStart = app.docText.size();
         LayoutInfo info = createLayout(app, altText, app.italicFormat, lineHeight, app.bodyTypography);
 
@@ -3461,17 +4117,23 @@ static void layoutImage(App& app, const ElementPtr& elem, float& y, float indent
         displayW = displayH * (imgW / imgH);
     }
 
-    app.layoutBitmaps.push_back({entry.bitmap,
-        D2D1::RectF(indent, y, indent + displayW, y + displayH)});
+    App::LayoutBitmap placed{entry.bitmap, D2D1::RectF(indent, y, indent + displayW, y + displayH)};
+    // A CSS theme's img { opacity } (page_style.h)
+    if (const page::Style& around = page::current(app)) {
+        const page::Style img = page::child(app, around, *elem);
+        if (img.has(css::Prop::Opacity)) placed.opacity = std::clamp(img->opacity, 0.0f, 1.0f);
+    }
+    app.layoutBitmaps.push_back(std::move(placed));
 
     y += displayH + 12 * scale;
 }
 
 static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
+    using css::Prop;
     float scale = app.contentScale * app.zoomFactor;
     float cellPadding = 8.0f * scale;
     float fontSize = app.textFormat->GetFontSize();
-    float lineHeight = fontSize * 1.7f;
+    float lineHeight = fontSize * themeLineHeight(app.theme);
     float minColWidth = 40.0f * scale;
 
     // Collect rows
@@ -3490,9 +4152,59 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
     }
     if (colCount <= 0) return;
 
+    // A CSS theme's table (page_style.h), named as the export writes it:
+    // thead > tr > th for the header, tbody > tr > td for the rest
+    const page::Style& tableCss = page::current(app);
+    std::vector<page::Style> rowCss(rows.size());
+    std::vector<std::vector<page::Style>> cellCss(rows.size(), std::vector<page::Style>((size_t)colCount));
+    if (tableCss) {
+        auto named = [](const char* tag, int index, int count) {
+            css::Element e;
+            e.tag = tag;
+            e.index = e.typeIndex = index;
+            e.count = e.typeCount = count;
+            return e;
+        };
+        const int parts = rows.size() > 1 ? 2 : 1;
+        const css::Element head = named("thead", 1, parts), body = named("tbody", 2, parts);
+        const page::Style headCss = page::child(app, tableCss, head);
+        const page::Style bodyCss = page::child(app, tableCss, body, &head, 1);
+        std::vector<css::Element> trs;
+        for (size_t r = 1; r < rows.size(); r++) trs.push_back(named("tr", (int)r, (int)rows.size() - 1));
+        const css::Element headRow = named("tr", 1, 1);
+        std::vector<css::Element> heads, cells;
+        for (int c = 0; c < colCount; c++) {
+            heads.push_back(named("th", c + 1, colCount));
+            cells.push_back(named("td", c + 1, colCount));
+        }
+        for (size_t r = 0; r < rows.size(); r++) {
+            rowCss[r] = r == 0 ? page::child(app, headCss, headRow)
+                               : page::child(app, bodyCss, trs[r - 1], trs.data(), r - 1);
+            const std::vector<css::Element>& kind = r == 0 ? heads : cells;
+            for (int c = 0; c < colCount; c++)
+                cellCss[r][(size_t)c] = page::child(app, rowCss[r], kind[(size_t)c], kind.data(), (size_t)c);
+        }
+    }
+    // One padding for the grid, the body cells' (or the header's)
+    float padX = cellPadding, padY = cellPadding;
+    {
+        const page::Style& cell = cellCss[rows.size() > 1 ? 1 : 0][0];
+        if (cell.has(Prop::PaddingLeft) || cell.has(Prop::PaddingRight))
+            padX = page::px(app, std::max(cell->padding[3], cell->padding[1]));
+        if (cell.has(Prop::PaddingTop) || cell.has(Prop::PaddingBottom))
+            padY = page::px(app, std::max(cell->padding[0], cell->padding[2]));
+    }
+    auto cellFormat = [&](size_t r, size_t c) {
+        return page::format(app, cellCss[r][c], r == 0 ? app.boldFormat : app.textFormat);
+    };
+    auto cellColor = [&](size_t r, size_t c) {
+        return page::textColor(cellCss[r][c], r == 0 ? app.theme.heading : app.theme.text);
+    };
+    y += page::before(app, 0);
+
     // Pass 1: Measure natural widths using plain text extraction (cheap, approximate)
     std::vector<float> colWidths(colCount, minColWidth);
-    std::vector<float> rowHeights(rows.size(), lineHeight + cellPadding * 2);
+    std::vector<float> rowHeights(rows.size(), lineHeight + padY * 2);
     std::vector<std::vector<int>> cellAligns(rows.size(), std::vector<int>(colCount, 0));
     // Per-cell natural width + plain-text flag: a simple cell that fits its
     // final column is exactly one line tall, so the height-measuring trial
@@ -3507,6 +4219,11 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
         for (size_t c = 0; c < row->children.size() && c < (size_t)colCount; c++) {
             const auto& cell = row->children[c];
             cellAligns[r][c] = cell->align;
+            // A column's own alignment stands; the theme's fills the rest
+            if (!cell->align && cellCss[r][c].has(Prop::TextAlign)) {
+                const css::TextAlign a = cellCss[r][c]->textAlign;
+                cellAligns[r][c] = a == css::TextAlign::Center ? 2 : a == css::TextAlign::Right ? 3 : 0;
+            }
 
             // Extract plain text for width estimation
             std::wstring text;
@@ -3529,8 +4246,7 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
             // layout here picked a different CJK font than the renderer,
             // whose slightly wider advances then wrapped a "fitting" cell
             // one line past its measured row height (#148)
-            bool isHeader = (r == 0);
-            IDWriteTextFormat* fmt = isHeader ? app.boldFormat : app.textFormat;
+            IDWriteTextFormat* fmt = cellFormat(r, c);
             bool plainCell = cell->children.size() == 1 &&
                              cell->children[0]->type == ElementType::Text;
             float textWidth = 0;
@@ -3552,7 +4268,7 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
                     MeasuringOnly measuring(app);
                     layoutInlineContent(app, cell->children, 0.0f, cy,
                                         kHugeWidth, fmt, app.theme.text, {},
-                                        lineHeight);
+                                        lineHeight, -1.0f, &cellCss[r][c]);
                 }
                 float maxRight = 0.0f;
                 for (size_t i = snap.textRuns; i < app.layoutTextRuns.size();
@@ -3571,7 +4287,7 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
                 rollbackTo(app, snap);
                 textWidth = maxRight;
             }
-            float needed = textWidth + cellPadding * 2 + 6.0f * scale;
+            float needed = textWidth + padX * 2 + 6.0f * scale;
             if (needed > colWidths[c]) colWidths[c] = needed;
             cellNatural[r][c] = needed;
             cellSimple[r][c] = cell->children.size() == 1 &&
@@ -3609,7 +4325,7 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
     } else if (totalWidth > maxWidth) {
         // Floor: at least ~2.5 CJK glyphs per line so no column degenerates
         // into a vertical strip
-        float minCol = std::max(minColWidth, fontSize * 2.5f + cellPadding * 2);
+        float minCol = std::max(minColWidth, fontSize * 2.5f + padX * 2);
         std::vector<bool> fixed(colCount, false);
         float available = maxWidth;
         int unfixedCount = colCount;
@@ -3651,10 +4367,7 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
 
     // Pass 1b: Measure row heights via layoutInlineContent with snapshot-rollback
     for (size_t r = 0; r < rows.size(); r++) {
-        float maxRowH = lineHeight + cellPadding * 2;
-        bool isHeader = (r == 0);
-        IDWriteTextFormat* fmt = isHeader ? app.boldFormat : app.textFormat;
-        D2D1_COLOR_F textColor = isHeader ? app.theme.heading : app.theme.text;
+        float maxRowH = lineHeight + padY * 2;
         const auto& row = rows[r];
 
         for (size_t c = 0; c < row->children.size() && c < (size_t)colCount; c++) {
@@ -3665,17 +4378,17 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
             // line tall — no trial layout needed (the common case)
             if (cellSimple[r][c] && cellNatural[r][c] <= colWidths[c]) continue;
 
-            float cellW = colWidths[c] - cellPadding * 2;
+            float cellW = colWidths[c] - padX * 2;
             LayoutSnapshot snap = takeSnapshot(app);
             float cellY = 0.0f;
             {
                 MeasuringOnly measuring(app);
                 layoutInlineContent(app, cell->children, 0.0f, cellY, cellW,
-                                    fmt, textColor, {}, lineHeight);
+                                    cellFormat(r, c), cellColor(r, c), {}, lineHeight, -1.0f, &cellCss[r][c]);
             }
             rollbackTo(app, snap);
 
-            float h = cellY + cellPadding * 2;
+            float h = cellY + padY * 2;
             if (h > maxRowH) maxRowH = h;
         }
         rowHeights[r] = maxRowH;
@@ -3706,6 +4419,45 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
     float tableStartY = y;
     D2D1_COLOR_F borderColor = app.theme.blockquoteBorder;
     float borderStroke = 1.0f * scale;
+    // The theme's grid: the cells' borders across (top, bottom) and down
+    // (left, right); its rows' backgrounds in place of Tinta's stripes
+    D2D1_COLOR_F acrossColor = borderColor, downColor = borderColor;
+    float across = borderStroke, down = borderStroke, headerRule = borderStroke * 2, topRule = borderStroke;
+    std::optional<D2D1_COLOR_F> headerColor;
+    bool themedRows = false;
+    {
+        const page::Style& cell = cellCss[rows.size() > 1 ? 1 : 0][0];
+        auto side = [&](int s, float& width, D2D1_COLOR_F& color) {
+            const Prop w = (Prop)((int)Prop::BorderTopWidth + s * 3);
+            if (!cell.has(w) && !cell.has((Prop)((int)w + 1))) return false;
+            const css::Border& b = cell->border[s];
+            width = b.style == css::LineStyle::None ? 0.0f : page::px(app, b.width);
+            if (cell.has((Prop)((int)w + 2))) color = page::color(b.color);
+            return true;
+        };
+        float a = across, d = down;
+        const bool themedAcross = side(0, a, acrossColor) | side(2, a, acrossColor);
+        const bool themedDown = side(3, d, downColor) | side(1, d, downColor);
+        if (themedAcross) across = headerRule = a;
+        if (themedDown) down = d;
+        // A sheet that draws some of the grid draws all of it: a side it
+        // leaves out is no line at all, as in a browser
+        if (themedAcross && !themedDown) down = 0.0f;
+        if (themedDown && !themedAcross) across = headerRule = 0.0f;
+        const page::Style& head = cellCss[0][0];
+        if (head.has(Prop::BorderBottomWidth) || head.has(Prop::BorderBottomStyle)) {
+            headerRule = head->border[2].style == css::LineStyle::None ? 0.0f : page::px(app, head->border[2].width);
+            if (head.has(Prop::BorderBottomColor)) headerColor = page::color(head->border[2].color);
+        }
+        // The line over the table is the header cells' top border, when they have a word on it
+        topRule = across;
+        if (head.has(Prop::BorderTopWidth) || head.has(Prop::BorderTopStyle)) {
+            topRule = head->border[0].style == css::LineStyle::None ? 0.0f : page::px(app, head->border[0].width);
+        }
+        for (size_t r = 1; r < rows.size(); r++) {
+            themedRows = themedRows || rowCss[r].has(Prop::BackgroundColor) || cellCss[r][0].has(Prop::BackgroundColor);
+        }
+    }
 
     for (size_t r = 0; r < rows.size(); r++) {
         float cellX = indent;
@@ -3713,11 +4465,17 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
         const auto& row = rows[r];
 
         // Header row background
-        if (isHeader) {
+        const page::Style& rowBack = cellCss[r][0].has(Prop::BackgroundColor) ? cellCss[r][0] : rowCss[r];
+        if (rowBack.has(Prop::BackgroundColor)) {
+            const D2D1_COLOR_F back = page::color(rowBack->backgroundColor);
+            if (back.a > 0.0f) {
+                app.layoutRects.push_back({D2D1::RectF(indent, y, indent + totalWidth, y + rowHeights[r]), back});
+            }
+        } else if (isHeader) {
             D2D1_COLOR_F headerBg = app.theme.codeBackground;
             headerBg.a = 0.5f;
             app.layoutRects.push_back({D2D1::RectF(indent, y, indent + totalWidth, y + rowHeights[r]), headerBg});
-        } else if (r % 2 == 0) {
+        } else if (r % 2 == 0 && !themedRows) {
             // Subtle alternating row background
             D2D1_COLOR_F altBg = app.theme.codeBackground;
             altBg.a = 0.15f;
@@ -3726,8 +4484,8 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
 
         for (size_t c = 0; c < row->children.size() && c < (size_t)colCount; c++) {
             const auto& cell = row->children[c];
-            IDWriteTextFormat* fmt = isHeader ? app.boldFormat : app.textFormat;
-            D2D1_COLOR_F textColor = isHeader ? app.theme.heading : app.theme.text;
+            IDWriteTextFormat* fmt = cellFormat(r, c);
+            D2D1_COLOR_F textColor = cellColor(r, c);
 
             // In-place editing (#148): the preview records every cell's
             // rect keyed by the table's source anchor plus row/col
@@ -3739,15 +4497,15 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
             }
 
             if (!cell->children.empty()) {
-                float cellW = colWidths[c] - cellPadding * 2;
-                float textX = cellX + cellPadding;
-                float textY = y + cellPadding;
+                float cellW = colWidths[c] - padX * 2;
+                float textX = cellX + padX;
+                float textY = y + padY;
 
                 int align = cellAligns[r][c];
                 LayoutSnapshot cellSnap = takeSnapshot(app);
 
                 layoutInlineContent(app, cell->children, textX, textY, cellW,
-                                    fmt, textColor, {}, lineHeight);
+                                    fmt, textColor, {}, lineHeight, -1.0f, &cellCss[r][c]);
 
                 // Apply center/right alignment by shifting all new items
                 if (align == 2 || align == 3) {
@@ -3788,10 +4546,11 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
     for (size_t r = 0; r <= rows.size(); r++) {
         float lineY = tableStartY;
         for (size_t i = 0; i < r; i++) lineY += rowHeights[i];
-        float stroke = (r == 1) ? borderStroke * 2 : borderStroke; // thicker after header
+        float stroke = r == 0 ? topRule : r == 1 ? headerRule : across; // thicker after header
+        if (stroke <= 0.0f) continue;
         app.layoutLines.push_back({D2D1::Point2F(indent, lineY),
                                    D2D1::Point2F(indent + totalWidth, lineY),
-                                   borderColor, stroke});
+                                   r == 1 && headerColor ? *headerColor : acrossColor, stroke});
     }
 
     // Grid lines: vertical
@@ -3800,9 +4559,11 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
         for (size_t r = 0; r < rows.size(); r++) tableEndY += rowHeights[r];
         float vx = indent;
         for (int c = 0; c <= colCount; c++) {
-            app.layoutLines.push_back({D2D1::Point2F(vx, tableStartY),
-                                       D2D1::Point2F(vx, tableEndY),
-                                       borderColor, borderStroke});
+            if (down > 0.0f) {
+                app.layoutLines.push_back({D2D1::Point2F(vx, tableStartY),
+                                           D2D1::Point2F(vx, tableEndY),
+                                           downColor, down});
+            }
             if (c < colCount) vx += colWidths[c];
         }
 
@@ -3819,16 +4580,33 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
     }
 
     app.docText += L"\n";
-    y += 14 * scale;
+    y += page::after(app, 14);
 }
 
 static void layoutHorizontalRule(App& app, float& y, float indent, float maxWidth) {
+    using css::Prop;
     float scale = app.contentScale * app.zoomFactor;
-    y += 16 * scale;
-    app.layoutLines.push_back({D2D1::Point2F(indent, y),
-                               D2D1::Point2F(indent + maxWidth, y),
-                               themeRuleColor(app.theme), scale});
-    y += 16 * scale;
+    // A CSS theme's rule (page_style.h): its top border, or a bar of its
+    // background when it has no border (GitHub's)
+    const page::Style& css = page::current(app);
+    D2D1_COLOR_F color = themeRuleColor(app.theme);
+    float width = scale;
+    if (css.has(Prop::BorderTopWidth) || css.has(Prop::BorderTopStyle)) {
+        const css::Border& b = css->border[0];
+        width = b.style == css::LineStyle::None ? 0.0f : page::px(app, b.width);
+        if (css.has(Prop::BorderTopColor)) color = page::color(b.color);
+    }
+    if (width <= 0.0f && css.has(Prop::BackgroundColor) && css->backgroundColor.a > 0.0f) {
+        width = 4.0f * scale;
+        color = page::color(css->backgroundColor);
+    }
+    y += page::before(app, 16);
+    if (width > 0.0f) {
+        app.layoutLines.push_back({D2D1::Point2F(indent, y),
+                                   D2D1::Point2F(indent + maxWidth, y),
+                                   color, width});
+    }
+    y += page::after(app, 16);
 }
 
 static void layoutProperties(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
@@ -3839,30 +4617,147 @@ static void layoutProperties(App& app, const ElementPtr& elem, float& y, float i
 static void layoutElement(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
     if (!elem) return;
 
+    // The element's style for the layout below (page_style.h), and its
+    // side margins and max-width when a CSS theme sets them
+    page::Block block(app, elem.get());
+    struct Recorded {
+        App& app;
+        float& y;
+        float top, left, right;
+        ~Recorded() {
+            if (page::recording(app)) page::recordBlock(app, D2D1::RectF(left, top, right, y));
+        }
+    } recorded{app, y, y, indent, indent + maxWidth};
+    if (const page::Style& css = block.style()) {
+        using css::Prop;
+        if (css.has(Prop::MarginLeft)) {
+            const float m = page::px(app, css->margin[3]);
+            indent += m;
+            maxWidth -= m;
+        }
+        if (css.has(Prop::MarginRight)) maxWidth -= page::px(app, css->margin[1]);
+        if (css.has(Prop::MaxWidth) && (css->maxWidth.kind == css::Length::Px || css->maxWidth.kind == css::Length::Percent)) {
+            const float cap = css->maxWidth.kind == css::Length::Px ? page::px(app, css->maxWidth.value)
+                                                                    : css->maxWidth.resolve(maxWidth);
+            maxWidth = std::min(maxWidth, cap);
+        }
+        maxWidth = std::max(maxWidth, 1.0f);
+    }
+
     switch (elem->type) {
         case ElementType::Properties:
-            layoutProperties(app, elem, y, indent, maxWidth);
+            // A paper prints its title block in the strip's place (paper.h)
+            if (!layoutTitleBlock(app, elem, y, indent, maxWidth)) layoutProperties(app, elem, y, indent, maxWidth);
             break;
         case ElementType::Paragraph:
             layoutParagraph(app, elem, y, indent, maxWidth);
             break;
-        case ElementType::Footnotes:
-            layoutHorizontalRule(app, y, indent, maxWidth);
+        case ElementType::Footnotes: {
+            {
+                // section.footnotes > hr, as the export writes it
+                css::Element rule;
+                rule.tag = "hr";
+                rule.empty = true;
+                rule.index = rule.count = rule.typeIndex = rule.typeCount = 1;
+                page::Block ruleBlock(app, rule);
+                layoutHorizontalRule(app, y, indent, maxWidth);
+            }
             for (const auto& child : elem->children) layoutElement(app, child, y, indent, maxWidth);
             break;
+        }
         case ElementType::FootnoteDefinition: {
             app.footnoteAnchors[elem->url] = y;
             auto label = std::make_shared<Element>(ElementType::Text);
             label->text = std::to_string(elem->level) + ".";
             float labelY = y;
             float inset = 32 * app.contentScale * app.zoomFactor;
-            layoutInlineContent(app, {label}, indent, labelY, inset, app.textFormat, app.theme.text);
+            const page::Style& css = page::current(app);
+            layoutInlineContent(app, {label}, indent, labelY, inset, page::format(app, css, app.textFormat),
+                                page::textColor(css, app.theme.text));
             for (const auto& child : elem->children) layoutElement(app, child, y, indent + inset, maxWidth - inset);
             break;
         }
         case ElementType::Heading:
             layoutHeading(app, elem, y, indent, maxWidth);
             break;
+        case ElementType::Figure:
+            // A numbered figure or captioned table (Scholar): its id is a
+            // place a reference scrolls to, and its caption what the
+            // reference's card shows
+            if (!elem->title.empty()) {
+                app.footnoteAnchors[elem->title] = y;
+                for (const auto& child : elem->children) {
+                    if (child->type == ElementType::Caption) app.referenceCards[elem->title] = toWide(plainText(child));
+                }
+            }
+            for (const auto& child : elem->children) {
+                // The picture itself, with its caption close under it
+                // rather than past a paragraph's empty last line
+                if (child->type == ElementType::Paragraph && child->children.size() == 1 &&
+                    child->children[0]->type == ElementType::Image) {
+                    layoutImage(app, child->children[0], y, indent, maxWidth);
+                    continue;
+                }
+                layoutElement(app, child, y, indent, maxWidth);
+            }
+            break;
+        case ElementType::Caption: {
+            D2D1_COLOR_F muted = app.theme.text;
+            muted.a *= 0.8f;
+            const page::Style& css = page::current(app);
+            muted = page::textColor(css, muted);
+            IDWriteTextFormat* format = page::format(app, css, app.textFormat);
+            y += page::before(app, 0);
+            BlockBox box(app, css, y, indent, maxWidth);
+            const LayoutSnapshot start = takeSnapshot(app);
+            layoutInlineContent(app, withGenerated(app, css, elem->children), indent, y, maxWidth, format, muted, {},
+                                page::lineHeight(app, css, format, 0.0f));
+            alignLines(app, start, indent, maxWidth, css);
+            box.close(y, muted);
+            app.docText += L"\n\n";
+            y += page::after(app, 14);
+            break;
+        }
+        case ElementType::Bibliography: {
+            // Scholar's references: a number column (IEEE, Nature, GB/T) or
+            // a hanging indent (APA, Chicago); each entry is the place its
+            // citations go to
+            const float scale = app.contentScale * app.zoomFactor;
+            float column = 0;
+            if (elem->language == "field") {
+                for (const auto& entry : elem->children)
+                    column = std::max(column, measureText(app, toWide(entry->text), app.textFormat));
+                column += 10 * scale;
+            }
+            const float hang = elem->language == "hanging" ? 32 * scale : 0;
+            for (const auto& entry : elem->children) {
+                if (entry->type != ElementType::BibEntry) continue;
+                page::Block entryBlock(app, entry.get());
+                const page::Style& css = entryBlock.style();
+                IDWriteTextFormat* entryFormat = page::format(app, css, app.textFormat);
+                const D2D1_COLOR_F entryColor = page::textColor(css, app.theme.text);
+                app.footnoteAnchors[entry->title] = y;
+                app.referenceCards[entry->title] =
+                    toWide((entry->text.empty() ? std::string() : entry->text + " ") + plainText(entry));
+                if (column > 0) {
+                    auto label = std::make_shared<Element>(ElementType::Text);
+                    label->text = entry->text;
+                    float labelY = y;
+                    layoutInlineContent(app, {label}, indent, labelY, column, entryFormat, entryColor);
+                    float entryY = y;
+                    layoutInlineContent(app, entry->children, indent + column, entryY, maxWidth - column,
+                                        entryFormat, entryColor);
+                    y = std::max(labelY, entryY);
+                } else {
+                    layoutInlineContent(app, entry->children, indent + hang, y, maxWidth - hang, entryFormat,
+                                        entryColor, {}, 0.0f, indent);
+                }
+                app.docText += L"\n\n";
+                y += 8 * scale;
+            }
+            y += 6 * scale;
+            break;
+        }
         case ElementType::CodeBlock:
             layoutCodeBlock(app, elem, y, indent, maxWidth);
             break;
@@ -3961,11 +4856,16 @@ void collectMathLabels(const ElementPtr& elem, std::map<std::wstring, std::wstri
 bool layoutBegin(App& app) {
     app.clearLayoutCache();
     app.layoutTimeUs = 0;
+    // A new pass: the images it asks for are the page's (app.h, imagePass)
+    if (++app.imagePass == 0) app.imagePass = 1;
+    app.imagePassActive = true;
 
     if (!app.root) {
         app.contentHeight = 0;
         app.contentWidth = static_cast<float>(app.width);
         app.layoutComplete = true;
+        app.imagePassActive = false;
+        app.imagePassShown = app.imagePass;
         return false;
     }
 
@@ -3988,16 +4888,31 @@ bool layoutBegin(App& app) {
     // On paper the page margins frame the text: no screen padding (#257)
     app.layoutIndent = app.printLayout ? 0.0f : 40.0f * scale;
     app.layoutMaxWidth = layoutWidth - app.layoutIndent * 2;
+    // A CSS theme's sheet, asked for each element as layout goes
+    // (page_style.h); its (max-width) queries see the page's width
+    page::begin(app, app.layoutMaxWidth / std::max(scale, 0.01f));
     // Reading column (#82): a centered percentage of the window, with a
     // separate preference for fullscreen (zen). Edit-mode panes are exempt,
     // except the full-width reading view, which reads like the reader (#242).
     // Pages print across their margins whatever the screen's column (#257).
+    // A CSS theme's max-width on body narrows it further
     {
         int pct = app.zenMode ? app.zenWidthPct : app.readingWidthPct;
-        if (pct < 100 && !app.printLayout && (!app.editMode || app.editorReadingPreview || editorLiveOn(app))) {
-            float column = app.layoutMaxWidth * (float)pct / 100.0f;
-            app.layoutIndent += (app.layoutMaxWidth - column) / 2.0f;
-            app.layoutMaxWidth = column;
+        const bool column = !app.printLayout && (!app.editMode || app.editorReadingPreview || editorLiveOn(app));
+        if (pct < 100 && column) {
+            float width = app.layoutMaxWidth * (float)pct / 100.0f;
+            app.layoutIndent += (app.layoutMaxWidth - width) / 2.0f;
+            app.layoutMaxWidth = width;
+        }
+        const page::Style& body = page::body(app);
+        if (column && body.has(css::Prop::MaxWidth) &&
+            (body->maxWidth.kind == css::Length::Px || body->maxWidth.kind == css::Length::Percent)) {
+            const float cap = body->maxWidth.kind == css::Length::Px ? body->maxWidth.value * scale
+                                                                     : body->maxWidth.resolve(app.layoutMaxWidth);
+            if (cap > 0.0f && cap < app.layoutMaxWidth) {
+                app.layoutIndent += (app.layoutMaxWidth - cap) / 2.0f;
+                app.layoutMaxWidth = cap;
+            }
         }
     }
     // Content starts below the title-bar tab strip; the strip paints over
@@ -4005,6 +4920,34 @@ bool layoutBegin(App& app) {
     // starts there too (#245). Paper has no strip: the first page
     // starts at its top margin (#257).
     app.layoutCursorY = app.printLayout ? 0.0f : documentContentTop(app);
+    // A folder's tinta.css styling the page says so, at the top right, and
+    // a click turns it off for this document or on again
+    if (!app.folderSheetPath.empty() && !app.printLayout && app.folderBrowserFormat) {
+        const bool off = page::folderSheetOff(app);
+        const std::wstring label = off ? tr(app, "page.folder_sheet_off") : tr(app, "page.folder_sheet_on");
+        LayoutInfo info = createLayout(app, label, app.folderBrowserFormat, 20.0f * scale, nullptr);
+        if (info.layout) {
+            const float padX = 8.0f * app.contentScale, h = 22.0f * app.contentScale;
+            const float right = app.layoutIndent + app.layoutMaxWidth;
+            const float left = right - info.width - padX * 2;
+            const float top = app.layoutCursorY + 6.0f * scale;
+            App::LayoutRect chip;
+            chip.rect = D2D1::RectF(left, top, right, top + h);
+            chip.color = app.theme.codeBackground;
+            chip.radius = h / 2;
+            app.layoutRects.push_back(chip);
+            D2D1_COLOR_F ink = off ? app.theme.text : app.theme.accent;
+            if (off) ink.a = 0.6f;
+            const float textTop = top + (h - info.height) / 2;
+            addTextRun(app, std::move(info), D2D1::Point2F(left + padX, textTop),
+                       D2D1::RectF(left + padX, textTop, right - padX, top + h), ink, 0, 0, false);
+            App::LinkRect link;
+            link.bounds = chip.rect;
+            link.url = "tinta:folder-sheet";
+            app.linkRects.push_back(link);
+            app.layoutCursorY = top + h + 4.0f * scale;
+        }
+    }
     app.layoutNextBlock = 0;
     app.layoutComplete = false;
     app.contentWidth = layoutWidth;
@@ -4113,6 +5056,8 @@ void layoutFinish(App& app) {
     app.docTextLower.clear();
     mapSearchMatchesToLayout(app);
     app.layoutComplete = true;
+    app.imagePassActive = false;
+    app.imagePassShown = app.imagePass;
 }
 
 } // namespace
@@ -4189,4 +5134,85 @@ void ensureLayoutComplete(App& app) {
 D2D1_COLOR_F resolveDiagramRole(const App& app, const mermaidext::Prim& prim,
                                 mermaidext::Role role) {
     return resolveDiagramRoleImpl(app, prim, role);
+}
+
+D2D1_COLOR_F plantumlRoleColor(const App& app, mermaidext::Role role) {
+    return diagramRoleColor(app, mermaidext::Prim{}, role, nullptr);
+}
+
+FlowchartColors flowchartColors(const App& app) {
+    const DiagramColors& m = app.theme.mermaid;
+    const D2D1_COLOR_F text = m.text.value_or(app.theme.text);
+    FlowchartColors c;
+    c.nodeFill = m.nodeFill.value_or(app.theme.codeBackground);
+    c.nodeBorder = m.nodeBorder.value_or(app.theme.accent);
+    c.nodeText = m.nodeText.value_or(text);
+    c.line = text;
+    c.line.a = app.theme.isDark ? 0.7f : 0.6f;
+    if (m.link || m.line) c.line = m.link ? *m.link : *m.line;
+    // The chips on edges wear the nodes' colours unless a variable says
+    c.labelFill = m.edgeLabel.value_or(c.nodeFill);
+    c.labelBorder = c.line;
+    c.labelBorder.a *= 0.6f;
+    c.labelText = c.nodeText;
+    c.clusterFill = app.theme.codeBackground;
+    c.clusterFill.a *= 0.55f;
+    if (m.clusterFill) c.clusterFill = *m.clusterFill;
+    c.clusterBorder = text;
+    c.clusterBorder.a = 0.28f;
+    if (m.clusterBorder) c.clusterBorder = *m.clusterBorder;
+    c.clusterText = text;
+    c.clusterText.a = 0.78f;
+    if (m.clusterText) c.clusterText = *m.clusterText;
+    return c;
+}
+
+// Scholar's hover cards: above the page's own drawing, in its coordinates
+void renderReferenceCard(App& app) {
+    if (app.showSettings || app.showContextMenu || app.showThemeChooser || app.showThemeEditor ||
+        app.referenceCards.empty()) {
+        return;
+    }
+    const float dx = app.mouseX - documentViewportX(app) + app.scrollX, dy = app.mouseY + app.scrollY;
+    for (const auto& link : app.linkRects) {
+        const auto& b = link.bounds;
+        if (dx < b.left || dx > b.right || dy < b.top || dy > b.bottom) continue;
+        std::wstring card;
+        if (link.anchor.rfind("cite-", 0) == 0) {
+            auto keys = app.citationKeys.find(link.anchor);
+            if (keys == app.citationKeys.end()) return;
+            size_t at = 0;
+            while (at < keys->second.size()) {
+                size_t space = keys->second.find(' ', at);
+                const std::string key = keys->second.substr(at, space == std::string::npos ? std::string::npos : space - at);
+                at = space == std::string::npos ? keys->second.size() : space + 1;
+                if (key.empty()) continue;
+                auto entry = app.referenceCards.find("ref-" + key);
+                if (!card.empty()) card += L"\n\n";
+                card += entry != app.referenceCards.end() ? entry->second : L"@" + toWide(key) + L"?";
+            }
+        } else if (link.anchor.rfind("xref-", 0) == 0 && link.url.size() > 1) {
+            auto entry = app.referenceCards.find(link.url.substr(1));
+            if (entry != app.referenceCards.end()) card = entry->second;
+        }
+        if (card.empty() || !app.folderBrowserFormat) return;
+        const float s = app.contentScale;
+        const float w = std::min(440 * s, documentViewportWidth(app) - 24 * s);
+        const float x = std::clamp(b.left - app.scrollX, 12 * s, std::max(12 * s, documentViewportWidth(app) - w - 12 * s));
+        const float y = b.bottom - app.scrollY + 6 * s;
+        IDWriteTextLayout* layout = nullptr;
+        app.dwriteFactory->CreateTextLayout(card.c_str(), (UINT32)card.size(), app.folderBrowserFormat, w - 20 * s,
+                                            10000, &layout);
+        if (!layout) return;
+        layout->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+        DWRITE_TEXT_METRICS metrics{};
+        layout->GetMetrics(&metrics);
+        app.brush->SetColor(app.theme.codeBackground);
+        app.renderTarget->FillRoundedRectangle(
+            D2D1::RoundedRect(D2D1::RectF(x, y, x + w, y + metrics.height + 16 * s), 6 * s, 6 * s), app.brush);
+        app.brush->SetColor(app.theme.text);
+        app.renderTarget->DrawTextLayout(D2D1::Point2F(x + 10 * s, y + 8 * s), layout, app.brush);
+        layout->Release();
+        return;
+    }
 }

@@ -1,4 +1,6 @@
 #include "d2d_init.h"
+#include "font_faces.h"
+#include "page_style.h"
 #include "tabs.h"
 #include "math_render.h"
 #include "utils.h"
@@ -35,8 +37,10 @@ void applyWindowChrome(App& app) {
                    (BYTE)(c.b * 255.0f + 0.5f));
     };
 
-    // Windows 10 fallback: at least pick the right caption variant
-    BOOL dark = app.theme.isDark ? TRUE : FALSE;
+    // Windows 10 fallback: at least pick the right caption variant, for
+    // the strip's own colour when a CSS theme gives one (--ui-background)
+    const bool stripDark = app.theme.uiBackground ? themeColorIsDark(*app.theme.uiBackground) : app.theme.isDark;
+    BOOL dark = stripDark ? TRUE : FALSE;
     DwmSetWindowAttribute(app.hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
                           &dark, sizeof(dark));
 
@@ -46,9 +50,14 @@ void applyWindowChrome(App& app) {
     COLORREF caption = toColorref(tabStripBackground(app));
     DwmSetWindowAttribute(app.hwnd, DWMWA_CAPTION_COLOR,
                           &caption, sizeof(caption));
+    // The window's border is the row's edge colour: a hairline of the
+    // theme's own, where the row's own colour left the window without an
+    // edge (a dark window on a dark desktop had none)
+    COLORREF border = toColorref(tabStripEdge(app));
+    app.windowBorder = border;
     DwmSetWindowAttribute(app.hwnd, DWMWA_BORDER_COLOR,
-                          &caption, sizeof(caption));
-    COLORREF text = toColorref(app.theme.text);
+                          &border, sizeof(border));
+    COLORREF text = toColorref(themeUiText(app.theme));
     DwmSetWindowAttribute(app.hwnd, DWMWA_TEXT_COLOR,
                           &text, sizeof(text));
 }
@@ -100,7 +109,8 @@ void applyTheme(App& app, int themeIndex) {
     bool sameFonts = app.textFormat &&
         app.formatsFontFamily == face(newTheme.fontFamily) &&
         app.formatsCodeFontFamily == face(newTheme.codeFontFamily) &&
-        app.formatsHeadingFontFamily == face(themeHeadingFont(newTheme));
+        app.formatsHeadingFontFamily == face(themeHeadingFont(newTheme)) &&
+        app.formatsTypeKey == themeTypeKey(newTheme);
 
     app.currentThemeIndex = themeIndex;
     app.theme = newTheme;
@@ -354,11 +364,12 @@ const wchar_t* installedFace(App& app, const wchar_t* face, bool mono) {
         !fonts) {
         return face;
     }
+    // A face a CSS theme brought with @font-face counts as installed
     auto installed = [fonts](const wchar_t* name) {
         UINT32 index = 0;
         BOOL exists = FALSE;
-        return name && name[0] && SUCCEEDED(fonts->FindFamilyName(name, &index, &exists)) &&
-               exists;
+        return name && name[0] &&
+               (fontfaces::has(name) || (SUCCEEDED(fonts->FindFamilyName(name, &index, &exists)) && exists));
     };
     // Nearest first; Consolas and Segoe UI come with every Windows
     auto firstInstalled = [&](std::initializer_list<const wchar_t*> names) -> const wchar_t* {
@@ -394,6 +405,8 @@ void updateTextFormats(App& app) {
     mathClearCache();
     // Baselines measured per format: a new format may reuse a freed address
     app.formatBaselines.clear();
+    // and so may the faces a CSS theme's elements were given (page_style.h)
+    page::releaseFormats(app);
     // Release existing formats
     if (app.textFormat) { app.textFormat->Release(); app.textFormat = nullptr; }
     if (app.headingFormat) { app.headingFormat->Release(); app.headingFormat = nullptr; }
@@ -424,52 +437,53 @@ void updateTextFormats(App& app) {
 
     // Create text formats with current zoom and theme fonts
     float scale = app.contentScale * app.zoomFactor;
-    float fontSize = 16.0f * scale;
-    float codeSize = 14.0f * scale;
+    // A CSS theme may size the type (docs/specs/theming.md)
+    float fontSize = (app.theme.bodySize > 0 ? app.theme.bodySize : 16.0f) * scale;
+    float codeSize = (app.theme.codeSize > 0 ? app.theme.codeSize : 14.0f) * scale;
 
     const wchar_t* fontFamily = app.theme.fontFamily;
     const wchar_t* codeFont = app.theme.codeFontFamily;
 
-    app.dwriteFactory->CreateTextFormat(fontFamily, nullptr,
+    app.dwriteFactory->CreateTextFormat(fontfaces::name(fontFamily), fontfaces::collection(fontFamily),
         DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
         fontSize, L"en-us", &app.textFormat);
 
-    app.dwriteFactory->CreateTextFormat(themeHeadingFont(app.theme), nullptr,
+    app.dwriteFactory->CreateTextFormat(fontfaces::name(themeHeadingFont(app.theme)), fontfaces::collection(themeHeadingFont(app.theme)),
         DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
         28.0f * scale, L"en-us", &app.headingFormat);
 
-    app.dwriteFactory->CreateTextFormat(codeFont, nullptr,
+    app.dwriteFactory->CreateTextFormat(fontfaces::name(codeFont), fontfaces::collection(codeFont),
         DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
         codeSize, L"en-us", &app.codeFormat);
 
-    app.dwriteFactory->CreateTextFormat(fontFamily, nullptr,
+    app.dwriteFactory->CreateTextFormat(fontfaces::name(fontFamily), fontfaces::collection(fontFamily),
         DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
         fontSize, L"en-us", &app.boldFormat);
 
-    app.dwriteFactory->CreateTextFormat(fontFamily, nullptr,
+    app.dwriteFactory->CreateTextFormat(fontfaces::name(fontFamily), fontfaces::collection(fontFamily),
         DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_STRETCH_NORMAL,
         fontSize, L"en-us", &app.italicFormat);
 
     // Inline spans nest, so every weight/style combination needs a format:
     // ***both***, **`code`**, *`code`*
-    app.dwriteFactory->CreateTextFormat(fontFamily, nullptr,
+    app.dwriteFactory->CreateTextFormat(fontfaces::name(fontFamily), fontfaces::collection(fontFamily),
         DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_STRETCH_NORMAL,
         fontSize, L"en-us", &app.boldItalicFormat);
 
-    app.dwriteFactory->CreateTextFormat(codeFont, nullptr,
+    app.dwriteFactory->CreateTextFormat(fontfaces::name(codeFont), fontfaces::collection(codeFont),
         DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
         codeSize, L"en-us", &app.codeBoldFormat);
 
-    app.dwriteFactory->CreateTextFormat(codeFont, nullptr,
+    app.dwriteFactory->CreateTextFormat(fontfaces::name(codeFont), fontfaces::collection(codeFont),
         DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_STRETCH_NORMAL,
         codeSize, L"en-us", &app.codeItalicFormat);
 
-    app.dwriteFactory->CreateTextFormat(codeFont, nullptr,
+    app.dwriteFactory->CreateTextFormat(fontfaces::name(codeFont), fontfaces::collection(codeFont),
         DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_STRETCH_NORMAL,
         codeSize, L"en-us", &app.codeBoldItalicFormat);
 
     // Small format for ^superscript^ / ~subscript~ spans
-    app.dwriteFactory->CreateTextFormat(fontFamily, nullptr,
+    app.dwriteFactory->CreateTextFormat(fontfaces::name(fontFamily), fontfaces::collection(fontFamily),
         DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
         fontSize * 0.68f, L"en-us", &app.supSubFormat);
 
@@ -480,13 +494,16 @@ void updateTextFormats(App& app) {
     const wchar_t* headingFont = themeHeadingFont(app.theme);
     float headingSizes[] = {32, 26, 22, 18, 16, 14};
     for (int i = 0; i < 6; i++) {
-        app.dwriteFactory->CreateTextFormat(headingFont, nullptr,
-            DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-            headingSizes[i] * scale, L"en-us", &app.headingFormats[i]);
-        app.dwriteFactory->CreateTextFormat(headingFont, nullptr,
+        if (app.theme.headingSize[i] > 0) headingSizes[i] = app.theme.headingSize[i];
+        const DWRITE_FONT_WEIGHT weight = app.theme.headingWeight[i] > 0
+            ? (DWRITE_FONT_WEIGHT)app.theme.headingWeight[i] : DWRITE_FONT_WEIGHT_BOLD;
+        app.dwriteFactory->CreateTextFormat(fontfaces::name(headingFont), fontfaces::collection(headingFont),
+            weight, app.theme.headingItalic[i] ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL, headingSizes[i] * scale, L"en-us", &app.headingFormats[i]);
+        app.dwriteFactory->CreateTextFormat(fontfaces::name(headingFont), fontfaces::collection(headingFont),
             DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_STRETCH_NORMAL,
             headingSizes[i] * scale, L"en-us", &app.headingItalicFormats[i]);
-        app.dwriteFactory->CreateTextFormat(headingFont, nullptr,
+        app.dwriteFactory->CreateTextFormat(fontfaces::name(headingFont), fontfaces::collection(headingFont),
             DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
             headingSizes[i] * scale * 0.68f, L"en-us", &app.headingScriptFormats[i]);
     }
@@ -527,6 +544,7 @@ void updateTextFormats(App& app) {
     app.formatsFontFamily = fontFamily ? fontFamily : L"";
     app.formatsCodeFontFamily = codeFont ? codeFont : L"";
     app.formatsHeadingFontFamily = headingFont ? headingFont : L"";
+    app.formatsTypeKey = themeTypeKey(app.theme);
 
     updateOverlayFormats(app);
     app.appliedZoomFactor = app.zoomFactor;
@@ -540,22 +558,24 @@ void updateOverlayFormats(App& app) {
     float scale = app.contentScale;
 
     // Search overlay format
-    app.dwriteFactory->CreateTextFormat(app.theme.fontFamily, nullptr,
+    app.dwriteFactory->CreateTextFormat(fontfaces::name(app.theme.fontFamily), fontfaces::collection(app.theme.fontFamily),
         DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
         16.0f * scale, L"en-us", &app.searchTextFormat);
 
-    // Signal chips: subtitles, badges, and the tiny state labels
+    // Signal chips: subtitles, badges and the small state labels, in the
+    // scale's smallest role (Micro, ui_scale.h); it was 10
     app.dwriteFactory->CreateTextFormat(L"Segoe UI", nullptr,
         DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-        10.0f * scale, L"en-us", &app.signalSmallFormat);
+        11.0f * scale, L"en-us", &app.signalSmallFormat);
     if (app.signalSmallFormat) {
         app.signalSmallFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
     }
 
-    // Theme chooser formats
-    app.dwriteFactory->CreateTextFormat(L"Segoe UI Light", nullptr,
-        DWRITE_FONT_WEIGHT_LIGHT, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-        28.0f * scale, L"en-us", &app.themeTitleFormat);
+    // A dialog's title, in the scale's Title role (ui_scale.h): 20 semibold,
+    // where it was 28 light
+    app.dwriteFactory->CreateTextFormat(L"Segoe UI", nullptr,
+        DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+        20.0f * scale, L"en-us", &app.themeTitleFormat);
 
     app.dwriteFactory->CreateTextFormat(L"Segoe UI", nullptr,
         DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
@@ -569,7 +589,7 @@ void updateOverlayFormats(App& app) {
 
     // Stats overlay format: fixed UI size so zooming the document cannot
     // overflow the fixed stats box
-    app.dwriteFactory->CreateTextFormat(app.theme.codeFontFamily, nullptr,
+    app.dwriteFactory->CreateTextFormat(fontfaces::name(app.theme.codeFontFamily), fontfaces::collection(app.theme.codeFontFamily),
         DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
         13.0f * scale, L"en-us", &app.statsFormat);
 
@@ -592,7 +612,7 @@ void updateOverlayFormats(App& app) {
 
     // TOC formats
     app.dwriteFactory->CreateTextFormat(L"Segoe UI", nullptr,
-        DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+        DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
         13.0f * scale, L"en-us", &app.tocFormatBold);
     app.dwriteFactory->CreateTextFormat(L"Segoe UI", nullptr,
         DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
@@ -623,7 +643,7 @@ void updateOverlayFormats(App& app) {
     // Editor text format (monospace, same size as body)
     float editorScale = app.contentScale * app.zoomFactor;
     float editorFontSize = 14.0f * editorScale;
-    app.dwriteFactory->CreateTextFormat(app.theme.codeFontFamily, nullptr,
+    app.dwriteFactory->CreateTextFormat(fontfaces::name(app.theme.codeFontFamily), fontfaces::collection(app.theme.codeFontFamily),
         DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
         editorFontSize, L"en-us", &app.editorTextFormat);
     if (app.editorTextFormat) {
@@ -687,20 +707,21 @@ void ensureThemePreviewFormats(App& app) {
     if (!app.themePreviewFormats.empty()) return;
 
     float scale = app.contentScale;
+    // A card's specimen in the scale's sizes: 13, 12 and 11 (ui_scale.h)
     app.themePreviewFormats.resize(themeCount());
     for (int i = 0; i < themeCount(); i++) {
         // In the faces the theme will draw with
         D2DTheme t = themeAt(i);
         useInstalledFaces(app, t);
-        app.dwriteFactory->CreateTextFormat(t.fontFamily, nullptr,
+        app.dwriteFactory->CreateTextFormat(fontfaces::name(t.fontFamily), fontfaces::collection(t.fontFamily),
             DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-            14.0f * scale, L"en-us", &app.themePreviewFormats[i].name);
-        app.dwriteFactory->CreateTextFormat(t.fontFamily, nullptr,
+            13.0f * scale, L"en-us", &app.themePreviewFormats[i].name);
+        app.dwriteFactory->CreateTextFormat(fontfaces::name(t.fontFamily), fontfaces::collection(t.fontFamily),
             DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-            11.0f * scale, L"en-us", &app.themePreviewFormats[i].preview);
-        app.dwriteFactory->CreateTextFormat(t.codeFontFamily, nullptr,
+            12.0f * scale, L"en-us", &app.themePreviewFormats[i].preview);
+        app.dwriteFactory->CreateTextFormat(fontfaces::name(t.codeFontFamily), fontfaces::collection(t.codeFontFamily),
             DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-            10.0f * scale, L"en-us", &app.themePreviewFormats[i].code);
+            11.0f * scale, L"en-us", &app.themePreviewFormats[i].code);
         useUiFontFallback(app, app.themePreviewFormats[i].name);
         useUiFontFallback(app, app.themePreviewFormats[i].preview);
         useUiFontFallback(app, app.themePreviewFormats[i].code);
@@ -727,6 +748,51 @@ void createTypography(App& app) {
         app.codeTypography->AddFontFeature({DWRITE_FONT_FEATURE_TAG_DISCRETIONARY_LIGATURES, 1});
     }
 }
+
+namespace {
+HMONITOR windowMonitor(HWND window) { return MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST); }
+HRESULT monitorParams(IDWriteFactory* factory, HMONITOR monitor, IDWriteRenderingParams** params) {
+    return factory->CreateMonitorRenderingParams(monitor, params);
+}
+MonitorTextSource g_monitorText{windowMonitor, monitorParams};
+
+// Gives the target the text settings of `monitor`: its gamma, contrast and
+// subpixel order as ClearType's tuner left them, which differ from screen to
+// screen (a panel with its subpixels in another order shows coloured edges
+// under the primary monitor's). True when they are not the ones it had.
+bool setMonitorText(App& app, HMONITOR monitor) {
+    if (!app.renderTarget || !app.dwriteFactory) return false;
+    IDWriteRenderingParams* base = nullptr;
+    if (!monitor || FAILED(g_monitorText.paramsOf(app.dwriteFactory, monitor, &base)) || !base) {
+        base = nullptr;
+        app.dwriteFactory->CreateRenderingParams(&base);  // the primary monitor's
+    }
+    if (!base) return false;
+    const float gamma = base->GetGamma();
+    const float contrast = base->GetEnhancedContrast();
+    const int geometry = (int)base->GetPixelGeometry();
+    base->Release();
+
+    IDWriteRenderingParams* params = nullptr;
+    app.dwriteFactory->CreateCustomRenderingParams(
+        gamma, contrast,
+        1.0f,  // ClearType level
+        (DWRITE_PIXEL_GEOMETRY)geometry,
+        DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
+        &params);
+    if (!params) return false;
+    app.renderTarget->SetTextRenderingParams(params);
+    params->Release();
+
+    const bool changed = gamma != app.textGamma || contrast != app.textContrast ||
+                         geometry != app.textPixelGeometry;
+    app.textMonitor = monitor;
+    app.textGamma = gamma;
+    app.textContrast = contrast;
+    app.textPixelGeometry = geometry;
+    return changed;
+}
+}  // namespace
 
 bool createRenderTarget(App& app) {
     // Layout and the lightbox now retain their own image references. Drop
@@ -800,32 +866,21 @@ bool createRenderTarget(App& app) {
     app.renderTarget->QueryInterface(__uuidof(ID2D1DeviceContext),
         reinterpret_cast<void**>(&app.deviceContext));
 
-    // Enable high-quality text
+    // Enable high-quality text, smoothed for the window's monitor
     app.renderTarget->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
-
-    // Create custom rendering params for improved text quality
-    IDWriteRenderingParams* defaultParams = nullptr;
-    IDWriteRenderingParams* customParams = nullptr;
-
-    app.dwriteFactory->CreateRenderingParams(&defaultParams);
-    if (defaultParams) {
-        app.dwriteFactory->CreateCustomRenderingParams(
-            defaultParams->GetGamma(),
-            defaultParams->GetEnhancedContrast(),
-            1.0f,  // ClearType level
-            defaultParams->GetPixelGeometry(),
-            DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
-            &customParams
-        );
-        defaultParams->Release();
-
-        if (customParams) {
-            app.renderTarget->SetTextRenderingParams(customParams);
-            customParams->Release();
-        }
-    }
+    setMonitorText(app, g_monitorText.monitorOf(app.hwnd));
 
     return true;
+}
+
+MonitorTextSource& monitorTextSource() { return g_monitorText; }
+
+bool followMonitorText(App& app, bool reread) {
+    if (!app.renderTarget || !app.hwnd) return false;
+    HMONITOR monitor = g_monitorText.monitorOf(app.hwnd);
+    // A window dragged about asks on every move: the same monitor is no work
+    if (monitor == app.textMonitor && !reread) return false;
+    return setMonitorText(app, monitor);
 }
 
 // System font families for the theme editor font picker (#82). Enumerated

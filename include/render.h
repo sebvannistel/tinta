@@ -23,14 +23,33 @@ void ensureLayoutComplete(App& app);
 void completeAsyncImage(App& app, void* asyncResult);
 void discardAsyncImage(void* asyncResult);
 
-// Theme color for a diagram primitive's role (shared with the exporters)
+// Theme color for a diagram primitive's role (shared with the exporters),
+// after a CSS theme's --mermaid-* variables; PlantUML's preamble takes the
+// page's own, the variables being Mermaid's
 D2D1_COLOR_F resolveDiagramRole(const App& app, const mermaidext::Prim& prim,
                                 mermaidext::Role role);
+D2D1_COLOR_F plantumlRoleColor(const App& app, mermaidext::Role role);
+
+// What a flowchart draws with: a CSS theme's --mermaid-* variables where
+// it sets them (docs/css-themes.md), else the page's colours. The reading
+// view and the exports share it
+struct FlowchartColors {
+    D2D1_COLOR_F nodeFill, nodeBorder, nodeText;
+    D2D1_COLOR_F line;                                     // edges and their arrows
+    D2D1_COLOR_F labelFill, labelBorder, labelText;        // the chips on edges
+    D2D1_COLOR_F clusterFill, clusterBorder, clusterText;  // subgraphs
+};
+FlowchartColors flowchartColors(const App& app);
 
 // A list item's bullet as the page and Live draw it: a disc, a circle, then
 // a square by how deep its list sits, and the next level round again (#315).
 // It stands a little before the item's text at `textX`, halfway up the
 // letters on `baseline`.
 App::LayoutShape listBullet(float textX, float baseline, float em, int depth, D2D1_COLOR_F color);
+
+// Under the pointer resting on a citation, the references it cites; on a
+// reference to a figure or table, its caption (docs/specs/scholar.md).
+// Drawn in document coordinates, as the front matter's overflow card is
+void renderReferenceCard(App& app);
 
 #endif // TINTA_RENDER_H

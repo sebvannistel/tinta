@@ -6,6 +6,7 @@
 #pragma optimize("s", on)
 
 #include "live_text.h"
+#include "clipboard_keys.h"
 #include "d2d_init.h"
 #include "editor.h"
 #include "i18n.h"
@@ -92,7 +93,8 @@ std::wstring_view lineView(const std::wstring& t, size_t begin) {
 bool blank(std::wstring_view s) { return s.find_first_not_of(L" \t") == std::wstring_view::npos; }
 
 std::wstring lowered(std::wstring s) {
-    for (auto& c : s) c = (wchar_t)towlower(c);
+    const wchar_t* fold = caseFoldTable();
+    for (auto& c : s) c = fold[c];
     return s;
 }
 
@@ -105,6 +107,10 @@ size_t fenceRun(std::wstring_view line, wchar_t* ch = nullptr) {
     size_t n = 0;
     while (i + n < line.size() && line[i + n] == c) ++n;
     if (n < 3) return 0;
+    // Backticks with another backtick later on the line open no fence: that
+    // is a code span, ```like this```, and a paragraph to the page's parser.
+    // Taken for a fence, it made code of everything under it
+    if (c == L'`' && line.find(L'`', i + n) != std::wstring_view::npos) return 0;
     if (ch) *ch = c;
     return n;
 }
@@ -379,6 +385,34 @@ int blockAt(const std::wstring& t, size_t at) {
     }
 }
 
+// A bracket that holds a citation: an @ that starts a key after its opening,
+// a space, a semicolon or a minus, and a closing bracket no (address) follows
+static bool citesWithin(std::wstring_view line, size_t open) {
+    size_t close = line.find(L']', open + 1);
+    if (close == std::wstring_view::npos || (close + 1 < line.size() && line[close + 1] == L'(')) return false;
+    for (size_t at = open + 1; at + 1 < close; ++at) {
+        if (line[at] != L'@') continue;
+        wchar_t before = line[at - 1];
+        wchar_t after = line[at + 1];
+        if ((at == open + 1 || before == L' ' || before == L';' || before == L'-') && (iswalnum(after) || after == L'_' || after == L'{')) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// @fig:, @tbl:, @eq:, @sec: or @lst: at `at`, either case for the first letter
+static bool crossReferenceAt(std::wstring_view line, size_t at) {
+    for (const wchar_t* prefix : {L"fig:", L"tbl:", L"eq:", L"sec:", L"lst:"}) {
+        size_t n = wcslen(prefix);
+        if (at + 1 + n >= line.size()) continue;
+        bool same = towlower(line[at + 1]) == prefix[0];
+        for (size_t k = 1; same && k < n; ++k) same = line[at + 1 + k] == prefix[k];
+        if (same && (iswalnum(line[at + 1 + n]) || line[at + 1 + n] == L'_')) return true;
+    }
+    return false;
+}
+
 void inlineSpans(std::wstring_view line, size_t from, std::vector<InlineSpan>& spans) {
     const size_t npos = std::wstring_view::npos;
     auto add = [&](int kind, size_t at, size_t length) { spans.push_back({kind, at, length}); };
@@ -419,6 +453,18 @@ void inlineSpans(std::wstring_view line, size_t from, std::vector<InlineSpan>& s
             if (close == npos) continue;
             add(INL_FOOTNOTE, i, close - i + 1);
             i = close;
+        } else if (c == L'[' && citesWithin(line, i)) {
+            // [@key], [see @key, p. 4], [-@key]: one span to its bracket
+            size_t close = line.find(L']', i + 1);
+            add(INL_CITE, i, close - i + 1);
+            i = close;
+        } else if (c == L'@' && (i == 0 || !iswalnum(line[i - 1])) && crossReferenceAt(line, i)) {
+            // @fig:id, @tbl:id, @eq:id, @sec:id, @lst:id
+            size_t stop = i + 1;
+            while (stop < line.size() && (iswalnum(line[stop]) || wcschr(L":_-.", line[stop]) != nullptr)) ++stop;
+            while (stop > i + 1 && wcschr(L":.-", line[stop - 1]) != nullptr) --stop;
+            add(INL_CITE, i, stop - i);
+            i = stop - 1;
         } else if (c == L'[' || (c == L'!' && i + 1 < line.size() && line[i + 1] == L'[')) {
             // [text](address) and ![alt](address): "](address)" is one mark
             size_t open = c == L'!' ? i + 1 : i;
@@ -1684,6 +1730,7 @@ void openPopup(LiveText& e, LiveText::Popup kind, LiveText::Popup was, size_t fr
     if (!same) {
         e.choice = 0;
         e.popupTop = 0;
+        e.hoverHit = -1;  // the pointer lights a row of the new list when it moves
     }
     e.popup = kind;
     e.popupFrom = from;
@@ -1691,10 +1738,96 @@ void openPopup(LiveText& e, LiveText::Popup kind, LiveText::Popup was, size_t fr
     e.choice = std::clamp(e.choice, 0, (int)e.choices.size() - 1);
 }
 
+// What a citation key holds: letters, digits, _ and the marks pandoc allows inside one
+bool keyChar(wchar_t c) { return iswalnum(c) || c == L'_' || (c && wcschr(L":.#$%&-+?<>~/", c)); }
+
+// The citation list: true while the caret is on a key after an @, the list
+// open or kept shut (Esc, or only the caret moved there)
+bool citeList(LiveText& e, const std::wstring& text, size_t caret, bool edited, LiveText::Popup was, const Host& host) {
+    size_t at = 0;
+    if (!host.cites || !citeAt(text, caret, at)) {
+        e.dismissedCite = std::wstring::npos;
+        return false;
+    }
+    // Typing opens it; the caret moving opens nothing, but keeps it on its key
+    const bool kept = was == LiveText::Popup::Cite && e.popupFrom == at + 1;
+    if (at != e.dismissedCite && (edited || kept)) {
+        std::vector<LiveText::Choice> list = host.cites(text, at + 1, caret);
+        if (!list.empty()) {
+            openPopup(e, LiveText::Popup::Cite, was, at + 1, std::move(list));
+            return true;
+        }
+    }
+    e.choices.clear();
+    return true;
+}
+
 }  // namespace
+
+bool citeAt(const std::wstring& t, size_t caret, size_t& at) {
+    caret = std::min(caret, t.size());
+    size_t from = caret;
+    while (from > 0 && caret - from < 100 && keyChar(t[from - 1])) --from;
+    if (from == 0 || t[from - 1] != L'@') return false;
+    // A key starts with a letter, a digit or _, as pandoc's do
+    if (from < caret && !iswalnum(t[from]) && t[from] != L'_') return false;
+    // The @ starts a word: a line's start, after a space, [ or ;, or -@ there
+    const size_t mark = from - 1;
+    size_t word = mark;
+    if (word > 0 && t[word - 1] == L'-') --word;
+    const wchar_t before = word > 0 ? t[word - 1] : L'\n';
+    if (before != L'\n' && before != L' ' && before != L'\t' && before != L'[' && before != L';') return false;
+    // Not in code: a fence, or a span of backticks before it on the line
+    const size_t ls = lineStart(t, mark);
+    size_t ticks = 0;
+    for (size_t i = ls; i < mark; ++i) ticks += t[i] == L'`';
+    if (ticks % 2 == 1 || fenceState(t, ls) != 0) return false;
+    at = mark;
+    return true;
+}
+
+MarkEdit citeEdit(const std::wstring& t, size_t caret, size_t from, const std::wstring& key, size_t& after) {
+    caret = std::min(caret, t.size());
+    from = std::min(from, caret);
+    // The key runs on past the caret; a mark after it ends a sentence, not the key
+    size_t end = caret;
+    while (end < t.size() && keyChar(t[end])) ++end;
+    while (end > caret && !iswalnum(t[end - 1]) && t[end - 1] != L'_') --end;
+    MarkEdit edit{from, end - from, key};
+    // In brackets, the nearest [ or ] before the @ on its line being a [,
+    // that no ] closes after the key, before another [ opens
+    bool bracket = false;
+    for (size_t i = from > 0 ? from - 1 : 0, ls = lineStart(t, i); i > ls; --i) {
+        if (t[i - 1] == L']') break;
+        if (t[i - 1] == L'[') {
+            bracket = true;
+            break;
+        }
+    }
+    if (bracket) {
+        bool closed = false;
+        for (size_t i = end; i < t.size() && t[i] != L'\n' && t[i] != L'['; ++i) {
+            if (t[i] == L']') {
+                closed = true;
+                break;
+            }
+        }
+        if (!closed) edit.with += L']';
+    }
+    after = from + edit.with.size();
+    return edit;
+}
+
+void followCites(LiveText& e, const std::wstring& text, size_t caret, bool edited, const Host& host) {
+    const LiveText::Popup was = e.popup;
+    e.popup = LiveText::Popup::None;
+    if (!citeList(e, text, caret, edited, was, host)) e.choices.clear();
+}
 
 void updatePopup(App& app, LiveText& e, const Host& host) {
     const LiveText::Popup was = e.popup;
+    const bool edited = e.revision != e.popupRevision;
+    e.popupRevision = e.revision;
     e.popup = LiveText::Popup::None;
     if (!e.multiline || e.hasSelection()) {
         e.choices.clear();
@@ -1719,6 +1852,8 @@ void updatePopup(App& app, LiveText& e, const Host& host) {
             if (c == L']' || c == L'|' || c == L'#' || c == L'\n') break;
         }
     }
+    // An @ and a key: the library's keys, or the document's own ids
+    if (citeList(e, e.text, caret, edited, was, host)) return;
     // A / at a line's start or after a space, with a few letters after it
     size_t slash = std::wstring::npos;
     for (size_t i = caret; i > ls && caret - i <= 24; --i) {
@@ -1759,6 +1894,7 @@ void updatePopup(App& app, LiveText& e, const Host& host) {
 
 void closePopup(LiveText& e) {
     if (e.popup == LiveText::Popup::Slash && e.popupFrom > 0) e.dismissedSlash = e.popupFrom - 1;
+    if (e.popup == LiveText::Popup::Cite && e.popupFrom > 0) e.dismissedCite = e.popupFrom - 1;
     e.popup = LiveText::Popup::None;
     e.choices.clear();
 }
@@ -1777,6 +1913,14 @@ void pickChoice(App& app, LiveText& e, int index, bool ctrl, const Host& host) {
             }
         }
         applyInsert(e, pick.insert, image);
+    } else if (e.popup == LiveText::Popup::Cite) {
+        // The key typed, and the rest of it, become the key picked
+        size_t after = 0;
+        const MarkEdit edit = citeEdit(e.text, e.caret, e.popupFrom, pick.label, after);
+        pushUndo(e, false);
+        splice(e, edit.at, edit.removed, edit.with);
+        settle(e, after, after);
+        e.popupRevision = e.revision;  // what went in opens nothing
     } else {
         // What was typed after [[ becomes the name; the brackets close unless they follow
         size_t caret = std::min(e.caret, e.text.size());
@@ -1816,6 +1960,9 @@ size_t charAfter(const std::wstring& t, size_t at) {
 }  // namespace
 
 Result key(App& app, HWND hwnd, LiveText& e, WPARAM vk, bool ctrl, bool shift, const Host& host) {
+    // Ctrl+Insert, Shift+Insert and Shift+Delete are Ctrl+C, V and X.
+    // Shift+Delete only deleted, and kept nothing (#320)
+    takeClipboardKey(vk, ctrl, shift);
     if (e.popup != LiveText::Popup::None && !e.choices.empty()) {
         int count = (int)e.choices.size();
         switch (vk) {
@@ -1901,11 +2048,8 @@ Result key(App& app, HWND hwnd, LiveText& e, WPARAM vk, bool ctrl, bool shift, c
             break;
         case 'C':
         case 'X':
-        case VK_INSERT:
-            if (!ctrl && !(vk == VK_INSERT && shift)) return Result::Unhandled;
-            if (vk == VK_INSERT && shift) {
-                paste(e, readClipboardText(hwnd));
-            } else if (e.hasSelection()) {
+            if (!ctrl) return Result::Unhandled;
+            if (e.hasSelection()) {
                 copyToClipboard(hwnd, e.text.substr(e.selStart(), e.selEnd() - e.selStart()));
                 if (vk == 'X') replace(e, L"");
             }

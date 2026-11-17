@@ -1,3 +1,4 @@
+#include "ui_scale.h"
 #include "frontmatter_ui.h"
 #include "settings.h"
 #include "utils.h"
@@ -38,9 +39,9 @@ void text(App& app,const std::wstring& value,D2D1_RECT_F r,float size,D2D1_COLOR
 }
 void button(App& app,D2D1_RECT_F r,const std::wstring& value,int action,bool active=false,bool enabled=true) {
     float scale=app.frontmatterUiScale;
-    fill(app,r,color(active?app.theme.accent:app.theme.text,active?.16f:.045f),4*scale);
+    fill(app,r,color(active?themeUiAccent(app.theme):themeUiText(app.theme),active?.16f:.045f),4*scale);
     text(app,value,{r.left+7*scale,r.top,r.right-5*scale,r.bottom},11*scale,
-         color(active?app.theme.accent:app.theme.text,enabled?1.f:.3f),active);
+         color(active?themeUiAccent(app.theme):themeUiText(app.theme),enabled?1.f:.3f),active);
     if(enabled)app.settingsHits.push_back({r,action});
 }
 std::vector<fm::Property> previewProperties(const App& app) {
@@ -183,8 +184,9 @@ void renderFrontmatterSettings(App& app,const D2D1_RECT_F& area) {
     float x=area.left,y=area.top,w=area.right-x;
     float s=std::min({app.contentScale, w/360.f, (area.bottom-area.top)/390.f});
     app.frontmatterUiScale=s;
-    auto normal=app.theme.text,muted=color(normal,.5f),accent=app.theme.accent;
-    auto card=color(normal,app.theme.isDark?.045f:.028f);
+    // What explains is at the scale's secondary ink, and nothing is set under its smallest role (ui_scale.h)
+    auto normal=themeUiText(app.theme),muted=color(normal,uiscale::inkSecondary),accent=themeUiAccent(app.theme);
+    auto card=color(normal,themeUiDark(app.theme)?.045f:.028f);
     fill(app,{x,y,x+w,y+58*s},card,6*s);
     text(app,tr(app,"fm.title"),{x+12*s,y+5*s,x+w-140*s,y+29*s},13*s,normal,true);
     text(app,tr(app,"fm.strip_hint"),{x+12*s,y+29*s,x+w-10*s,y+51*s},11*s,muted);
@@ -198,11 +200,11 @@ void renderFrontmatterSettings(App& app,const D2D1_RECT_F& area) {
     float headerH=25*s,rowH=37*s;
     float keyW=std::max(74*s,w*.26f),showX=x+keyW,sideX=showX+36*s,labelX=sideX+55*s,formatX=labelX+44*s;
     fill(app,{x,y,x+w,listBottom},card,5*s);
-    text(app,tr(app,"fm.key"),{x+24*s,y,showX,y+headerH},9*s,muted,true);
-    text(app,tr(app,"fm.show"),{showX,y,sideX,y+headerH},9*s,muted,true);
-    text(app,tr(app,"fm.side"),{sideX,y,labelX,y+headerH},9*s,muted,true);
-    text(app,tr(app,"fm.label"),{labelX,y,formatX,y+headerH},9*s,muted,true);
-    text(app,tr(app,"fm.format"),{formatX,y,x+w,y+headerH},9*s,muted,true);
+    text(app,tr(app,"fm.key"),{x+24*s,y,showX,y+headerH},11*s,muted,true);
+    text(app,tr(app,"fm.show"),{showX,y,sideX,y+headerH},11*s,muted,true);
+    text(app,tr(app,"fm.side"),{sideX,y,labelX,y+headerH},11*s,muted,true);
+    text(app,tr(app,"fm.label"),{labelX,y,formatX,y+headerH},11*s,muted,true);
+    text(app,tr(app,"fm.format"),{formatX,y,x+w,y+headerH},11*s,muted,true);
     app.frontmatterListRect={x,y+headerH,x+w,listBottom};
     float visible=listBottom-y-headerH;
     app.frontmatterScroll=std::clamp(app.frontmatterScroll,0.f,std::max(0.f,rowH*(float)app.frontmatter.rules.size()-visible));
@@ -216,8 +218,8 @@ void renderFrontmatterSettings(App& app,const D2D1_RECT_F& area) {
         auto tc=color(normal,enabled?(r.show?1.f:.45f):.3f);
         if((int)i==app.frontmatterDrag)fill(app,row,color(accent,.1f),0);
         text(app,L"\u2261",{x+6*s,ry,x+21*s,ry+rowH},12*s,muted);
-        text(app,toWide(r.key),{x+25*s,ry,showX-36*s,ry+rowH},12*s,tc,true);
-        text(app,kindName(app,r.hint),{showX-33*s,ry,showX-3*s,ry+rowH},8*s,color(tc,.5f));
+        text(app,toWide(r.key),{x+25*s,ry,showX-46*s,ry+rowH},12*s,tc,true);
+        text(app,kindName(app,r.hint),{showX-44*s,ry,showX-3*s,ry+rowH},11*s,color(tc,uiscale::inkSecondary));
         int id=FM_ROW+(int)i*8;
         auto clippedHit=[&](D2D1_RECT_F bounds,int action) {
             bounds.top=std::max(bounds.top,app.frontmatterListRect.top);bounds.bottom=std::min(bounds.bottom,listBottom);
@@ -226,7 +228,7 @@ void renderFrontmatterSettings(App& app,const D2D1_RECT_F& area) {
         if(enabled)clippedHit({x,ry,x+24*s,ry+rowH},id);
         D2D1_RECT_F box={showX+7*s,ry+11*s,showX+21*s,ry+25*s};
         fill(app,box,color(r.show?accent:normal,r.show&&enabled?1.f:.10f),3*s);
-        if(r.show)text(app,L"\u2713",{box.left+2*s,box.top-1*s,box.right,box.bottom},11*s,color(app.theme.background,enabled?1.f:.3f),true);
+        if(r.show)text(app,L"\u2713",{box.left+2*s,box.top-1*s,box.right,box.bottom},11*s,color(themeUiPanel(app.theme,app.theme.background),enabled?1.f:.3f),true);
         if(enabled)clippedHit({showX,ry,sideX,ry+rowH},id+1);
         size_t before=app.settingsHits.size();
         button(app,{sideX,ry+7*s,sideX+25*s,ry+30*s},tr(app,"fm.left_short"),id+2,!r.right,details);
@@ -259,7 +261,7 @@ void renderFrontmatterSettings(App& app,const D2D1_RECT_F& area) {
     text(app,tr(app,"fm.other"),{x+12*s,otherY,x+w-110*s,otherY+30*s},11*s,muted);
     button(app,{x+w-104*s,otherY+2*s,x+w-8*s,otherY+28*s},tr(app,app.frontmatter.showOther?"fm.shown":"fm.hidden"),FM_OTHER,false,app.frontmatter.shown);
     float py=otherY+39*s;
-    text(app,tr(app,"fm.preview"),{x,py,x+w,py+18*s},9*s,muted,true);py+=22*s;
+    text(app,tr(app,"fm.preview"),{x,py,x+w,py+18*s},11*s,muted,true);py+=22*s;
     D2D1_RECT_F preview={x,py,x+w,area.bottom-15*s};
     fill(app,preview,color(normal,.035f),5*s);
     app.renderTarget->PushAxisAlignedClip(preview,D2D1_ANTIALIAS_MODE_ALIASED);
@@ -274,7 +276,7 @@ void renderFrontmatterSettings(App& app,const D2D1_RECT_F& area) {
         auto row=app.frontmatterRows[app.frontmatterMenu];float my=std::clamp(row.bottom,area.top,area.bottom-menuH);
         D2D1_RECT_F menu={x+w-menuW,my,x+w,my+menuH};app.frontmatterMenuRect=menu;
         fill(app,{menu.left-3*s,menu.top-2*s,menu.right+3*s,menu.bottom+4*s},D2D1::ColorF(0,0,0,.15f),7*s);
-        fill(app,menu,app.theme.background,6*s);
+        fill(app,menu,themeUiPanel(app.theme,app.theme.background),6*s);
         for(size_t i=0;i<opts.size();++i)button(app,{menu.left+5*s,my+6*s+i*29*s,menu.right-5*s,my+31*s+i*29*s},formatLabel(app,opts[i]),FM_PICK+(int)opts[i],r.format==opts[i]);
         if(r.hint==fm::Kind::List) {
             float ly=menu.bottom-38*s;
@@ -354,7 +356,7 @@ void renderFrontmatterOverflow(App& app) {
         IDWriteTextLayout* layout=nullptr;app.dwriteFactory->CreateTextLayout(o.text.c_str(),(UINT32)o.text.size(),app.folderBrowserFormat,w-20*s,10000,&layout);
         if(!layout)return;
         layout->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);DWRITE_TEXT_METRICS m{};layout->GetMetrics(&m);
-        fill(app,{x,y,x+w,y+m.height+16*s},app.theme.codeBackground,6*s);
-        app.brush->SetColor(app.theme.text);app.renderTarget->DrawTextLayout({x+10*s,y+8*s},layout,app.brush);layout->Release();return;
+        fill(app,{x,y,x+w,y+m.height+16*s},themeUiPanel(app.theme,app.theme.codeBackground),6*s);
+        app.brush->SetColor(themeUiText(app.theme));app.renderTarget->DrawTextLayout({x+10*s,y+8*s},layout,app.brush);layout->Release();return;
     }
 }

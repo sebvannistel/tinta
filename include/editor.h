@@ -7,6 +7,11 @@
 
 // Mode transitions
 void enterEditMode(App& app);
+// The view Markdown files open in (#322). A file just opened goes to the
+// editor, on the page or on its source, when the setting asks for one;
+// openModeApplies says whether the file in the window is one it takes.
+bool openModeApplies(const App& app);
+void applyOpenMode(App& app);
 // Ctrl+N quick note: edit mode on an untitled empty buffer with no backing
 // file; the first save routes through the classic Save As dialog
 void enterQuickNoteMode(App& app);
@@ -37,6 +42,24 @@ void editorPasteAtCarets(App& app, HWND hwnd, const std::wstring& paste);
 // Editor input handlers
 void handleEditorKeyDown(App& app, HWND hwnd, WPARAM wParam);
 void handleEditorCharInput(App& app, HWND hwnd, WPARAM wParam);
+// The citation list under the source's caret (docs/citations.md), Live's
+// popup kept for the source: typing a key after an @ opens it. Its keys
+// come before the editor's (Up and Down choose, Enter or Tab put the key
+// in, Esc closes it): true when it took one. After each key and character
+// it follows the caret, narrowed, kept or put away; only `typed` text opens it
+bool editorCompletionKeyDown(App& app, HWND hwnd, WPARAM key);
+void editorCompletionFollow(App& app, bool typed);
+const LiveText& editorCompletion(const App& app);
+// Drawn over the editor and the page; a press on a row puts its key in, a
+// press elsewhere puts it away and goes on (false)
+void renderEditorCompletion(App& app);
+bool editorCompletionMouseDown(App& app, HWND hwnd, int x, int y);
+bool editorCompletionMouseMove(App& app, HWND hwnd, int x, int y);
+// The rail's Cite button: Zotero's picker through Better BibTeX when it
+// runs, else [@ typed and the list open. The picker's answer arrives as
+// WM_APP_ZOTERO and goes in at the caret of the document that asked
+void editorCite(App& app, HWND hwnd);
+void editorCiteAnswer(App& app, HWND hwnd, WPARAM request, LPARAM answer);
 void editorPositionImeWindow(App& app, HWND hwnd);
 void handleEditorMouseDown(App& app, HWND hwnd, int x, int y);
 void handleEditorMouseUp(App& app, HWND hwnd, int x, int y);
@@ -112,6 +135,8 @@ const wchar_t* diagramTemplate(int kind);
 
 // Editor search
 void performEditorSearch(App& app);
+// The same when the text has changed since the matches were found
+void editorSearchRefresh(App& app);
 void scrollEditorToMatch(App& app);
 // Find & replace (#121): replace the current match / every match with
 // App::replaceText; each hunk is one undo entry

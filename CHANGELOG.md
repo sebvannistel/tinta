@@ -1,5 +1,64 @@
 # Changelog
 
+## [v4.1.1] - 2026-11-14
+
+### Added
+- Settings > Editor > Open Markdown files in: Reading, Live or Source. With Live or Source a Markdown file comes up in the editor however it is opened (Explorer, Ctrl+O, a drop, the folder browser, a link, a session's tabs), at the place it was left at. A tab stays in the view it was left in and `Esc` still returns to the reading view; a find result is read, with its match on the page. Diagrams, text files and sheets open as before. `settings.ini` keeps the choice as `openMode=reading`, `live` or `source`. Requested by @Scawer132 (#322)
+
+### Fixed
+- Ctrl+Insert, Shift+Insert and Shift+Delete copy, paste and cut wherever Ctrl+C, Ctrl+V and Ctrl+X do: the source editor, Live, the find and replace fields, table cells, sheets, review notes, the folder browser's path field and the reading view. Shift+Insert pasted nothing outside Live, and Shift+Delete deleted the selection without keeping it. With nothing selected Shift+Delete does nothing now, as Ctrl+X does. Reported by @tferi99 (#320)
+- A word typed into the find bar stands on the bar's line whatever font draws it. Chinese in a face set with `cjkFont=`, and Thai, Hindi, Burmese and Javanese, stood low with their feet cut off. Reported by @TiegenFang (#319)
+- With the find bar open, a drag on the page selects text in Source, in Live and in the reading view, and the editor keeps its own pointer beside the bar; the drag selected nothing. A click on Live's page gives the keyboard back to the page. Reported by @TiegenFang (#319)
+- In Live the find bar stands over the middle of the page; it was a sliver beside the tool rail since 4.0.0.
+
+## [v4.1.0] - 2026-11-11
+
+### Added
+- Citations. Name a BibTeX, BibLaTeX, CSL-JSON or CSL YAML library in the front matter, or write the references there, and cite in pandoc's syntax (`[@doe2024, p. 4]`, `@doe2024 says`). Citations and the list of references are set in APA, Chicago, IEEE, Nature or GB/T 7714, or any `.csl` style, note styles as footnotes; a citation shows its reference on hover and goes to it on a click, and a key that is not in the library shows in the warning colour. Figures, tables, equations and sections number themselves and `@fig:id`, `@tbl:id`, `@eq:id` and `@sec:id` refer to them, as pandoc-crossref does. HTML, Word and PDF keep all of it, and pandoc exports get `--citeproc`. See [Citations, figures and tables](docs/citations.md)
+- Citing as you write. In the editor, `[@` lists the library's keys by author, year and title, `@fig:` the document's figures, and the tool rail's Cite button opens Zotero's picker through Better BibTeX. A library saved by another program is read again.
+- Papers. A front matter in pandoc's variables (`title`, `author`, `abstract`, `keywords`, `classoption: twocolumn`, `papersize`, `fontsize`) prints as a journal sets a manuscript: a title block, two columns, page numbers and running heads, chosen in the print preview too. Word gets Title, Author and Abstract styles and captions numbered with fields it updates.
+- CSS themes. A `.css` file in the `themes` folder is a theme: real selectors and cascade, variables, `oklch()`, `color-mix()`, and `light-dark()` for one sheet that follows Windows. Every element takes its own rules, from margins, borders, round corners and justified text to list markers, counters, generated content and fonts loaded with `@font-face`, on screen, on paper and in Word. `--ui-*` variables colour the window and `--mermaid-*` the diagrams, a `tinta.css` styles one folder's documents, and `cssclasses` in the front matter names classes for a page. Saving a sheet restyles the window, its mistakes are reported with their lines, and Ctrl+Alt+click on the page shows which rules style what. Settings > Appearance > Import takes a Typora or Obsidian theme. [THEMES.md](THEMES.md) is the short guide and [CSS themes](docs/css-themes.md) the reference
+- Ctrl+Shift+T reopens the tab closed last, with its place, its scroll and any unsaved text, and again for the one before; tabs closed in one sweep come back together. A tab's menu lists the last five closed tabs by name.
+
+### Changed
+- The ten built-in themes are one design in ten palettes: headings in Segoe UI Variable Display with a hairline under the first two levels, code blocks with round corners and an edge, inline code on a chip, callouts on a tint, tables with lines across only, quotes in softer ink, and links, code and syntax colours that read at 4.5 to 1 or more. Each is a CSS file inside Tinta, and a sheet of your own can start from one with `@import "Paper"`.
+- A theme made in the colour editor from a built-in theme keeps that theme's new design. Themes already in `themes.ini` keep the look they had. Each `themes.ini` theme is also written as a CSS file in the `themes` folder, which follows it until it is edited by hand, and the theme in use is remembered by its name.
+- Settings is grouped: each page has two or three groups under small labels, a setting's description is smaller and softer than its name, and Follow Windows theme stands with Themes. A page taller than the window scrolls with the wheel, where its last settings could not be reached (Appearance did not fit a 1080p screen at 150%). In a narrow window the sections go across the top.
+- The theme chooser's cards have one size and its columns scroll. With many themes the cards shrank until each name lay over its sample. It opens with the theme in use in sight.
+- The menus of the reading view, the tabs and the two editors look alike: one row height, padding, corner and type. The shortcut list (F1) stands in two columns where the window is wide enough. Contents, the folder browser and the search results have slightly taller rows, and no label, footer or badge in the interface is smaller than 11.
+- The window has an edge: a hairline in the theme's own colour around it, where a dark window on a dark desktop had none. The same line parts the tab row from the page, the chosen tab has an edge in place of its shadow, a thin line stands between tabs at rest, and tab names, the + and the window's buttons stand on one line; a name used to drop by 2 when its tab was left.
+- Letters are smoothed for the monitor the window is on, with that monitor's ClearType settings, and follow the window to another monitor. Tinta used the primary monitor's for every screen.
+- A line through struck text runs through the middle of the letters.
+- Settings > Appearance > Heading separators also takes away a CSS theme's own line under level 1 and 2 headings.
+
+### Fixed
+- After the interface language is changed to Chinese, Japanese or Korean, the editors' menus and the other text made before the change take that language's fonts at once; they kept the old ones until Tinta was started again.
+
+## [v4.0.3] - 2026-11-10
+
+### Added
+- Sections fold. In the reading view an arrow beside a heading folds everything under it up to the next heading of its level or above; a right click on it folds or unfolds all. Contents, links and Find open the folds around what they go to. Settings > Appearance > Fold sections turns it off, or opens every document folded. Requested by @Ra0EL (#316)
+
+### Changed
+- A click on a link asks before it opens a program, a script, a shortcut, a file on another server than the document's, or another app's own address such as `ms-settings:` or `obsidian://`, and shows the target in full. Web addresses, mail and documents open at once, as before. A name alone is a file beside the document, never a program found along PATH. The same holds in Live and for a sheet's link and file cards. Relative links to PDFs and other documents, and links with letters outside the system's code page, now open.
+
+### Fixed
+- The tool rail stays in place while tabs open, close and switch in the editor; it used to slide out and back in, and the tab strip and the page jumped beside it. Reported by @Fallgrim (#317)
+- A double- or triple-click above a table with styled or wrapping cells selects the word or line clicked; it took one from another line, or from the table's header. Reported by @shinfd (#318)
+- `themes.ini` reads `bold=`, `italic=`, `bolditalic=`, `selection=` and `hr=` with a note after the colour, with spaces around the `=` and in any case, and applies a saved change while Tinta runs. Reported by @Fallgrim (#310)
+- Live answers at once in a table, a list or a code block of thousands of lines. Every key laid the whole block out again: a letter typed in a table of 5,000 rows took over four seconds, and takes three milliseconds.
+- Scrolling stays smooth in a long document with Find open on a common letter, or with everything selected; every frame measured every match and every selected line of the document.
+- Find, the Contents filter, the results panel, `[[wiki links]]` and Live's menus match letters in either case in every alphabet, so `über` finds `Über` and `привет` finds `Привет`; only A to Z did.
+- Closing the window while the print preview shows over unsaved edits asks about them. It closed without a word, and took the recovery draft with it. A change on disk, a closed tab and a file opened from outside are asked about under the preview too.
+- "Create this file?" from a missing file's link opens a file that is there after all instead of emptying it: one saved since the page was drawn, or one on another server.
+- Deleting or changing a review note after an edit was saved changes that note and nothing else; it wrote over whatever stood where the note's comment had been. A note written into a file with Windows line endings keeps them; every line of the file was rewritten with Unix ones.
+- In the Source editor, Find's marks and Replace follow the text when it changes with the bar open. A button of the tool rail or a change on disk left them behind, and Replace then changed the wrong words or ended Tinta.
+- An equation with accents or brackets nested deep opens at once; thirty `\bar` in a row, or 25 pairs of `\left(` and `\right)`, stopped the window.
+- A file with thousands of tags written as closing themselves (`<b/>`) opens; it ended Tinta.
+- Sheets: a `.smd` cut short inside its canvas opens read-only instead of being saved over as an empty sheet; Tidy and Compile no longer hang on two groups with the same box; a pasted flowchart's link from a card to itself leaves the other arrows their heads; and a sheet larger than its window no longer redraws itself sixty times a second while it stands still.
+- A page with more or larger pictures than the image cache holds keeps them: they were decoded again at every step of a window resize, and pictures from the web were fetched again without end.
+- In Live, a paragraph that begins with a code span written with three backticks is a paragraph; everything under it turned into one code block that showed twice and could not be clicked into.
+
 ## [v4.0.2] - 2026-11-03
 
 ### Added

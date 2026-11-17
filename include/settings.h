@@ -23,14 +23,24 @@ void clearRecentFiles();
 
 // Theme changes persist immediately so new windows spawn in the same look
 void persistThemeChoice(const App& app);
+// The themes in use, for light and for dark, into settings by place and by
+// name; and out of them, each where the theme of that name stands now
+void settingsTakeThemes(Settings& settings, const App& app);
+void settingsGiveThemes(const Settings& settings, int& current, int& light, int& dark);
 // Editor mode pill choice (and the assists switch) persist immediately
 void persistEditorMode(const App& app);
 void persistWordCount(const App& app);
 void persistCloseKeepsDrafts(const App& app);
+// The view Markdown files open in (#322), and its name in settings.ini:
+// reading, live or source
+void persistOpenMode(const App& app);
+const char* openModeName(int mode);
+int openModeByName(const std::string& name);
 // Print margins persist when picked in the preview (#257)
 void persistPrintMargin(const App& app);
 void persistSearchScopes(const App& app);
 void persistOpenInTabs(const App& app);
+void persistReopenTabs(const App& app);
 void persistAlwaysOnTop(const App& app);
 
 // The configuration home: the exe's folder in portable mode (a

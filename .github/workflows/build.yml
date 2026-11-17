@@ -55,32 +55,24 @@ jobs:
             - Portable: download `tinta.exe` below and run it (SmartScreen may ask: "More info", then "Run anyway")
             - Optionally run `tinta.exe /register` to register Markdown, Mermaid and PlantUML files
 
-            A fix release for 4.0.1. For what is new in 4.0 (Live and Sheets), see the [v4.0.0 notes](https://github.com/oipoistar/tinta/releases/tag/v4.0.0).
+            A fix release for 4.1.0, with one new setting. For citations, papers and themes in CSS, new in 4.1, see the [v4.1.0 notes](https://github.com/oipoistar/tinta/releases/tag/v4.1.0).
 
             ### Added
-            - Pinned tabs, from a tab's menu: a pinned tab keeps to the start of the row as its first letter and stays in view. The title bar's pin is remembered for the next start. Requested by @Fallgrim (#312)
-            - Equation numbers with `\tag`, and `\eqref` and `\ref` to an equation's `\label`, in the reader and the HTML and Word exports. Requested by @TiegenFang (#314)
-            - With wrapping off, a scrollbar along the source editor's foot for lines that run past it, and the horizontal wheel pans them. Requested by @TiegenFang (#314)
-            - `mathFont=` and `cjkFont=` in `settings.ini` name the faces for equations and for Chinese, Japanese and Korean letters. Requested by @TiegenFang (#314)
-
-            ### Changed
-            - Source and Live follow a file another program changes, as the reader does, and ask Reload or Keep mine when there are unsaved edits. Requested by @QuamerX (#311)
-            - Each level of a bullet list has its own bullet, closer to its text. In Live, Tab takes an item one level in and Shift+Tab undoes it, and only the line being typed in is highlighted. Requested by @Fallgrim (#315)
+            - Settings > Editor > Open Markdown files in: Reading, Live or Source. With Live or Source a Markdown file comes up in the editor however it is opened, at the place it was left at; `Esc` still returns to the reading view. Kept as `openMode=` in `settings.ini`. Requested by @Scawer132 (#322)
 
             ### Fixed
-            - A double-click in Source selects whole words in every script, Turkish, Greek and Cyrillic included. Reported by @Fallgrim (#313)
-            - Selections over bold, italic, links and code are one even band, without seams in the reader or brighter strips in Live. Reported by @Fallgrim (#313)
-            - Two `$$` equations in a row are set as two, and Word exports include `$$` equations. Reported by @TiegenFang (#314)
-            - An inline `$` equation can close before a letter, as in pandoc, so `$R=50\,\mu$m` no longer runs on; prices stay text. Reported by @TiegenFang (#314)
-            - Signs after brackets, brackets beside slanted letters and accents such as the tilde are set as TeX sets them. Reported by @TiegenFang (#314)
+            - Ctrl+Insert, Shift+Insert and Shift+Delete copy, paste and cut wherever Ctrl+C, Ctrl+V and Ctrl+X do. Shift+Insert pasted nothing outside Live, and Shift+Delete deleted without keeping the text. Reported by @tferi99 (#320)
+            - A word typed into the find bar stands on the bar's line whatever font draws it; Chinese in a face set with `cjkFont=` stood low and cut off. Reported by @TiegenFang (#319)
+            - With the find bar open, a drag on the page selects text in Source, Live and the reading view. Reported by @TiegenFang (#319)
+            - In Live the find bar stands over the middle of the page, not as a sliver beside the tool rail.
 
             ### What's included
             - Export as HTML, DOCX, or PDF, plus optional Pandoc formats
             - 22 natively rendered Mermaid diagram families, and PlantUML diagrams through a local PlantUML
             - Tabbed interface with drag, session restore, and a tab context menu
-            - 10 tuned themes (5 light, 5 dark) plus custom themes
+            - 10 themes (5 light, 5 dark) plus themes of your own in CSS
             - Hardware-accelerated rendering via Direct2D
-            - Single portable executable about 4 MB, no dependencies
+            - Single portable executable of about 5 MB, no dependencies
           files: build/Release/tinta.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

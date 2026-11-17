@@ -82,6 +82,10 @@ inline int64_t usElapsed(Clock::time_point start) {
 // (todo 5 wires the handler; no App state is touched here yet)
 #define WM_APP_PLANTUML_READY (WM_APP + 7)
 
+// Zotero's picker answered the rail's Cite button (zotero.h): wParam the
+// request's number, lParam a zotero::Answer* the handler deletes
+#define WM_APP_ZOTERO (WM_APP + 8)
+
 // Startup metrics
 struct StartupMetrics {
     int64_t windowInitUs = 0;
@@ -96,6 +100,26 @@ struct StartupMetrics {
 
 // Syntax highlighting token types
 enum class SyntaxTokenType { Plain, Keyword, String, Comment, Number, Function, TypeName, Operator, ControlFlow };
+
+// Diagram colours a CSS theme gives with Mermaid's theme variables, written
+// --mermaid-primary-color and so on (docs/css-themes.md). Each is the first
+// of its variables the sheet sets; a missing one keeps what Tinta derives
+// from the page for that part of a diagram
+struct DiagramColors {
+    std::optional<D2D1_COLOR_F> nodeFill;       // mainBkg, primaryColor
+    std::optional<D2D1_COLOR_F> nodeBorder;     // nodeBorder, primaryBorderColor
+    std::optional<D2D1_COLOR_F> nodeText;       // nodeTextColor, primaryTextColor: flowchart labels
+    std::optional<D2D1_COLOR_F> text;           // textColor, primaryTextColor
+    std::optional<D2D1_COLOR_F> line;           // lineColor
+    std::optional<D2D1_COLOR_F> link;           // defaultLinkColor: flowchart edges, else line
+    std::optional<D2D1_COLOR_F> secondary;      // secondaryColor: notes, activations, bands
+    std::optional<D2D1_COLOR_F> edgeLabel;      // edgeLabelBackground, secondaryColor
+    std::optional<D2D1_COLOR_F> clusterFill;    // clusterBkg, tertiaryColor
+    std::optional<D2D1_COLOR_F> clusterBorder;  // clusterBorder, tertiaryBorderColor
+    std::optional<D2D1_COLOR_F> clusterText;    // titleColor, tertiaryTextColor
+    std::optional<D2D1_COLOR_F> background;     // background
+    std::optional<D2D1_COLOR_F> series[12];     // pie1..pie12: every chart's series
+};
 
 // Theme colors
 struct D2DTheme {
@@ -137,7 +161,46 @@ struct D2DTheme {
     // the horizontal rule's colour, else blockquoteBorder
     std::optional<D2D1_COLOR_F> selection = std::nullopt;
     std::optional<D2D1_COLOR_F> rule = std::nullopt;
+    // A CSS theme's caret-color for the editors' caret; else the text's
+    std::optional<D2D1_COLOR_F> caret = std::nullopt;
+    // Type sizes a CSS theme sets (docs/specs/theming.md), in pixels at
+    // 100%; 0 keeps Tinta's (body 16, code 14, headings 32/26/22/18/16/14,
+    // bold, line height 1.7 times the size)
+    float bodySize = 0, codeSize = 0, lineHeight = 0;
+    float headingSize[6] = {};
+    int headingWeight[6] = {};
+    bool headingItalic[6] = {};
+    // 1: the built-in themes' design, their type sizes and rules. A theme
+    // made in Settings takes it from the theme it was made from and keeps
+    // it as design=1 in its themes.ini section, whose CSS file then starts
+    // from a built-in theme's rules; 0 is the look every section had up to
+    // 4.0.3, which a section without the key keeps
+    int design = 0;
+    // The file a CSS theme came from, for following its changes; else empty
+    const wchar_t* sourcePath = nullptr;
+    // The window around the page as a CSS theme sets it with --ui-* on
+    // :root (docs/specs/theming.md, phase 3): the tab strip and caption,
+    // the chrome's text and accent, panels, menus, popups and cards, and
+    // their edges. A missing one keeps what the page gives that part
+    std::optional<D2D1_COLOR_F> uiBackground, uiText, uiAccent, uiPanel, uiBorder;
+    DiagramColors mermaid;
 };
+
+// What a theme's type sizes are, as text: text formats are rebuilt when it
+// changes, as they are for a change of face
+inline std::string themeTypeKey(const D2DTheme& theme) {
+    std::string key = std::to_string(theme.bodySize) + "/" + std::to_string(theme.codeSize);
+    for (int i = 0; i < 6; i++) {
+        key += "/" + std::to_string(theme.headingSize[i]) + ":" + std::to_string(theme.headingWeight[i]) +
+               (theme.headingItalic[i] ? "i" : "");
+    }
+    return key;
+}
+
+// The body's line height as a multiple of the type size
+inline float themeLineHeight(const D2DTheme& theme) {
+    return theme.lineHeight > 0 ? theme.lineHeight : 1.7f;
+}
 
 inline D2D1_COLOR_F themeInlineCodeColor(const D2DTheme& theme) {
     return theme.inlineCode.value_or(theme.code);
@@ -177,6 +240,26 @@ inline D2D1_COLOR_F themeSelectionColor(const D2DTheme& theme, D2D1_COLOR_F own)
     return color;
 }
 
+// The chrome's colours (--ui-*): the theme's where it sets them, else the
+// page's, so a theme without them draws its window as before. Out of line
+// (themes.cpp): the chrome calls them in a few hundred places
+D2D1_COLOR_F themeUiText(const D2DTheme& theme);
+D2D1_COLOR_F themeUiAccent(const D2DTheme& theme);
+// Strong chrome text (a panel's title, the row in use): --ui-text, else
+// the page's heading colour
+D2D1_COLOR_F themeUiHeading(const D2DTheme& theme);
+// A panel, menu, popup or card's fill: --ui-panel at the surface's own
+// opacity (its fade and translucency), else the surface's own colour
+D2D1_COLOR_F themeUiPanel(const D2DTheme& theme, D2D1_COLOR_F own);
+// Their edges and dividers: --ui-border as it is, faded in with the
+// surface, else the surface's own
+D2D1_COLOR_F themeUiBorder(const D2DTheme& theme, D2D1_COLOR_F own, float fade = 1.0f);
+// Whether a colour reads as dark, as the CSS compiler decides a page is
+bool themeColorIsDark(const D2D1_COLOR_F& c);
+// Whether the chrome's panels are dark: --ui-panel's when the theme sets
+// it, else the page's
+bool themeUiDark(const D2DTheme& theme);
+
 // Helper to create color from hex
 inline D2D1_COLOR_F hexColor(uint32_t hex, float alpha = 1.0f) {
     return D2D1::ColorF(
@@ -196,8 +279,14 @@ struct SheetDoc;
 // Scales by contentScale only (not zoomFactor) so UI chrome tracks monitor DPI.
 inline float dpi(const App& app, float value);
 
-// Themes array (defined in themes.cpp)
-extern const D2DTheme THEMES[];
+// The built-in themes (themes.cpp). Each is a CSS file under
+// resources/themes, read into the theme Tinta draws with when it is first
+// asked for. THEMES[i] reads as the table they were once written in did
+const D2DTheme& builtinTheme(int index);
+struct BuiltinThemes {
+    const D2DTheme& operator[](int index) const { return builtinTheme(index); }
+};
+inline constexpr BuiltinThemes THEMES{};
 extern const int THEME_COUNT;
 
 // Dynamic theme registry (#82): the built-ins plus user themes loaded from
@@ -206,10 +295,19 @@ extern const int THEME_COUNT;
 // members stay valid. Indices: [0, THEME_COUNT) built-in, then customs.
 struct CustomTheme {
     std::wstring name, fontFamily, headingFontFamily, codeFontFamily;
+    std::wstring sourcePath;  // a CSS theme's sheet
     D2DTheme theme;
 };
 int themeCount();
 const D2DTheme& themeAt(int index);  // out-of-range clamps to theme 0
+// A theme as what a new one is made from in the theme editor: its copy,
+// without the hairline colour when that is only the design's own
+D2DTheme themeAsBase(int index);
+// Where the theme of that name (UTF-8) stands now: at `index` when it is
+// still there, else wherever it moved; -1 when no theme has the name. With
+// no name, `index` as it is
+int themeIndexNamed(const std::string& name, int index);
+std::string themeNameAt(int index);  // UTF-8; empty out of range
 
 // The face headings render with: headingfont= when the theme sets one,
 // else the theme's main font - so font= means the whole document (#155)
@@ -232,6 +330,33 @@ int saveCustomTheme(const D2DTheme& t, const std::wstring& name,
                     const std::wstring& codeFontFamily,
                     const std::wstring& headingFontFamily = L"");
 
+// CSS themes (docs/specs/theming.md): <config>\themes\*.css, registered
+// after the themes.ini ones, each named by its file. One that follows
+// Windows (color-scheme: light dark) is drawn as Windows is set
+void themesSetSystemDark(bool dark);
+bool themeFollowsSystem(int index);
+// The sheet a CSS theme came from, else empty. A themes.ini section has
+// a CSS file too (themes.cpp), written from it and followed by it; that
+// file is the theme's source only once somebody changed it by hand
+std::wstring themeSourcePath(int index);
+// Off, themes.ini sections are drawn without a sheet, as when their
+// files cannot be written. For tests of that drawing
+bool& themesIniBecomesCss();
+// Reads a CSS theme again when its file, or one it imports, changed;
+// true when it did, and the theme is to be applied again
+bool themeReloadIfChanged(int index);
+// What its sheet holds that Tinta cannot use, a line each ("Ink.css,
+// line 14: `display` has no effect..."); empty for other themes
+std::vector<std::wstring> themeProblems(int index);
+// The sheet as CSS, its imports inlined, for the HTML export; else empty
+std::string themeSheetCss(int index);
+// The sheet itself, which layout asks for each element's style
+// (page_style.h); null for themes that are not CSS
+namespace css { struct Sheet; }
+std::shared_ptr<const css::Sheet> themeSheet(int index);
+namespace page { struct State; }
+struct InspectorCard;
+
 // Persistent settings
 enum class SidePanel { None, Contents, Browser };
 // The side panels' scrolling lists (#287): the Contents outline, the file
@@ -240,6 +365,10 @@ enum class PanelList { None, Contents, Browser, Search };
 // What a finger drives (#286): the page (the reader or the docked
 // preview), the editor's text, or a side panel's list
 enum class TouchTarget { None, Document, Editor, List, Sheet, Help };
+
+// The view a Markdown file opens in (#322): the reading view, or the
+// editor on the page (Live) or on its source
+enum OpenMode { OPEN_READING = 0, OPEN_LIVE = 1, OPEN_SOURCE = 2 };
 
 struct Settings {
     int themeIndex = 5;          // Default to Midnight
@@ -266,6 +395,10 @@ struct Settings {
     bool followSystemTheme = false;
     int lightThemeIndex = 0;   // Paper
     int darkThemeIndex = 5;    // Midnight
+    // The three themes by name as well (UTF-8): the list changes when a
+    // theme is added or taken away, and a place in it then means another
+    // theme. Empty in a settings.ini written before names were kept
+    std::string themeName, lightThemeName, darkThemeName;
     // Search results panel (#246): other open tabs and sibling markdown
     // files join the current document's matches
     bool folderSearchEnabled = true;
@@ -279,6 +412,9 @@ struct Settings {
     // Bottom-right info and success messages (#273); warnings, errors and
     // messages that ask something always show
     bool showNotifications = true;
+    // Whether a launch brings the last session's tabs back (#323). Off,
+    // only the pinned ones are kept and come back
+    bool reopenTabs = true;
     // Last session's open tabs, restored on the next plain launch
     std::vector<std::string> sessionTabs;
     int sessionActive = 0;
@@ -299,10 +435,15 @@ struct Settings {
     // Separator line under level 1 and 2 headings (#154): off renders
     // the heading text alone
     bool headingRules = true;
+    // Long lines in code blocks wrap at the block's edge (#324): off, the
+    // block grows as wide as its longest line and the page scrolls sideways
+    bool wrapCode = true;
     // Folding sections in the reading view (#316): the arrows beside
     // headings, and whether documents open with every section folded
     bool foldSections = true;
     bool foldOnOpen = false;
+    // The view a Markdown file opens in (#322), an OpenMode
+    int openMode = 0;
     // Table of contents panel side: false = right (default), true = left
     bool tocOnLeft = false;
     // Pinned side panels (#156): a pinned panel stops dismissing on
@@ -371,6 +512,14 @@ struct App {
     // The warm-up thread flips this and the target is recreated on
     // WM_APP_GPU_READY, after the first frame is already on screen.
     bool useHardwareRT = false;
+    // The colour last given to the window's border (applyWindowChrome)
+    COLORREF windowBorder = 0;
+    // The monitor the target's text is smoothed for, and that monitor's
+    // gamma, contrast and subpixel order (followMonitorText, d2d_init.h)
+    HMONITOR textMonitor = nullptr;
+    float textGamma = 0.0f;
+    float textContrast = 0.0f;
+    int textPixelGeometry = -1;
 
     // Cached dashed stroke for mermaid edges (factory object: created once,
     // survives render-target recreation)
@@ -410,15 +559,27 @@ struct App {
         bool blocked = false;  // on another computer's share, left unopened
         size_t bytes = 0;      // estimated decoded bitmap memory
         unsigned long long lastUsed = 0;
+        unsigned pass = 0;     // the layout pass that last asked for it; 0 for none
     };
     std::unordered_map<std::string, ImageEntry> imageCache;
     size_t imageCacheBytes = 0;
     unsigned long long imageCacheUseClock = 0;
+    // The layout pass in progress and the last one finished, by number. An
+    // image either of them asked for is one the page shows: it stays in the
+    // cache whatever the budget. A document with more images than the cache
+    // holds had each one put out by the next, on every pass: its files
+    // decoded again at every resize, its downloads fetched again without end
+    unsigned imagePass = 0, imagePassShown = 0;
+    bool imagePassActive = false;
     static constexpr size_t IMAGE_CACHE_BUDGET = 64ull * 1024ull * 1024ull;
     static constexpr size_t IMAGE_CACHE_MAX_ENTRIES = 256;
 
     void touchImageCacheEntry(ImageEntry& entry) {
         entry.lastUsed = ++imageCacheUseClock;
+        if (imagePassActive) entry.pass = imagePass;
+    }
+    bool imageOnPage(const ImageEntry& entry) const {
+        return entry.pass != 0 && (entry.pass == imagePassShown || (imagePassActive && entry.pass == imagePass));
     }
 
     void storeImageCacheEntry(const std::string& key, ImageEntry entry) {
@@ -443,6 +604,7 @@ struct App {
             auto victim = imageCache.end();
             for (auto candidate = imageCache.begin(); candidate != imageCache.end(); ++candidate) {
                 if (candidate->first == key || candidate->second.pending) continue;
+                if (imageOnPage(candidate->second)) continue;
                 if (victim == imageCache.end() ||
                     candidate->second.lastUsed < victim->second.lastUsed) {
                     victim = candidate;
@@ -460,6 +622,7 @@ struct App {
         // Copies, measurement rollback and relayout all release via RAII.
         Microsoft::WRL::ComPtr<ID2D1Bitmap> bitmap;
         D2D1_RECT_F destRect{};
+        float opacity = 1.0f;  // a CSS theme's img { opacity }
     };
     std::vector<LayoutBitmap> layoutBitmaps;
 
@@ -509,6 +672,12 @@ struct App {
     // compares with these, not with app.theme: saving the theme in use from
     // the theme editor rewrites the strings app.theme points into (#265)
     std::wstring formatsFontFamily, formatsCodeFontFamily, formatsHeadingFontFamily;
+    std::string formatsTypeKey;  // and the type sizes (themeTypeKey)
+    std::wstring themeProblemsShown;  // the CSS theme's problems last reported
+    // The active document's bibliographies and style file as last seen
+    // (docs/specs/scholar.md): a change formats its citations again
+    std::map<std::wstring, FILETIME> scholarFileTimes;
+    int themeProblemsIndex = -1;      // and the theme they were for
 
     // Overlay text formats (cached)
     IDWriteTextFormat* searchTextFormat = nullptr;
@@ -525,6 +694,18 @@ struct App {
     // OpenType typography
     IDWriteTypography* bodyTypography = nullptr;
     IDWriteTypography* codeTypography = nullptr;
+    // A CSS theme's styles as layout reads them, element by element, with
+    // the text formats made for them (page_style.h)
+    std::shared_ptr<page::State> pageState;
+    // The CSS inspector's card (inspector.h)
+    std::shared_ptr<InspectorCard> inspector;
+    // A folder's own sheet (docs/specs/theming.md): the tinta.css styling
+    // the document, empty when none does; the documents it is turned off
+    // for, by path; and the page's background when a sheet sets the body's
+    std::wstring folderSheetPath;
+    FILETIME folderSheetTime{};  // as the file timer last saw it
+    std::vector<std::string> folderSheetOff;
+    std::optional<D2D1_COLOR_F> pageBackground;
 
     // Folder browser text format
     IDWriteTextFormat* folderBrowserFormat = nullptr;
@@ -577,6 +758,10 @@ struct App {
     float themeChooserAnimation = 0.0f;  // 0 to 1 for fade in
     std::vector<std::pair<D2D1_RECT_F, int>> themeChooserHits;
     D2D1_RECT_F themeChooserPanel{};
+    // More themes than the dialog has room for scroll in it (the wheel)
+    float themeChooserScroll = 0.0f;
+    float themeChooserScrollMax = 0.0f;
+    D2D1_RECT_F themeChooserViewport{};
     int themeChooserPreviewBase = -1;
 
     // --- Tabbed interface (Win11 Notepad-style tabs in the title bar) ---
@@ -595,6 +780,9 @@ struct App {
         // Pinned (#312): first in the row, narrow, spared by Close others
         // and the left and right sweeps, and back with the session
         bool pinned = false;
+        // Not shown yet since it was opened: its first showing puts it in
+        // the view Markdown files open in (#322)
+        bool openModePending = false;
         std::wstring editorText;   // parked edit buffer (editMode only)
         bool editorBom = false;    // its file starts with a byte order mark
         float editorScrollY = 0.0f;
@@ -607,6 +795,11 @@ struct App {
     // Ctrl+G's go-to-line prompt (#276): open, and the digits typed so far
     bool gotoLineOpen = false;
     std::wstring gotoLineInput;
+    // The rail's Cite button (docs/citations.md): the request Zotero's
+    // picker is answering, while it is, and the tab (its id) that asked
+    unsigned citeRequest = 0;
+    bool citeWaiting = false;
+    int citeTab = -1;
     // The wheel over the tab strip steps through tabs (#272): notches of a
     // high-resolution wheel or touchpad add up here, and a pause resets
     float tabWheelAccum = 0.0f;
@@ -684,12 +877,39 @@ struct App {
     int tabMenuHover = -1;
     float tabMenuX = 0.0f;
     float tabMenuY = 0.0f;
+    float tabMenuW = 0.0f;          // measured as it opens: the widest label
+                                    // with its shortcut, in any language
     float tabMenuAnimation = 0.0f;
     // Bulk close (others / left / right) survives the per-tab
     // unsaved-changes dialogs by re-finding the kept tab by id
     int tabBulkCloseMode = 0;       // 0 none, 1 others, 2 left, 3 right
     int tabBulkKeepId = 0;
     int tabIdCounter = 0;           // DocTab.id source
+    // Closed tabs for Ctrl+Shift+T, newest last: where each stood and,
+    // closed in the editor, its buffer. The tabs one sweep closes share a
+    // group and reopen together. Memory only: nothing goes to disk
+    struct ClosedTab {
+        std::string path;           // empty: an untitled note
+        std::string after;          // the file to its left, if any: it goes back beside it
+        int index = 0;
+        int group = 0;
+        bool pinned = false;
+        bool editMode = false;
+        bool editorDirty = false;
+        std::wstring editorText;
+        bool editorBom = false;
+        float editorScrollY = 0.0f;
+        size_t editorCursor = 0;
+        bool wordWrap = true;
+        FILETIME lastWrite{};
+    };
+    std::vector<ClosedTab> closedTabs;
+    int closedTabGroups = 0;        // the last group number handed out
+    int tabBulkCloseGroup = 0;      // the group of the sweep under way
+    // The buffer "Don't save" threw away, for the tab close it answered:
+    // reopened, the text comes back unsaved (tab id 0: nothing kept)
+    ClosedTab discardedEdit;
+    int discardedEditTabId = 0;
     // Drag-out satellites keep the tab row even with a single tab
     bool forceTabStrip = false;
     // Quick-note empty state: "Open a file" button in the preview pane of
@@ -794,6 +1014,8 @@ struct App {
     bool helpScrollbarDragging = false;
     float helpScrollbarDragStartY = 0;
     float helpScrollbarDragStartScroll = 0;
+    // Where the shortcut list's rows were drawn (set in render)
+    std::vector<D2D1_RECT_F> helpRows;
 
     // Settings overlay (Ctrl+,): section rail + rows of toggles/chips.
     // Hit rects are stored during render (print-preview pattern); each
@@ -802,9 +1024,26 @@ struct App {
     float settingsAnimation = 0.0f;
     int settingsSection = 0;  // 0 General, 1 Appearance, 2 Editor
     std::vector<std::pair<D2D1_RECT_F, int>> settingsHits;
+    // A page taller than the dialog's room scrolls in it (the wheel)
+    float settingsScroll = 0.0f;
+    float settingsScrollMax = 0.0f;
+    D2D1_RECT_F settingsViewport{};
+    // Where the page's parts were drawn: each row with its label's and its
+    // control's place, the groups' cards and labels (set in render)
+    struct SettingsRowBox {
+        int group = 0;
+        D2D1_RECT_F row{}, text{}, control{};
+        bool stacked = false;       // the control went under the label
+        bool titleTrimmed = false;  // the label did not fit and ends in an ellipsis
+        bool hintTrimmed = false;   // nor did the line under it
+    };
+    std::vector<SettingsRowBox> settingsRows;
+    std::vector<D2D1_RECT_F> settingsCards;
+    std::vector<D2D1_RECT_F> settingsGroupLabels;
     int readingWidthPct = 100;  // mirrors Settings (#82); 100 = full width
     int zenWidthPct = 60;
     bool headingRules = true;   // mirrors Settings (#154)
+    bool wrapCode = true;       // mirrors Settings (#324)
     // Folding sections (#316), mirroring Settings: the arrows beside
     // headings, and documents opening with every section folded
     bool foldSections = true;
@@ -928,6 +1167,11 @@ struct App {
     D2D1_RECT_F linkPeekAnchorDoc{};        // hovered link rect (doc coords)
     D2D1_RECT_F linkPeekPanel{};            // placed panel (screen coords)
     int annotEditorIndex = -1;    // -1 = creating a new annotation
+    // The note the editor is open on, by what it says: its place in the
+    // text is found again when it is written, as the text may have changed
+    std::string annotEditorQuote, annotEditorNote;
+    int annotEditorOrdinal = 0;   // which of the notes that say the same, in the text's order
+    size_t annotPendingSource = 0;  // the text a new note's place was found in, hashed
     std::wstring annotEditorText;
     size_t annotEditorCaret = 0;
     size_t annotPendingInsert = (size_t)-1;  // source offset for the new comment line
@@ -960,6 +1204,13 @@ struct App {
     };
     bool showPrintPreview = false;
     PrintSavedView printSaved;
+    // Whether the active document is in the editor, and whether it holds
+    // edits not saved. The print preview lays the page out with the editor
+    // put aside, editMode off until it closes: asked by editMode alone, a
+    // document being previewed has nothing to lose, and closing the window
+    // over it lost the edits without a word
+    bool editingNow() const { return showPrintPreview ? printSaved.editMode : editMode; }
+    bool unsavedNow() const { return editingNow() && editorDirty; }
     // Laying out for paper: the page margins frame the text, so the screen's
     // side padding, title-strip offset and reading column stay out (#257)
     bool printLayout = false;
@@ -978,6 +1229,38 @@ struct App {
     D2D1_RECT_F printPreviewPaperBtn[4]{};
     D2D1_RECT_F printPreviewOrientBtn[2]{};   // 0 portrait, 1 landscape
     D2D1_RECT_F printPreviewMarginBtn[3]{};   // PRINT_MARGINS_MM presets
+    // Paper export (docs/specs/scholar.md, phase 3). The preview's choices
+    // for one document, -1 following its front matter; a margin chip
+    // clicked overrides the front matter's geometry
+    struct PrintChoices {
+        std::string file;
+        int columns = -1, pageNumbers = -1, runningHeads = -1;
+        bool ownMargin = false;
+    };
+    PrintChoices printChoices;
+    // What the open preview prints with: two columns, page numbers,
+    // running heads (PrintOption order), and the heads' words
+    bool printOptionOn[3] = {};
+    D2D1_RECT_F printPreviewOptionBtn[3]{};
+    std::wstring printHeadLeft, printHeadRight;
+    float printPreviewMarginMm = 19.05f;      // the margin it prints with
+
+    // Where the laid-out document lands on paper: a page's stretch in one
+    // column, each column's in two, the title block above them
+    struct PrintFrame {
+        int page = 0;
+        float yStart = 0, yEnd = 0;  // document Y
+        float x = 0, y = 0;          // where yStart lands on the page
+        D2D1_RECT_F clip{};          // the column's box on the page; empty draws unclipped
+    };
+    std::vector<PrintFrame> printPreviewFrames;
+    // Set while print lays a paper out: its front matter lays out as a
+    // title block (paper.h) across `width`, and says where it ended
+    struct PaperPrint {
+        bool titleBlock = false;
+        float width = 0;
+        float titleBottom = 0;
+    } paperPrint;
 
     // Blocks wider than the printable area (mermaid diagrams, wide tables)
     // are shrunk uniformly to fit the margins when printing; each band is a
@@ -1098,7 +1381,13 @@ struct App {
     struct LinkRect {
         D2D1_RECT_F bounds;
         std::string url;
+        std::string anchor;  // the span's own anchor: cite-N, xref-N, a footnote mark's
     };
+    // Scholar's hover cards (docs/specs/scholar.md): each reference's text by
+    // its anchor (ref-key) and each figure's or table's caption by its id;
+    // and the keys each citation (cite-N) cites
+    std::unordered_map<std::string, std::wstring> referenceCards;
+    std::unordered_map<std::string, std::string> citationKeys;
     std::vector<LinkRect> linkRects;
     std::string hoveredLink;
 
@@ -1206,6 +1495,9 @@ struct App {
     bool browserFocusPath = false;
     // Plain file launches join this window as tabs (settings toggle)
     bool openInTabs = true;
+    // Settings > General > Reopen tabs from last time (#323). Kept when
+    // toggled; the launch and the close read settings.ini's own value
+    bool reopenTabs = true;
     bool keepDeletedTabs = false;
     bool showNotifications = true;  // settings toggle (#273), see signals.h
     int folderSearchGeneration = 0;
@@ -1295,6 +1587,10 @@ struct App {
     struct LayoutRect {
         D2D1_RECT_F rect{};
         D2D1_COLOR_F color{};
+        // A CSS theme's box (page_style.h): rounded corners and an edge
+        float radius = 0.0f;
+        D2D1_COLOR_F stroke{};
+        float strokeWidth = 0.0f;
     };
     struct LayoutLine {
         D2D1_POINT_2F p1{};
@@ -1488,6 +1784,7 @@ struct App {
     // create its target and start typing
     bool createRefPending = false;
     std::string createRefPath;  // resolved absolute target
+    bool createRefOpens = false;  // the dialog asks whether to open createRefPath, a link's target
     std::vector<std::pair<D2D1_RECT_F, int>> createRefHits;  // rebuilt each paint
     // WM_CHARs arriving in this window are dropped so the keystroke that
     // resolved the dialog cannot type into the editor it just opened
@@ -1580,6 +1877,10 @@ struct App {
     float editorLiveAnim = 0.0f;
     // A plain-text, Mermaid or PlantUML file is its own source: no Live
     bool editorRawDocument = false;
+    // The view a Markdown file opens in (#322), an OpenMode; held, a file
+    // opens in the reading view whatever it says
+    int openMode = 0;
+    bool openModeHeld = false;
 
     // Soft-wrap metrics: cumulative visual rows before each logical line
     // (editorRowStarts.size() == lines + 1). Only maintained while
@@ -1639,6 +1940,7 @@ struct App {
     };
     std::vector<EditorSearchMatch> editorSearchMatches;
     int editorSearchCurrentIndex = 0;
+    unsigned long long editorSearchRevision = 0;  // the editorTextRevision the matches were found in
 
     // Editor find & replace (#121): Ctrl+H adds a replace row to search
     bool searchReplaceMode = false;
@@ -1722,6 +2024,8 @@ struct App {
         headingSlugCounts.clear();
         foldArrows.clear();
         footnoteAnchors.clear();
+        referenceCards.clear();
+        citationKeys.clear();
         htmlAnchors.clear();
         fileRefCache.clear();
         for (auto& a : annotations) {
@@ -1753,6 +2057,7 @@ struct App {
         imageCache.clear();
         imageCacheBytes = 0;
         imageCacheUseClock = 0;
+        imagePassShown = 0;
         if (titleIconBitmap) {
             titleIconBitmap->Release();
             titleIconBitmap = nullptr;

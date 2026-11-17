@@ -1,4 +1,6 @@
 #include "annotations.h"
+#include "clipboard_keys.h"
+#include <functional>
 
 #include "editor.h"
 #include "i18n.h"
@@ -177,10 +179,38 @@ void sanitizeForComment(std::string& text) {
 
 void writeSourceAndReload(App& app, HWND hwnd, const std::string& src) {
     if (app.currentFile.empty()) return;
+    // The reading view holds the text as it was read, its lines ending in a
+    // line feed whatever the file has. Written as held, a file with Windows
+    // line ends came back with every one of its lines changed for one note.
+    // They are written as the file has them, as the editor's save does
+    bool crlf = false;
+    {
+        std::ifstream was(toWide(app.currentFile), std::ios::binary);
+        char buffer[4096];
+        was.read(buffer, sizeof(buffer));
+        for (std::streamsize i = 0, n = was.gcount(); i < n; ++i) {
+            if (buffer[i] != '\n') continue;
+            crlf = i > 0 && buffer[i - 1] == '\r';
+            break;
+        }
+    }
+    std::string bytes;
+    if (crlf) {
+        bytes.reserve(src.size() + src.size() / 20);
+        for (size_t i = 0; i < src.size(); ++i) {
+            if (src[i] == '\n' && (i == 0 || src[i - 1] != '\r')) bytes += '\r';
+            bytes += src[i];
+        }
+    }
+    const std::string& text = crlf ? bytes : src;
     std::ofstream out(toWide(app.currentFile), std::ios::binary | std::ios::trunc);
     if (!out) return;
-    out.write(src.data(), (std::streamsize)src.size());
+    out.write(text.data(), (std::streamsize)text.size());
     out.close();
+    // Read it again whatever its time says: a write in the same tick of the
+    // clock as the last one leaves the file's time as it was, and the page
+    // then kept the text from before the note
+    app.lastFileWriteTime = FILETIME{};
     handleFileWatchTimer(app, hwnd);  // reload now instead of on the timer
 }
 
@@ -604,8 +634,8 @@ void renderAnnotations(App& app) {
         D2D1_RECT_F btn = D2D1::RectF(bx, by, bx + bw, by + bh);
         bool hovered = app.mouseX >= btn.left && app.mouseX <= btn.right &&
                        app.mouseY >= btn.top && app.mouseY <= btn.bottom;
-        D2D1_COLOR_F bg = app.theme.isDark ? hexColor(0x1E1E1E, 0.95f)
-                                           : hexColor(0xF8F8F8, 0.95f);
+        D2D1_COLOR_F bg = themeUiPanel(app.theme, app.theme.isDark ? hexColor(0x1E1E1E, 0.95f)
+                                                                   : hexColor(0xF8F8F8, 0.95f));
         app.brush->SetColor(bg);
         app.renderTarget->FillRoundedRectangle(
             D2D1::RoundedRect(btn, 5, 5), app.brush);
@@ -615,7 +645,7 @@ void renderAnnotations(App& app) {
         app.renderTarget->DrawRoundedRectangle(
             D2D1::RoundedRect(btn, 5, 5), app.brush, 1.0f);
 
-        D2D1_COLOR_F glyph = app.theme.text;
+        D2D1_COLOR_F glyph = themeUiText(app.theme);
         glyph.a = hovered ? 1.0f : 0.75f;
         app.brush->SetColor(glyph);
         // Copy: two offset rectangles
@@ -720,8 +750,8 @@ void renderAnnotations(App& app) {
         }
 
         D2D1_RECT_F panel = D2D1::RectF(px, py, px + w, py + h);
-        D2D1_COLOR_F bg = app.theme.isDark ? hexColor(0x1E1E1E, 0.97f)
-                                           : hexColor(0xFCFCFA, 0.97f);
+        D2D1_COLOR_F bg = themeUiPanel(app.theme, app.theme.isDark ? hexColor(0x1E1E1E, 0.97f)
+                                                                   : hexColor(0xFCFCFA, 0.97f));
         app.brush->SetColor(bg);
         app.renderTarget->FillRoundedRectangle(
             D2D1::RoundedRect(panel, 6, 6), app.brush);
@@ -734,7 +764,7 @@ void renderAnnotations(App& app) {
         app.renderTarget->FillRectangle(
             D2D1::RectF(px, py + 6, px + dpi(app, 3.0f), py + h - 6), app.brush);
 
-        D2D1_COLOR_F quoteColor = app.theme.text;
+        D2D1_COLOR_F quoteColor = themeUiText(app.theme);
         quoteColor.a = 0.55f;
         app.brush->SetColor(quoteColor);
         app.renderTarget->DrawText(
@@ -743,7 +773,7 @@ void renderAnnotations(App& app) {
                         px + w - pad, py + pad + quoteH),
             app.brush);
         if (noteLayout) {
-            app.brush->SetColor(app.theme.text);
+            app.brush->SetColor(themeUiText(app.theme));
             app.renderTarget->DrawTextLayout(
                 D2D1::Point2F(px + pad + dpi(app, 4.0f),
                               py + pad + quoteH + dpi(app, 4.0f)),
@@ -821,6 +851,12 @@ void annotationOpenEditor(App& app, int index) {
     if (index < 0 || index >= (int)app.annotations.size()) return;
     app.annotEditorOpen = true;
     app.annotEditorIndex = index;
+    app.annotEditorQuote = app.annotations[index].quote;
+    app.annotEditorNote = app.annotations[index].note;
+    app.annotEditorOrdinal = 0;
+    for (int i = 0; i < index; ++i) {
+        app.annotEditorOrdinal += app.annotations[i].quote == app.annotEditorQuote && app.annotations[i].note == app.annotEditorNote;
+    }
     app.annotEditorText = toWide(app.annotations[index].note);
     size_t pos = 0;  // note buffer uses \n only
     while ((pos = app.annotEditorText.find(L"\r\n", pos)) != std::wstring::npos) {
@@ -855,6 +891,7 @@ bool annotationBeginCreate(App& app) {
     }
 
     app.annotPendingInsert = insertOffsetAfterBlock(app.sourceText, lineTo);
+    app.annotPendingSource = std::hash<std::string>{}(app.sourceText);
     app.annotPendingQuote = quoteU8;
     app.annotPendingLineFrom = lineFrom;
     app.annotPendingLineTo = lineTo;
@@ -866,8 +903,40 @@ bool annotationBeginCreate(App& app) {
     return true;
 }
 
+// The note the editor is open on, found again in the text as it is now. A
+// note's range is the last reading's, and the text may have been saved from
+// the editor or taken from the disk since: the range written to as it was
+// took whatever stood there by then. False when the text has no such note
+static bool refindNote(App& app) {
+    annotationsParseSource(app);
+    int ahead = app.annotEditorOrdinal;
+    for (int i = 0; i < (int)app.annotations.size(); ++i) {
+        if (app.annotations[i].quote != app.annotEditorQuote || app.annotations[i].note != app.annotEditorNote) continue;
+        if (ahead-- == 0) {
+            app.annotEditorIndex = i;
+            return true;
+        }
+    }
+    return false;
+}
+
 void annotationEditorConfirm(App& app, HWND hwnd) {
     if (!app.annotEditorOpen) return;
+    if (app.annotEditorIndex >= 0 && !refindNote(app)) {
+        // Gone from the text: nothing of it is written
+        closeEditor(app);
+        showToast(app, "annot.nolocate");
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return;
+    }
+    if (app.annotEditorIndex < 0 && app.annotPendingInsert != kNone &&
+        app.annotPendingSource != std::hash<std::string>{}(app.sourceText)) {
+        // The text changed under the box: the place found for the note is
+        // not its place any more. The box stays, with what was typed
+        showToast(app, "annot.nolocate");
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return;
+    }
     std::string note = toUtf8(app.annotEditorText);
     sanitizeForComment(note);
     std::string eol = usesCrLf(app.sourceText) ? "\r\n" : "\n";
@@ -912,6 +981,12 @@ void annotationEditorDelete(App& app, HWND hwnd) {
         closeEditor(app);
         return;
     }
+    if (!refindNote(app)) {
+        closeEditor(app);
+        showToast(app, "annot.nolocate");
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return;
+    }
     const auto& a = app.annotations[app.annotEditorIndex];
     std::string src = app.sourceText;
     size_t start = a.commentStart;
@@ -932,6 +1007,11 @@ bool annotationEditorKeyDown(App& app, HWND hwnd, WPARAM key, bool ctrl) {
     std::wstring& text = app.annotEditorText;
     size_t& caret = app.annotEditorCaret;
     caret = std::min(caret, text.size());
+    // Shift+Insert pastes into the note as Ctrl+V does (#320)
+    if (clipboardKeyLetter(static_cast<unsigned>(key), ctrl, (GetKeyState(VK_SHIFT) & 0x8000) != 0) == 'V') {
+        key = 'V';
+        ctrl = true;
+    }
     switch (key) {
         case VK_ESCAPE:
             annotationEditorCancel(app);
@@ -1021,8 +1101,8 @@ void renderAnnotationEditor(App& app) {
     EditorGeom g = editorGeom(app);
     D2D1_COLOR_F color = annotColor(app);
 
-    D2D1_COLOR_F bg = app.theme.isDark ? hexColor(0x1E1E1E, 0.98f)
-                                       : hexColor(0xFCFCFA, 0.98f);
+    D2D1_COLOR_F bg = themeUiPanel(app.theme, themeUiDark(app.theme) ? hexColor(0x1E1E1E, 0.98f)
+                                                               : hexColor(0xFCFCFA, 0.98f));
     app.brush->SetColor(bg);
     app.renderTarget->FillRoundedRectangle(
         D2D1::RoundedRect(g.panel, 8, 8), app.brush);
@@ -1039,7 +1119,7 @@ void renderAnnotationEditor(App& app) {
                               : app.annotPendingQuote;
     std::wstring quote = toWide(quoteU8);
     if (quote.size() > 52) quote = quote.substr(0, 52) + L"...";
-    D2D1_COLOR_F quoteColor = app.theme.text;
+    D2D1_COLOR_F quoteColor = themeUiText(app.theme);
     quoteColor.a = 0.55f;
     app.brush->SetColor(quoteColor);
     float pad = dpi(app, 14.0f);
@@ -1050,12 +1130,12 @@ void renderAnnotationEditor(App& app) {
         app.brush);
 
     // Text area
-    D2D1_COLOR_F fieldBg = app.theme.isDark ? hexColor(0x161616, 1.0f)
+    D2D1_COLOR_F fieldBg = themeUiDark(app.theme) ? hexColor(0x161616, 1.0f)
                                             : hexColor(0xFFFFFF, 1.0f);
     app.brush->SetColor(fieldBg);
     app.renderTarget->FillRoundedRectangle(
         D2D1::RoundedRect(g.textArea, 4, 4), app.brush);
-    D2D1_COLOR_F fieldBorder = app.theme.text;
+    D2D1_COLOR_F fieldBorder = themeUiText(app.theme);
     fieldBorder.a = 0.2f;
     app.brush->SetColor(fieldBorder);
     app.renderTarget->DrawRoundedRectangle(
@@ -1072,7 +1152,7 @@ void renderAnnotationEditor(App& app) {
     if (layout) layout->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
     if (text.empty()) {
         const wchar_t* hint = tr(app, "annot.note_hint");
-        D2D1_COLOR_F hintColor = app.theme.text;
+        D2D1_COLOR_F hintColor = themeUiText(app.theme);
         hintColor.a = 0.35f;
         app.brush->SetColor(hintColor);
         app.renderTarget->DrawText(
@@ -1083,7 +1163,7 @@ void renderAnnotationEditor(App& app) {
     }
     float caretX = tx, caretY = ty, caretH = dpi(app, 16.0f);
     if (layout) {
-        app.brush->SetColor(app.theme.text);
+        app.brush->SetColor(themeUiText(app.theme));
         app.renderTarget->DrawTextLayout(D2D1::Point2F(tx, ty), layout,
                                          app.brush);
         DWRITE_HIT_TEST_METRICS m{};
@@ -1098,7 +1178,7 @@ void renderAnnotationEditor(App& app) {
         layout->Release();
     }
     if (app.cursorBlinkOn) {
-        app.brush->SetColor(app.theme.text);
+        app.brush->SetColor(themeUiText(app.theme));
         app.renderTarget->DrawLine(D2D1::Point2F(caretX, caretY),
                                    D2D1::Point2F(caretX, caretY + caretH),
                                    app.brush, 1.0f);
@@ -1106,7 +1186,7 @@ void renderAnnotationEditor(App& app) {
 
     // Buttons: vector glyphs so no icon font dependency
     auto buttonBg = [&](const D2D1_RECT_F& r, bool hovered) {
-        D2D1_COLOR_F hb = app.theme.text;
+        D2D1_COLOR_F hb = themeUiText(app.theme);
         hb.a = hovered ? 0.12f : 0.05f;
         app.brush->SetColor(hb);
         app.renderTarget->FillRoundedRectangle(D2D1::RoundedRect(r, 4, 4),
@@ -1116,7 +1196,7 @@ void renderAnnotationEditor(App& app) {
                                               (float)app.mouseY);
     // Confirm: check mark
     buttonBg(g.okBtn, hoveredBtn == 1);
-    D2D1_COLOR_F ok = app.theme.isDark ? hexColor(0x5FBF6E) : hexColor(0x2F8F44);
+    D2D1_COLOR_F ok = themeUiDark(app.theme) ? hexColor(0x5FBF6E) : hexColor(0x2F8F44);
     app.brush->SetColor(ok);
     {
         float cx = (g.okBtn.left + g.okBtn.right) / 2.0f;
@@ -1131,7 +1211,7 @@ void renderAnnotationEditor(App& app) {
     }
     // Cancel: X
     buttonBg(g.cancelBtn, hoveredBtn == 2);
-    app.brush->SetColor(app.theme.text);
+    app.brush->SetColor(themeUiText(app.theme));
     {
         float cx = (g.cancelBtn.left + g.cancelBtn.right) / 2.0f;
         float cy = (g.cancelBtn.top + g.cancelBtn.bottom) / 2.0f;
@@ -1144,7 +1224,7 @@ void renderAnnotationEditor(App& app) {
     // Delete: trash can (existing annotations only)
     if (g.trashBtn.right > g.trashBtn.left) {
         buttonBg(g.trashBtn, hoveredBtn == 3);
-        D2D1_COLOR_F trash = app.theme.isDark ? hexColor(0xE06A50)
+        D2D1_COLOR_F trash = themeUiDark(app.theme) ? hexColor(0xE06A50)
                                               : hexColor(0xB03A24);
         app.brush->SetColor(trash);
         float cx = (g.trashBtn.left + g.trashBtn.right) / 2.0f;

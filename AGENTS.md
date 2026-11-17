@@ -1,3 +1,7 @@
+# Git branches
+
+- Never create new branches. Work directly on `master`, including upstream syncs and merges. The maintainer commits and pushes.
+
 # Feature validation workflow
 
 - For every feature or compatibility extension, add or update runnable Markdown files in `tests/fixtures/` that demonstrate the new behavior.

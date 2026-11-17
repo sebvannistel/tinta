@@ -1,5 +1,7 @@
 #include "frontmatter_ui.h"
+#include "clipboard_keys.h"
 #include "editor.h"
+#include "annotations.h"
 #include "live_editor.h"
 #include "live_text.h"
 #include "document.h"
@@ -22,6 +24,7 @@
 
 #include "export.h"
 #include "sheet_ui.h"
+#include "zotero.h"
 
 #include <filesystem>
 #include <fstream>
@@ -1314,28 +1317,57 @@ static void editorEnsureCursorVisible(App& app) {
 void performEditorSearch(App& app) {
     app.editorSearchMatches.clear();
     app.editorSearchCurrentIndex = 0;
+    app.editorSearchRevision = app.editorTextRevision;
 
-    if (app.searchQuery.empty() || app.editorText.empty()) return;
+    const std::wstring& text = app.editorText;
+    const size_t length = app.searchQuery.size();
+    if (length == 0 || text.size() < length) return;
 
-    // Build lowercase versions for case-insensitive search
-    std::wstring textLower;
-    textLower.resize(app.editorText.size());
-    for (size_t i = 0; i < app.editorText.size(); i++) {
-        textLower[i] = towlower(app.editorText[i]);
-    }
-
-    std::wstring queryLower;
-    queryLower.resize(app.searchQuery.size());
-    for (size_t i = 0; i < app.searchQuery.size(); i++) {
-        queryLower[i] = towlower(app.searchQuery[i]);
-    }
+    // Letters match in either case. The text is folded a unit at a time as
+    // it is read, so a search does not copy the whole document first
+    const wchar_t* fold = caseFoldTable();
+    const std::wstring query = toLower(app.searchQuery);
+    const wchar_t* units = text.data();
+    const wchar_t first = query[0];
+    const size_t last = text.size() - length;
 
     app.editorSearchMatches.reserve(64);
 
-    size_t pos = 0;
-    while ((pos = textLower.find(queryLower, pos)) != std::wstring::npos) {
-        app.editorSearchMatches.push_back({pos, app.searchQuery.length()});
-        pos += app.searchQuery.length();
+    for (size_t pos = 0; pos <= last;) {
+        if (fold[units[pos]] != first) {
+            ++pos;
+            continue;
+        }
+        size_t same = 1;
+        while (same < length && fold[units[pos + same]] == query[same]) ++same;
+        if (same == length) {
+            app.editorSearchMatches.push_back({pos, length});
+            pos += length;
+        } else {
+            ++pos;
+        }
+    }
+}
+
+// The matches are places in the text as it was when it was searched. With
+// the bar open the text still changes: typed into, a button of the rail
+// pressed, a change taken from the disk. A match used then was a place past
+// the text's end, which ended the program, or other words, which were
+// replaced. So whatever uses the matches asks for this first: the text is
+// searched again when it has changed, and the match that was current stays
+// so, or the next one after where it was
+void editorSearchRefresh(App& app) {
+    if (app.editorSearchRevision == app.editorTextRevision) return;
+    size_t was = 0;
+    if (app.editorSearchCurrentIndex >= 0 && app.editorSearchCurrentIndex < (int)app.editorSearchMatches.size()) {
+        was = app.editorSearchMatches[app.editorSearchCurrentIndex].startPos;
+    }
+    performEditorSearch(app);
+    for (size_t i = 0; i < app.editorSearchMatches.size(); ++i) {
+        if (app.editorSearchMatches[i].startPos >= was) {
+            app.editorSearchCurrentIndex = (int)i;
+            break;
+        }
     }
 }
 
@@ -1345,6 +1377,7 @@ static void scheduleReparse(App& app);  // defined below with the debounce
 
 void editorReplaceCurrent(App& app, HWND hwnd) {
     if (!app.editMode || app.searchQuery.empty()) return;
+    editorSearchRefresh(app);
     if (app.editorSearchMatches.empty()) return;
     app.editorExtraCarets.clear();  // find and replace work at one caret
     int idx = app.editorSearchCurrentIndex;
@@ -1411,6 +1444,7 @@ void editorReplaceAll(App& app, HWND hwnd) {
 }
 
 void scrollEditorToMatch(App& app) {
+    editorSearchRefresh(app);
     if (app.editorSearchMatches.empty() || app.editorSearchCurrentIndex < 0 ||
         app.editorSearchCurrentIndex >= (int)app.editorSearchMatches.size()) return;
     app.editorExtraCarets.clear();
@@ -1772,6 +1806,45 @@ void enterEditMode(App& app) {
     enterEditModeWithContent(app, buf.str());
 }
 
+// The view Markdown files open in (#322). A file that is its own source
+// (plain text, a diagram), a sheet, and a file that is not there to be
+// read open as they always did; so does anything while the setting is
+// held, as a find result is, which opens to show its match on the page
+bool openModeApplies(const App& app) {
+    if (app.openMode != OPEN_LIVE && app.openMode != OPEN_SOURCE) return false;
+    if (app.openModeHeld || app.editMode || app.currentFile.empty()) return false;
+    const std::string& path = app.currentFile;
+    if (isSheetPath(path) || isPlainTextDocumentPath(path) || isMermaidDocumentPath(path) ||
+        isPlantUmlDocumentPath(path)) {
+        return false;
+    }
+    return GetFileAttributesW(toWide(path).c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+// The rail's pill is put where the file opens, then E's own way in: the
+// editor comes up in its view, with nothing to move once it is there
+void applyOpenMode(App& app) {
+    if (!openModeApplies(app)) return;
+    // The editor opens where the file was left, as E opens it at the place
+    // being read (#77). That place waits for a layout a file opening in
+    // the editor never shows: the page is laid out as far as it here, and
+    // E's own way from a place on the page to its line does the rest
+    if (app.pendingScrollRestore > 1.0f && app.renderTarget) {
+        app.scrollY = app.targetScrollY = app.pendingScrollRestore;
+        layoutDocumentViewportFirst(app);
+        const float most = std::max(0.0f, app.contentHeight - (float)app.height);
+        app.scrollY = app.targetScrollY = std::min(app.scrollY, most);
+        app.pendingScrollRestore = -1.0f;
+    }
+    const bool live = app.openMode == OPEN_LIVE;
+    if (app.editorLive != live) {
+        app.editorLive = live;
+        app.editorLiveAnim = live ? 1.0f : 0.0f;  // in its place, not on the way there
+        persistEditorMode(app);
+    }
+    enterEditMode(app);
+}
+
 void enterQuickNoteMode(App& app) {
     app.currentFile.clear();
     app.startPageEmbeddedOpen = false;  // the note replaces any Learn doc
@@ -1790,7 +1863,7 @@ void enterRecoveredDraft(App& app, HWND hwnd, const std::string& content,
         for (size_t i = 0; i < app.tabs.size(); i++) {
             const bool active = (int)i == app.activeTab;
             const std::string& path = active ? app.currentFile : app.tabs[i].path;
-            const bool dirty = active ? (app.editMode && app.editorDirty)
+            const bool dirty = active ? app.unsavedNow()
                                       : (app.tabs[i].editMode && app.tabs[i].editorDirty);
             if (dirty || _stricmp(path.c_str(), origPath.c_str()) != 0) continue;
             tabActivate(app, hwnd, (int)i);
@@ -1873,6 +1946,7 @@ void exitEditMode(App& app) {
         auto result = parseDocument(app.parser, buf.str(), app.currentFile);
         if (result.success) {
             app.sourceText = buf.str();
+            annotationsParseSource(app);  // the notes are where the saved text has them
             app.root = result.root;
             app.parseTimeUs = result.parseTimeUs;
         }
@@ -2082,7 +2156,7 @@ void openFileDialog(App& app, HWND hwnd) {
     tabOpenPath(app, hwnd, toUtf8(path));
     for (int i = 0; i < (int)app.tabs.size(); i++) {
         if (app.tabs[i].id == untitledId) {
-            tabCloseIndex(app, hwnd, i);
+            tabCloseIndex(app, hwnd, i, TabClose::Internal);
             break;
         }
     }
@@ -2345,6 +2419,7 @@ static void writeEditorFile(App& app, HWND hwnd) {
         editorReparse(app);
 
         app.sourceText = utf8;
+        annotationsParseSource(app);
         if (app.keepDeletedTabs) app.tabs[app.activeTab].viewerSource = app.sourceText;
 
         // Show "Saved!" notification
@@ -2494,6 +2569,7 @@ bool editorReloadFromDisk(App& app, HWND hwnd) {
     app.editorDirty = false;
     updateFileWriteTime(app);
     app.sourceText = content;
+    annotationsParseSource(app);
     editorReparse(app, true);
     updateWindowTitle(app);
     InvalidateRect(hwnd, nullptr, FALSE);
@@ -2526,6 +2602,8 @@ void confirmExitAction(App& app, HWND hwnd, int action) {
         // continues — the failure toast explains itself
     } else if (action == 2) {
         app.confirmExitPending = false;
+        // Closing the tab, the text thrown away stays reopenable
+        tabKeepDiscardedEdit(app);
         app.editorDirty = false;
         exitEditMode(app);
     } else {
@@ -2566,6 +2644,9 @@ void confirmExitAction(App& app, HWND hwnd, int action) {
             PostMessageW(hwnd, WM_CLOSE, 0, 0);
         }
     }
+    // Kept only for the close it answered
+    app.discardedEditTabId = 0;
+    app.discardedEdit = {};
     InvalidateRect(hwnd, nullptr, FALSE);
 }
 
@@ -2845,6 +2926,10 @@ void handleEditorKeyDown(App& app, HWND hwnd, WPARAM wParam) {
     if (!shortcutModifiersAllowed(static_cast<unsigned>(wParam))) return;
     bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
     bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+    // The clipboard's older keys are the letters' own: Ctrl+Insert copies,
+    // Shift+Insert pastes, Shift+Delete cuts. The source knew none of them;
+    // Shift+Delete took the selection away without keeping it (#320)
+    takeClipboardKey(wParam, ctrl, shift);
 
     // The insert menu closes on Esc; any other key falls through to the
     // editor after dismissing it
@@ -3034,7 +3119,7 @@ void handleEditorKeyDown(App& app, HWND hwnd, WPARAM wParam) {
                 }
                 return;
             case 'V':
-                editorPasteClipboard(app, hwnd, (GetKeyState(VK_SHIFT) & 0x8000) != 0);
+                editorPasteClipboard(app, hwnd, shift);  // Ctrl+Shift+V: as it is
                 return;
             case 'P':
                 // Print preview of the document as currently edited, saved
@@ -3661,6 +3746,10 @@ void editRailInvoke(App& app, HWND hwnd, int id) {
         setEditorLive(app, hwnd, id == 31);
         return;
     }
+    if (id == 24) {
+        editorCite(app, hwnd);  // Zotero's picker, or [@ and the list, in Source and Live alike
+        return;
+    }
     if (editorLiveOn(app) && liveRailCommand(app, hwnd, id)) return;
     // Marks act at every caret, and list and quote marks on every line the
     // carets and the selections take in (#251, #306); links, snippets and
@@ -3912,6 +4001,194 @@ static void editorCharInputAtCaret(App& app, HWND hwnd, WPARAM wParam) {
     scheduleReparse(app);
     editorEnsureCursorVisible(app);
     InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+// --- The citation list and the Cite button (docs/citations.md) ---
+// Live's popup, kept for the source: typing a key after an @ opens it under
+// the @, with the bibliography's keys or the document's own ids
+
+static LiveText& sourceCites(const App& app) {
+    static std::map<const App*, LiveText> lists;
+    return lists[&app];
+}
+
+const LiveText& editorCompletion(const App& app) { return sourceCites(app); }
+
+// One caret in the source as it shows, with the keys
+static bool sourceTyping(const App& app) {
+    return app.editMode && !editorLiveOn(app) && !app.editorReadingPreview && app.editorExtraCarets.empty() &&
+           !app.editorHasSelection && !(app.showSearch && app.searchActive) && !app.gotoLineOpen && !app.confirmExitPending;
+}
+
+// Open, with its key still under the caret; a list left from another
+// document or mode is put away
+static bool sourceCitesOpen(App& app) {
+    LiveText& list = sourceCites(app);
+    if (list.popup == LiveText::Popup::None) return false;
+    size_t at = 0;
+    if (sourceTyping(app) && !list.choices.empty() && live::citeAt(app.editorText, app.editorCursorPos, at) &&
+        at + 1 == list.popupFrom) {
+        return true;
+    }
+    list.popup = LiveText::Popup::None;
+    list.choices.clear();
+    return false;
+}
+
+void editorCompletionFollow(App& app, bool typed) {
+    LiveText& list = sourceCites(app);
+    // Typing opens it; a key that only moves the caret, or edits elsewhere, does not
+    const bool edited = typed && list.popupRevision != app.editorTextRevision;
+    list.popupRevision = app.editorTextRevision;
+    if (!sourceTyping(app)) {
+        list.popup = LiveText::Popup::None;
+        list.choices.clear();
+        return;
+    }
+    live::Host host;
+    host.cites = [&app](const std::wstring& text, size_t from, size_t caret) { return citeChoices(app, text, from, caret); };
+    live::followCites(list, app.editorText, app.editorCursorPos, edited, host);
+}
+
+// Text put in at the caret, over the selection, as one step
+static void editorPutAtCaret(App& app, HWND hwnd, const std::wstring& text) {
+    const size_t from = app.editorHasSelection ? editorSelMin(app) : app.editorCursorPos;
+    const size_t to = app.editorHasSelection ? editorSelMax(app) : app.editorCursorPos;
+    editorReplaceRangeExternal(app, from, to, text);
+    app.editorSelStart = app.editorSelEnd = app.editorCursorPos;
+    scheduleReparse(app);
+    editorEnsureCursorVisible(app);
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+// The key picked, in place of the one typed, its ] with it
+static void editorPickCite(App& app, HWND hwnd, int index) {
+    LiveText& list = sourceCites(app);
+    if (index < 0 || index >= (int)list.choices.size()) return;
+    size_t after = 0;
+    const live::MarkEdit edit =
+        live::citeEdit(app.editorText, app.editorCursorPos, list.popupFrom, list.choices[index].label, after);
+    list.popup = LiveText::Popup::None;
+    list.choices.clear();
+    editorReplaceRangeExternal(app, edit.at, edit.at + edit.removed, edit.with);
+    app.editorCursorPos = app.editorSelStart = app.editorSelEnd = std::min(after, app.editorText.size());
+    list.popupRevision = app.editorTextRevision;  // what went in opens nothing
+    scheduleReparse(app);
+    editorEnsureCursorVisible(app);
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+bool editorCompletionKeyDown(App& app, HWND hwnd, WPARAM key) {
+    if (!sourceCitesOpen(app)) return false;
+    LiveText& list = sourceCites(app);
+    const int count = (int)list.choices.size();
+    switch (key) {
+        case VK_UP:
+        case VK_DOWN:
+            if (GetKeyState(VK_CONTROL) & 0x8000) return false;
+            list.choice = (list.choice + (key == VK_DOWN ? 1 : count - 1)) % count;
+            break;
+        case VK_RETURN:
+        case VK_TAB:
+            editorPickCite(app, hwnd, list.choice);
+            break;
+        case VK_ESCAPE:
+            live::closePopup(list);  // and typing on keeps it closed
+            break;
+        default:
+            return false;
+    }
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return true;
+}
+
+void renderEditorCompletion(App& app) {
+    LiveText& list = sourceCites(app);
+    list.popupHits.clear();
+    D2D1_POINT_2F at{};
+    if (!sourceCitesOpen(app) || !app.editorTextFormat || !editorCaretPointAt(app, list.popupFrom, false, at)) return;
+    // Under the @'s line, over the page beside it if it must
+    const float lineHeight = app.editorTextFormat->GetFontSize() * 1.5f;
+    live::drawPopup(app, list, at, at.y + lineHeight,
+                    D2D1::RectF(editRailWidth(app), chromeTopHeight(app), (float)app.width, (float)app.height));
+}
+
+bool editorCompletionMouseDown(App& app, HWND hwnd, int x, int y) {
+    if (!sourceCitesOpen(app)) return false;
+    LiveText& list = sourceCites(app);
+    const int hit = live::hitAt(list, (float)x, (float)y);
+    if (hit >= 0) {
+        editorPickCite(app, hwnd, hit);
+        return true;
+    }
+    // A press elsewhere puts it away, and goes on
+    list.popup = LiveText::Popup::None;
+    list.choices.clear();
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return false;
+}
+
+bool editorCompletionMouseMove(App& app, HWND hwnd, int x, int y) {
+    LiveText& list = sourceCites(app);
+    if (list.popup == LiveText::Popup::None) return false;
+    const int hit = live::hitAt(list, (float)x, (float)y);
+    if (hit != list.hoverHit) {
+        list.hoverHit = hit;
+        InvalidateRect(hwnd, nullptr, FALSE);
+    }
+    return hit >= 0;
+}
+
+void editorCite(App& app, HWND hwnd) {
+    // One picker at a time: a click while it is open waits with it
+    if (app.citeWaiting) return;
+    app.citeWaiting = true;
+    app.citeTab = app.tabs.empty() ? -1 : app.tabs[std::clamp(app.activeTab, 0, (int)app.tabs.size() - 1)].id;
+    zotero::ask(hwnd, ++app.citeRequest);
+}
+
+void editorCiteAnswer(App& app, HWND hwnd, WPARAM request, LPARAM answer) {
+    std::unique_ptr<zotero::Answer> got(reinterpret_cast<zotero::Answer*>(answer));
+    if (!got || (unsigned)request != app.citeRequest) return;
+    app.citeWaiting = false;
+    // The document that asked: in front, or parked in its tab
+    int asked = -1;
+    for (int i = 0; i < (int)app.tabs.size(); ++i) {
+        if (app.tabs[i].id == app.citeTab) asked = i;
+    }
+    const bool front = app.editMode && (app.tabs.empty() || asked == app.activeTab);
+    if (got->kind == zotero::Answer::Failed) {
+        signalPushKey(app, SIG_WARN, SIGI_WARNING, "toast.cite_failed");
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return;
+    }
+    if (got->kind == zotero::Answer::Picked) {
+        if (got->citation.empty()) return;  // the picker was cancelled
+        const std::wstring citation = fromUtf8(got->citation);
+        if (front) {
+            editorPutAtCaret(app, hwnd, citation);
+        } else if (asked >= 0 && app.tabs[asked].editMode) {
+            App::DocTab& tab = app.tabs[asked];
+            const size_t at = std::min(tab.editorCursor, tab.editorText.size());
+            tab.editorText.insert(at, citation);
+            tab.editorCursor = at + citation.size();
+            tab.editorDirty = true;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return;
+    }
+    // No Zotero: [@ at the caret, and the document's list
+    if (!front) return;
+    if (editorLiveOn(app)) {
+        liveTypeCitation(app, hwnd);
+    } else {
+        editorPutAtCaret(app, hwnd, L"[@");
+        editorCompletionFollow(app, true);
+    }
+    // Nothing to list: a word on where citations come from
+    if ((editorLiveOn(app) ? liveText(app) : sourceCites(app)).popup == LiveText::Popup::None) {
+        signalHintKey(app, SIGI_INFO, "toast.cite_none");
+    }
 }
 
 // --- IME support ---
@@ -4568,7 +4845,7 @@ static void editorDrawExtraCarets(App& app, float lineHeight) {
     if (app.editorExtraCarets.empty() || !app.cursorBlinkOn || !sourceEditorHasFocus(app)) {
         return;
     }
-    app.brush->SetColor(app.theme.text);
+    app.brush->SetColor(app.theme.caret.value_or(app.theme.text));
     for (const auto& caret : app.editorExtraCarets) {
         D2D1_POINT_2F point{};
         if (!editorCaretPointAt(app, caret.pos, caret.upstream == caret.pos, point)) continue;
@@ -4631,6 +4908,8 @@ static void renderEditorWrapped(App& app, float editorWidth) {
         selMin = editorSelMin(app);
         selMax = editorSelMax(app);
     }
+    // The marks are drawn where the words are now
+    if (app.showSearch) editorSearchRefresh(app);
     bool hasSearchMatches = app.showSearch && !app.searchQuery.empty() &&
                             !app.editorSearchMatches.empty();
     size_t searchScanIdx = 0;
@@ -4713,7 +4992,7 @@ static void renderEditorWrapped(App& app, float editorWidth) {
         if (app.cursorBlinkOn && sourceEditorHasFocus(app) && i == curLine) {
             D2D1_POINT_2F point{};
             if (editorCaretPoint(app, point)) {
-                app.brush->SetColor(app.theme.text);
+                app.brush->SetColor(app.theme.caret.value_or(app.theme.text));
                 app.renderTarget->FillRectangle(
                     D2D1::RectF(point.x, point.y, point.x + dpi(app, 2.0f), point.y + lineHeight),
                     app.brush);
@@ -4781,10 +5060,11 @@ void renderEditor(App& app, float editorWidth) {
 
     // Search match scanning index (both sorted by position, so we advance together)
     size_t searchScanIdx = 0;
+    if (app.showSearch) editorSearchRefresh(app);
     bool hasSearchMatches = app.showSearch && !app.searchQuery.empty() && !app.editorSearchMatches.empty();
 
     // Advance search scan index to first match that could overlap visible lines
-    if (hasSearchMatches && firstVisible > 0) {
+    if (hasSearchMatches && firstVisible > 0 && firstVisible < (int)app.editorLineStarts.size()) {
         size_t firstVisiblePos = app.editorLineStarts[firstVisible];
         while (searchScanIdx < app.editorSearchMatches.size() &&
                app.editorSearchMatches[searchScanIdx].startPos + app.editorSearchMatches[searchScanIdx].length <= firstVisiblePos) {
@@ -4875,7 +5155,7 @@ void renderEditor(App& app, float editorWidth) {
     if (app.cursorBlinkOn && sourceEditorHasFocus(app)) {
         D2D1_POINT_2F point{};
         if (editorCaretPoint(app, point)) {
-            app.brush->SetColor(app.theme.text);
+            app.brush->SetColor(app.theme.caret.value_or(app.theme.text));
             app.renderTarget->FillRectangle(
                 D2D1::RectF(point.x, point.y, point.x + dpi(app, 2.0f), point.y + lineHeight), app.brush);
         }
@@ -5040,20 +5320,21 @@ void renderGotoLinePrompt(App& app) {
     if (!app.gotoLineOpen || !format) return;
     const D2D1_RECT_F box = gotoLinePromptBox(app);
     const float h = box.bottom - box.top;
-    D2D1_COLOR_F shadow = D2D1::ColorF(0, 0, 0, app.theme.isDark ? 0.35f : 0.12f);
+    // A popup: a CSS theme's --ui-panel, --ui-text and --ui-accent
+    D2D1_COLOR_F shadow = D2D1::ColorF(0, 0, 0, themeUiDark(app.theme) ? 0.35f : 0.12f);
     app.brush->SetColor(shadow);
     app.renderTarget->FillRoundedRectangle(
         D2D1::RoundedRect(D2D1::RectF(box.left, box.top + dpi(app, 2.0f), box.right, box.bottom + dpi(app, 3.0f)),
                           dpi(app, 9.0f), dpi(app, 9.0f)), app.brush);
-    app.brush->SetColor(app.theme.background);
+    app.brush->SetColor(themeUiPanel(app.theme, app.theme.background));
     app.renderTarget->FillRoundedRectangle(D2D1::RoundedRect(box, dpi(app, 8.0f), dpi(app, 8.0f)), app.brush);
-    D2D1_COLOR_F border = app.theme.accent;
+    D2D1_COLOR_F border = themeUiAccent(app.theme);
     border.a = 0.6f;
     app.brush->SetColor(border);
     app.renderTarget->DrawRoundedRectangle(D2D1::RoundedRect(box, dpi(app, 8.0f), dpi(app, 8.0f)), app.brush,
                                            dpi(app, 1.2f));
     // "Go to line  123|        1–N"
-    D2D1_COLOR_F muted = app.theme.text;
+    D2D1_COLOR_F muted = themeUiText(app.theme);
     muted.a = 0.55f;
     const float pad = dpi(app, 12.0f);
     // The format draws from the top: centre its line in the box
@@ -5068,11 +5349,11 @@ void renderGotoLinePrompt(App& app) {
     app.renderTarget->DrawText(range.c_str(), (UINT32)range.size(), format,
                                D2D1::RectF(box.right - pad - rangeW, textTop, box.right - pad, box.bottom), app.brush);
     const float inputX = box.left + pad + labelW + dpi(app, 12.0f);
-    app.brush->SetColor(app.theme.text);
+    app.brush->SetColor(themeUiText(app.theme));
     app.renderTarget->DrawText(app.gotoLineInput.c_str(), (UINT32)app.gotoLineInput.size(), format,
                                D2D1::RectF(inputX, textTop, box.right - pad - rangeW, box.bottom), app.brush);
     const float caretX = inputX + measureText(app, app.gotoLineInput.c_str(), format) + dpi(app, 1.0f);
-    app.brush->SetColor(app.theme.accent);
+    app.brush->SetColor(themeUiAccent(app.theme));
     app.renderTarget->FillRectangle(
         D2D1::RectF(caretX, box.top + h * 0.25f, caretX + dpi(app, 1.5f), box.bottom - h * 0.25f), app.brush);
 }

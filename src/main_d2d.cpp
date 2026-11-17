@@ -1,4 +1,5 @@
 #include "frontmatter_ui.h"
+#include "inspector.h"
 // Direct2D + DirectWrite renderer for Windows
 // Much faster startup than OpenGL
 
@@ -52,6 +53,7 @@
 #include "tabs.h"
 #include "search_panel.h"
 #include "sheet_ui.h"
+#include "zotero.h"
 #include <dbghelp.h>
 #pragma comment(lib, "dbghelp.lib")
 
@@ -224,8 +226,8 @@ void render(App& app) {
         goto render_document;
     }
 
-    // Clear background
-    app.renderTarget->Clear(app.theme.background);
+    // Clear background: a CSS sheet's body background, else the theme's
+    app.renderTarget->Clear(app.pageBackground.value_or(app.theme.background));
     app.drawCalls++;
 
     // Folder browser open: the document shifts right in sync with the
@@ -288,12 +290,27 @@ render_document:
             rect.rect.left > viewportRight + cullMargin) {
             continue;
         }
-        app.brush->SetColor(rect.color);
-        app.renderTarget->FillRectangle(
-            D2D1::RectF(rect.rect.left - app.scrollX, rect.rect.top - app.scrollY,
-                       rect.rect.right - app.scrollX, rect.rect.bottom - app.scrollY),
-            app.brush);
-        app.drawCalls++;
+        const D2D1_RECT_F box = D2D1::RectF(rect.rect.left - app.scrollX, rect.rect.top - app.scrollY,
+                                            rect.rect.right - app.scrollX, rect.rect.bottom - app.scrollY);
+        if (rect.color.a > 0.0f) {
+            app.brush->SetColor(rect.color);
+            if (rect.radius > 0.0f) {
+                app.renderTarget->FillRoundedRectangle(D2D1::RoundedRect(box, rect.radius, rect.radius), app.brush);
+            } else {
+                app.renderTarget->FillRectangle(box, app.brush);
+            }
+            app.drawCalls++;
+        }
+        if (rect.strokeWidth > 0.0f && rect.stroke.a > 0.0f) {
+            // The edge inside the box, as CSS draws a border
+            const float in = rect.strokeWidth * 0.5f;
+            const D2D1_RECT_F edge = D2D1::RectF(box.left + in, box.top + in, box.right - in, box.bottom - in);
+            app.brush->SetColor(rect.stroke);
+            app.renderTarget->DrawRoundedRectangle(
+                D2D1::RoundedRect(edge, std::max(0.0f, rect.radius - in), std::max(0.0f, rect.radius - in)),
+                app.brush, rect.strokeWidth);
+            app.drawCalls++;
+        }
     }
 
     // Dashed stroke is a factory object: create once, reuse every frame
@@ -538,7 +555,8 @@ render_document:
             D2D1::RectF(bmp.destRect.left - app.scrollX,
                          bmp.destRect.top - app.scrollY,
                          bmp.destRect.right - app.scrollX,
-                         bmp.destRect.bottom - app.scrollY));
+                         bmp.destRect.bottom - app.scrollY),
+            bmp.opacity);
         app.drawCalls++;
     }
 
@@ -924,12 +942,14 @@ render_document:
         size_t selA = std::min(app.selAnchor, app.selFocus);
         size_t selB = std::max(app.selAnchor, app.selFocus);
 
-        std::vector<D2D1_RECT_F> bars;
-        selectionHighlightRects(app, selA, selB, bars);
-
-        app.brush->SetColor(themeSelectionColor(app.theme, D2D1::ColorF(0.2f, 0.4f, 0.9f, 0.35f)));
+        // Only the lines in view are asked for: measuring the whole of a
+        // long selection for every frame made each one slower
         float viewTop = app.scrollY - 50.0f;
         float viewBottom = app.scrollY + app.height + 50.0f;
+        std::vector<D2D1_RECT_F> bars;
+        selectionHighlightRects(app, selA, selB, viewTop, viewBottom, bars);
+
+        app.brush->SetColor(themeSelectionColor(app.theme, D2D1::ColorF(0.2f, 0.4f, 0.9f, 0.35f)));
         for (const auto& bar : bars) {
             if (bar.bottom < viewTop || bar.top > viewBottom) continue;
             app.renderTarget->FillRectangle(selectionBarOnScreen(bar, app.scrollX, app.scrollY),
@@ -940,64 +960,11 @@ render_document:
 
     // Draw search match highlights (search live through visible textRects)
     if (!livePage && app.showSearch && !app.searchQuery.empty() && !app.textRects.empty() && !app.searchMatches.empty()) {
-        // Collect visible match rects by intersecting search matches with text rects
-        struct VisibleMatch {
-            D2D1_RECT_F rect;
-            size_t matchIndex;
-        };
-        std::vector<VisibleMatch> visibleMatches;
-
-        size_t matchIndex = 0;
-        for (const auto& tr : app.textRects) {
-            size_t textLen = tr.docLength;
-            if (textLen == 0) continue;
-
-            size_t rectStart = tr.docStart;
-            size_t rectEnd = rectStart + textLen;
-
-            // Advance to first match that could overlap this rect
-            while (matchIndex < app.searchMatches.size()) {
-                const auto& m = app.searchMatches[matchIndex];
-                size_t mEnd = m.startPos + m.length;
-                if (mEnd <= rectStart) {
-                    matchIndex++;
-                    continue;
-                }
-                break;
-            }
-
-            size_t mi = matchIndex;
-            while (mi < app.searchMatches.size()) {
-                const auto& m = app.searchMatches[mi];
-                if (m.startPos >= rectEnd) break;
-
-                size_t mStart = m.startPos;
-                size_t mEnd = m.startPos + m.length;
-                size_t overlapStart = std::max(rectStart, mStart);
-                size_t overlapEnd = std::min(rectEnd, mEnd);
-
-                if (overlapStart < overlapEnd) {
-                    // Glyph-precise via the run layout (shared with text
-                    // selection); falls back to interpolation for code
-                    D2D1_RECT_F highlightRect;
-                    if (selectionRangeRect(app, tr, overlapStart, overlapEnd,
-                                           highlightRect)) {
-                        // Extend slightly for better visibility
-                        highlightRect.left -= 1;
-                        highlightRect.right += 1;
-                        visibleMatches.push_back({highlightRect, mi});
-                    }
-                }
-
-                if (mEnd <= rectEnd) {
-                    mi++;
-                } else {
-                    break;  // Match spans beyond this rect; continue on next rect
-                }
-            }
-
-            matchIndex = mi;
-        }
+        // The marks on the lines in view, from the matches and the text
+        // rects they lie on
+        std::vector<SearchHighlight> visibleMatches;
+        searchHighlightRects(app, app.scrollY - 50.0f, app.scrollY + app.height + 50.0f,
+                             visibleMatches);
 
         // Draw all matches - orange if it's the current match, yellow otherwise
         for (const auto& vm : visibleMatches) {
@@ -1019,6 +986,8 @@ render_document:
     }
 
     if (!livePage) renderFrontmatterOverflow(app);
+    if (!livePage) renderReferenceCard(app);
+    if (!livePage) renderInspector(app);
 
     // Back to screen coordinates: notifications, stats, and overlays
     // (including the folder browser panel itself) are not shifted
@@ -1094,6 +1063,9 @@ render_document:
 // Everything above the page or the sheet: prompts, chips, the tab strip,
 // overlays and dialogs, then the end of the frame
 static void renderChromeAndEnd(App& app) {
+    // The source's citation list under its caret, over the page beside it
+    if (app.editMode) renderEditorCompletion(app);
+
     // Ctrl+G's go-to-line prompt, at the top of the pane it acts on (#276)
     renderGotoLinePrompt(app);
 
@@ -1397,6 +1369,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_CLOSE:
             if (app) tableEditCommit(*app);
             if (app) sheetLeave(*app);
+            // A print preview puts the editor aside: closed first, what
+            // follows sees the edits it was opened over
+            if (app && app->showPrintPreview) closePrintPreview(*app, hwnd);
             // "Close without asking" (#252): unsaved buffers stay behind as
             // drafts, offered back on the next launch, and the window closes
             if (app && app->closeKeepsDrafts) {
@@ -1415,24 +1390,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
-            if (app) {
-                for (size_t i = 0; i < app->tabs.size(); i++) {
-                    bool dirty = (int)i == app->activeTab
-                                     ? (app->editMode && app->editorDirty)
-                                     : (app->tabs[i].editMode &&
-                                        app->tabs[i].editorDirty);
-                    if (!dirty) continue;
-                    if ((int)i != app->activeTab) {
-                        tabActivate(*app, hwnd, (int)i);
-                    }
-                    app->pendingWindowClose = true;
-                    app->confirmExitPending = true;
-                    app->confirmExitExternal = false;
-                    app->confirmExitOpenedAt = std::chrono::steady_clock::now();
-                    InvalidateRect(hwnd, nullptr, FALSE);
-                    return 0;
-                }
-            }
+            if (app && windowCloseAsks(*app, hwnd)) return 0;
             break;
 
         case WM_COPYDATA:
@@ -1475,14 +1433,33 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             return 0;
 
+        case WM_MOVE:
+            // On another monitor the text takes that monitor's smoothing
+            if (app && followMonitorText(*app)) InvalidateRect(hwnd, nullptr, FALSE);
+            break;
+
+        case WM_DISPLAYCHANGE:
+            // A display joined, left or turned: the monitor's values anew
+            if (app && followMonitorText(*app, true)) InvalidateRect(hwnd, nullptr, FALSE);
+            break;
+
         case WM_SETTINGCHANGE:
+            // Windows' text settings may be among what changed
+            if (app && followMonitorText(*app, true)) InvalidateRect(hwnd, nullptr, FALSE);
             // Windows switched light/dark mode
-            if (app && app->followSystemTheme && lParam &&
-                wcscmp((const wchar_t*)lParam, L"ImmersiveColorSet") == 0) {
-                int want = autoThemeIndex(*app);
-                if (want != app->currentThemeIndex) {
-                    applyTheme(*app, want);
-                    persistThemeChoice(*app);
+            if (app && lParam && wcscmp((const wchar_t*)lParam, L"ImmersiveColorSet") == 0) {
+                themesSetSystemDark(!systemPrefersLight());
+                if (app->followSystemTheme) {
+                    int want = autoThemeIndex(*app);
+                    if (want != app->currentThemeIndex) {
+                        applyTheme(*app, want);
+                        persistThemeChoice(*app);
+                    } else if (themeFollowsSystem(want)) {
+                        applyTheme(*app, want);
+                    }
+                } else if (themeFollowsSystem(app->currentThemeIndex)) {
+                    // A CSS theme with color-scheme: light dark turns too
+                    applyTheme(*app, app->currentThemeIndex);
                 }
             }
             return 0;
@@ -1827,6 +1804,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
 
+        case WM_APP_ZOTERO:
+            // Zotero's picker answered the Cite button (the handler deletes it)
+            if (app) editorCiteAnswer(*app, hwnd, wParam, lParam);
+            else delete (zotero::Answer*)lParam;
+            return 0;
+
         case WM_APP_PANDOC_DONE:
             if (app) {
                 app->pandocRunning = false;
@@ -1886,7 +1869,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             {
                 // Load existing settings to preserve values like hasAskedFileAssociation
                 Settings settings = loadSettings();
-                settings.themeIndex = app->currentThemeIndex;
+                settingsTakeThemes(settings, *app);
                 settings.zoomFactor = app->zoomFactor;
                 settings.editorShowPreview = app->editorShowPreview;
                 settings.editorWordWrap = app->editorWordWrap;
@@ -1899,8 +1882,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 // showWordCount, closeKeepsDrafts and printMarginMm persist
                 // when changed and stay as on disk here, like openInTabs below
                 settings.followSystemTheme = app->followSystemTheme;
-                settings.lightThemeIndex = app->lightThemeIndex;
-                settings.darkThemeIndex = app->darkThemeIndex;
                 settings.checkUpdates = app->updateCheckEnabled;
                 settings.lastUpdateCheck = app->updateLastCheck;
                 settings.dismissedUpdate = app->updateDismissedVersion;
@@ -1915,22 +1896,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 // windows never own the session: they re-read the owner's
                 // stored session so their full-file save cannot clobber a
                 // newer one with launch-time data.
+                // With "Reopen tabs from last time" off (#323) only the
+                // pinned tabs are written.
                 if (app->sessionOwner) {
-                    settings.sessionTabs.clear();
-                    settings.sessionPinned.clear();
-                    settings.sessionActive = 0;
-                    for (size_t i = 0; i < app->tabs.size(); i++) {
-                        const std::string& path =
-                            (int)i == app->activeTab ? app->currentFile
-                                                     : app->tabs[i].path;
-                        if (path.empty()) continue;
-                        if ((int)i == app->activeTab) {
-                            settings.sessionActive =
-                                (int)settings.sessionTabs.size();
-                        }
-                        settings.sessionTabs.push_back(path);
-                        if (app->tabs[i].pinned) settings.sessionPinned.push_back(path);
-                    }
+                    sessionKeep(settings, *app);
                 } else {
                     Settings onDisk = loadSettings();
                     settings.sessionTabs = onDisk.sessionTabs;
@@ -1940,6 +1909,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 settings.readingWidthPct = app->readingWidthPct;
                 settings.zenWidthPct = app->zenWidthPct;
                 settings.headingRules = app->headingRules;
+                settings.wrapCode = app->wrapCode;
                 settings.foldSections = app->foldSections;
                 settings.foldOnOpen = app->foldOnOpen;
                 settings.tocOnLeft = app->tocOnLeft;
@@ -2025,12 +1995,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     app.updateCheckEnabled = savedSettings.checkUpdates;
     app.updateLastCheck = savedSettings.lastUpdateCheck;
     app.updateDismissedVersion = savedSettings.dismissedUpdate;
-    app.lightThemeIndex = savedSettings.lightThemeIndex;
-    app.darkThemeIndex = savedSettings.darkThemeIndex;
+    // By name, wherever the themes stand in the list now
+    int chosenTheme = 0;
+    settingsGiveThemes(savedSettings, chosenTheme, app.lightThemeIndex, app.darkThemeIndex);
     app.folderSearchEnabled = savedSettings.folderSearchEnabled;
     app.tabSearchEnabled = savedSettings.tabSearchEnabled;
     app.browserFocusPath = savedSettings.browserFocusPath;
     app.openInTabs = savedSettings.openInTabs;
+    app.reopenTabs = savedSettings.reopenTabs;
     app.keepDeletedTabs = savedSettings.keepDeletedTabs;
     // The title bar's pin as last pressed (#312); applied once the window shows
     app.alwaysOnTop = savedSettings.alwaysOnTop;
@@ -2048,8 +2020,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     app.plantumlUserPath = toWide(savedSettings.plantumlPath);
     app.mathFont = toWide(savedSettings.mathFont);
     app.cjkFont = toWide(savedSettings.cjkFont);
-    int startTheme = app.followSystemTheme ? autoThemeIndex(app)
-                                           : savedSettings.themeIndex;
+    themesSetSystemDark(!systemPrefersLight());
+    int startTheme = app.followSystemTheme ? autoThemeIndex(app) : chosenTheme;
     app.currentThemeIndex = startTheme;
     if (startTheme >= themeCount()) startTheme = 0;
     app.currentThemeIndex = startTheme;
@@ -2062,8 +2034,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     app.readingWidthPct = savedSettings.readingWidthPct;
     app.zenWidthPct = savedSettings.zenWidthPct;
     app.headingRules = savedSettings.headingRules;
+    app.wrapCode = savedSettings.wrapCode;
     app.foldSections = savedSettings.foldSections;
     app.foldOnOpen = savedSettings.foldOnOpen;
+    app.openMode = savedSettings.openMode;
     app.tocOnLeft = savedSettings.tocOnLeft;
     app.tocPinned = savedSettings.tocPinned;
     app.browserPinned = savedSettings.browserPinned;
@@ -2352,24 +2326,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     // Last session's tabs come back on plain launches (files that vanished
     // from disk in the meantime are dropped). With "Open files in tabs"
     // off the session stays parked: one window, one document — a file
-    // launch must not drag the previous session in as extra tabs (#147)
+    // launch must not drag the previous session in as extra tabs (#147).
+    // With "Reopen tabs from last time" off only the pinned tabs come
+    // back, beside the file the launch was given (#323)
     bool restoreSession = !quickNote && !cascadeWindow && !startInEditMode &&
                           printPagesDir.empty() && savedSettings.openInTabs &&
                           !savedSettings.sessionTabs.empty();
     std::vector<std::string> sessionPaths;
     int sessionActive = 0;
     if (restoreSession) {
-        for (size_t i = 0; i < savedSettings.sessionTabs.size(); i++) {
-            const auto& path = savedSettings.sessionTabs[i];
-            if (GetFileAttributesW(toWide(path).c_str()) !=
-                INVALID_FILE_ATTRIBUTES) {
-                // The active slot follows its path through the filtering
-                if ((int)i == savedSettings.sessionActive) {
-                    sessionActive = (int)sessionPaths.size();
-                }
-                sessionPaths.push_back(path);
-            }
-        }
+        SessionTabs session = sessionToReopen(savedSettings);
+        sessionPaths = std::move(session.paths);
+        sessionActive = session.active;
         if (sessionPaths.empty()) restoreSession = false;
     }
 
@@ -2451,6 +2419,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     }
     if (app.alwaysOnTop) {
         SetWindowPos(app.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+    // The file the launch was given, or the tab the session came back on,
+    // goes to the view Markdown files open in (#322). Here, with the
+    // window at its size and nothing drawn yet: the first frame is the
+    // editor's, not the page's for a moment before it
+    if (!quickNote && !startInEditMode && printPagesDir.empty() && (!inputFile.empty() || restoreSession)) {
+        applyOpenMode(app);
     }
     UpdateWindow(app.hwnd);
     app.metrics.showWindowUs = usElapsed(t0);

@@ -14,6 +14,8 @@ void renderThemeChooser(App& app);
 // taller column (never below the built-in 5), and a theme's cell position
 // (light themes fill the left column top-down, dark the right)
 int themeChooserRows();
+// The wheel over the theme chooser: scrolls its columns by a card
+bool themeChooserWheel(App& app, float notches);
 void themeChooserCell(int themeIndex, int& col, int& row);
 void renderHelpOverlay(App& app);
 D2D1_RECT_F helpPanelRect(const App& app);
@@ -26,16 +28,17 @@ enum SettingsAction {
     SET_NONE = 0,
     SET_SECTION_GENERAL, SET_SECTION_APPEARANCE, SET_SECTION_EDITOR, SET_SECTION_FRONTMATTER,
     SET_TOGGLE_FOLLOW, SET_TOGGLE_FOLDERSEARCH, SET_TOGGLE_BROWSEFOCUS,
-    SET_TOGGLE_OPENTABS, SET_TOGGLE_KEEPDELETED, SET_TOGGLE_HEADRULES, SET_TOGGLE_NOTIFICATIONS,
+    SET_TOGGLE_OPENTABS, SET_TOGGLE_REOPENTABS, SET_TOGGLE_KEEPDELETED, SET_TOGGLE_HEADRULES, SET_TOGGLE_WRAPCODE, SET_TOGGLE_NOTIFICATIONS,
     SET_TOGGLE_WRAP, SET_TOGGLE_PREVIEW, SET_TOGGLE_ASSISTS, SET_TOGGLE_HIGHLIGHT,
     SET_TOGGLE_WORDCOUNT, SET_TOGGLE_CLOSE_DRAFTS,
     SET_LOCATE_PANDOC,
     SET_LOCATE_PLANTUML,
     SET_SLIDER_READING, SET_SLIDER_ZEN,
-    SET_OPEN_THEMES, SET_NEW_THEME, SET_EDIT_THEME,
+    SET_OPEN_THEMES, SET_NEW_THEME, SET_EDIT_THEME, SET_IMPORT_THEME,
     SET_OPEN_INI, SET_OPEN_THEMES_INI,
     SET_TOC_LEFT, SET_TOC_RIGHT,
     SET_FOLD_OFF, SET_FOLD_ON, SET_FOLD_FOLDED,  // folding sections (#316)
+    SET_OPEN_READING, SET_OPEN_LIVE, SET_OPEN_SOURCE,  // the view files open in (#322)
     SET_LANG_DROPDOWN, SET_OPEN_LANGS_INI,
     SET_KEYS_DROPDOWN, SET_EDIT_KEYS,
     SET_CLOSE,
@@ -83,6 +86,9 @@ float folderBrowserMaxScroll(const App& app);
 void renderSettingsOverlay(App& app);
 D2D1_RECT_F settingsPanelRect(const App& app);
 D2D1_RECT_F settingsCloseButtonRect(const App& app);
+// The wheel over the dialog: scrolls a page taller than its room. False on
+// the front matter page, which scrolls its own list.
+bool settingsWheel(App& app, float notches);
 
 // Theme editor ("+ New" in settings). Font-list entries encode their
 // absolute family index as TE_FONT_BASE + i; everything else stays < 100.

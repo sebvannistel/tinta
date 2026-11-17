@@ -1,4 +1,5 @@
 #include "frontmatter_ui.h"
+#include "clipboard_keys.h"
 #include "input.h"
 #include "live_editor.h"
 #include "sheet_ui.h"
@@ -12,6 +13,7 @@
 #include "tabs.h"
 #include "document.h"
 #include "editor.h"
+#include "scholar.h"
 #include "file_utils.h"
 #include "utils.h"
 #include "search.h"
@@ -30,9 +32,13 @@
 #include "folding.h"
 #include "i18n.h"
 #include "selection.h"
+#include "css.h"
+#include "inspector.h"
+#include "page_style.h"
 
 #include <windowsx.h>
 #include <shellapi.h>
+#include <shlwapi.h>
 #include <commdlg.h>
 #include <cwctype>
 #include <filesystem>
@@ -128,6 +134,12 @@ static void setPrintPreviewCursor(const App& app, float x, float y) {
             return;
         }
     }
+    for (const auto& rect : app.printPreviewOptionBtn) {
+        if (cursorPointInRect(x, y, rect)) {
+            SetCursor(cursorHand);
+            return;
+        }
+    }
     SetCursor(cursorArrow);
 }
 
@@ -198,25 +210,33 @@ static void setFolderBrowserCursor(const App& app, float x, float y) {
     SetCursor(cursorArrow);
 }
 
-static void setSearchCursor(const App& app, float x, float y) {
-    float barWidth = std::min(dpi(app, 500.0f), app.width - dpi(app, 40.0f));
-    float barHeight = dpi(app, 44.0f);
-    float centerWidth = (float)app.width;
-    if (app.editMode) {
-        float paneWidth = editorPaneWidth(app);
-        barWidth = std::min(barWidth, paneWidth - dpi(app, 40.0f));
-        centerWidth = paneWidth;
+// The find bar under the pointer, with the editor's replace row: a hand
+// over its buttons, the beam over what a click there would type into
+// (#119), the arrow over the rest of it. False beside the bar
+static bool searchBarCursor(const App& app, float x, float y) {
+    auto over = [&](const D2D1_RECT_F& r) {
+        return r.right > r.left && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+    };
+    const bool replaceRow = app.editMode && app.searchReplaceMode;
+    if (!over(searchBarDrawRect(app)) && !(replaceRow && over(searchReplaceRowRect(app)))) return false;
+    if (replaceRow) {
+        for (const auto& hit : app.searchReplaceHits) {
+            if (hit.second >= 3 && over(hit.first)) {
+                SetCursor(cursorHand);
+                return true;
+            }
+        }
     }
-    float barX = (centerWidth - barWidth) / 2.0f;
-    float barY = dpi(app, 20.0f) * app.searchAnimation -
-                 barHeight * (1.0f - app.searchAnimation);
-    float textX = barX + dpi(app, 42.0f);
-    float textRight = barX + barWidth - dpi(app, 120.0f);
-    if (x >= textX && x <= textRight && y >= barY && y <= barY + barHeight) {
-        SetCursor(cursorIBeam);
-    } else {
-        SetCursor(cursorArrow);
+    for (int field = 0; field < (replaceRow ? 2 : 1); ++field) {
+        const D2D1_RECT_F& text = app.searchFields[field].textRect;
+        const D2D1_RECT_F& row = app.searchFields[field].hitRect;
+        if (over(D2D1::RectF(text.left, row.top, text.right, row.bottom))) {
+            SetCursor(cursorIBeam);
+            return true;
+        }
     }
+    SetCursor(cursorArrow);
+    return true;
 }
 
 // Drag auto-scroll (#83): while a selection drag sits in the edge band,
@@ -454,8 +474,10 @@ static void commitFolderBrowserPath(App& app) {
             closeFolderBrowserInput(app);
         } else if (openDocumentInViewer(app, path)) {
             // Preview mode: the browser stays open beside the document —
-            // close it by clicking the document, pressing B, or Esc
+            // close it by clicking the document, pressing B, or Esc. A
+            // file that opens in the editor (#322) closes it, as E does
             closeFolderBrowserInput(app);
+            applyOpenMode(app);
         } else {
             app.folderBrowserInputError = true;
         }
@@ -581,7 +603,7 @@ static std::optional<D2D1_COLOR_F>& themeEditorOverride(App& app, int field) {
 static void themeEditorAdoptBase(App& app, int baseIndex) {
     app.themeEditorBase = baseIndex;
     const D2DTheme& bt = themeAt(baseIndex);
-    app.themeEditorTheme = bt;
+    app.themeEditorTheme = themeAsBase(baseIndex);
     app.themeEditorFont = bt.fontFamily;
     app.themeEditorHeadingFont =
         (bt.headingFontFamily && bt.headingFontFamily[0]) ? bt.headingFontFamily : L"";
@@ -610,9 +632,64 @@ static void openThemesIniFile() {
                   nullptr, nullptr, SW_SHOWNORMAL);
 }
 
+// The chosen themes into settings and out of them (settings.h). Here, not
+// in settings.cpp or themes.cpp: some tests link one of those without the other
+void settingsTakeThemes(Settings& settings, const App& app) {
+    settings.themeIndex = app.currentThemeIndex;
+    settings.lightThemeIndex = app.lightThemeIndex;
+    settings.darkThemeIndex = app.darkThemeIndex;
+    settings.themeName = themeNameAt(app.currentThemeIndex);
+    settings.lightThemeName = themeNameAt(app.lightThemeIndex);
+    settings.darkThemeName = themeNameAt(app.darkThemeIndex);
+}
+
+void settingsGiveThemes(const Settings& settings, int& current, int& light, int& dark) {
+    // A theme that is gone gives way to the first of its kind
+    auto place = [](const std::string& name, int index, int otherwise) {
+        const int found = themeIndexNamed(name, index);
+        return found >= 0 && found < themeCount() ? found : otherwise;
+    };
+    current = place(settings.themeName, settings.themeIndex, 0);
+    light = place(settings.lightThemeName, settings.lightThemeIndex, 0);
+    dark = place(settings.darkThemeName, settings.darkThemeIndex, 5);
+}
+
+// A theme change persists immediately: windows spawned afterwards
+// (quick notes, drag-outs) read settings.ini at startup and would
+// otherwise come up in the look from the previous session
+void persistThemeChoice(const App& app) {
+    Settings settings = loadSettings();
+    settingsTakeThemes(settings, app);
+    settings.followSystemTheme = app.followSystemTheme;
+    saveSettings(settings);
+}
+
+// The themes for light and for dark by name, to find again after the list
+// of themes changed (one saved from the editor, one imported)
+struct LightAndDark { std::string light, dark; };
+static LightAndDark lightAndDark(const App& app) {
+    return {themeNameAt(app.lightThemeIndex), themeNameAt(app.darkThemeIndex)};
+}
+static void findLightAndDark(App& app, const LightAndDark& names) {
+    const int light = themeIndexNamed(names.light, app.lightThemeIndex);
+    const int dark = themeIndexNamed(names.dark, app.darkThemeIndex);
+    if (light >= 0 && light < themeCount()) app.lightThemeIndex = light;
+    if (dark >= 0 && dark < themeCount()) app.darkThemeIndex = dark;
+}
+
 // editCurrent seeds the editor with the active theme's name so saving
 // updates that custom theme in place (built-ins save as a copy)
 static void openThemeEditor(App& app, bool editCurrent) {
+    // A CSS theme is its sheet: Edit opens that in the editor, and each
+    // save restyles the window (docs/specs/theming.md)
+    if (const std::wstring sheet = editCurrent ? themeSourcePath(app.currentThemeIndex) : std::wstring();
+        !sheet.empty()) {
+        app.showSettings = false;
+        tabOpenPath(app, app.hwnd, toUtf8(sheet));
+        if (!app.editMode) enterEditMode(app);
+        InvalidateRect(app.hwnd, nullptr, FALSE);
+        return;
+    }
     enumerateSystemFontFamilies(app);
     themeEditorAdoptBase(app, app.currentThemeIndex);
     app.themeEditorName = editCurrent ? app.theme.name : tr(app, "theme.editor.default_name");
@@ -624,6 +701,117 @@ static void openThemeEditor(App& app, bool editCurrent) {
     app.showSettings = false;
     app.showThemeEditor = true;
     InvalidateRect(app.hwnd, nullptr, FALSE);
+}
+
+// Settings > Appearance > Import (docs/css-themes.md): a Typora or Obsidian
+// theme's sheet made a CSS theme of Tinta's own, beside the others, with
+// the font files its @font-face rules load from beside it. What could not
+// come along heads the new sheet, one line each
+int importThemeFrom(App& app, const std::wstring& source) {
+    const size_t slash = source.find_last_of(L"\\/");
+    const std::wstring from = slash == std::wstring::npos ? std::wstring() : source.substr(0, slash);
+    std::wstring stem = slash == std::wstring::npos ? source : source.substr(slash + 1);
+    if (const size_t dot = stem.find_last_of(L'.'); dot != std::wstring::npos) stem.resize(dot);
+    std::string text;
+    const std::wstring dir = tintaConfigDir().empty() ? std::wstring() : tintaConfigDir() + L"\\themes";
+    auto failed = [&] {
+        signalPush(app, SIG_WARN, SIGI_WARNING, tr(app, "toast.theme_import_failed"), source, source);
+        if (app.hwnd) InvalidateRect(app.hwnd, nullptr, FALSE);
+        return -1;
+    };
+    if (dir.empty() || !sheetui::readFileUtf8(source, text)) return failed();
+    // A sheet the theme imports, read from beside the one importing it
+    const css::ImportSource imports = [](std::string_view name, std::string_view importer, std::string& out,
+                                         std::string& file) {
+        std::wstring base = toWide(std::string(importer));
+        const size_t cut = base.find_last_of(L"\\/");
+        const std::wstring path = (cut == std::wstring::npos ? std::wstring() : base.substr(0, cut + 1)) +
+                                  toWide(std::string(name));
+        if (!sheetui::readFileUtf8(path, out)) return false;
+        file = toUtf8(path);
+        return true;
+    };
+    std::vector<css::Diagnostic> notes;
+    const std::string converted = css::importTheme(text, css::Flavor::Detect, notes, toUtf8(source), imports);
+    if (converted.empty()) return failed();
+    std::string head;
+    if (!notes.empty()) {
+        head = "/* Imported by Tinta from " + toUtf8(stem) + ".css. Left out:\n";
+        for (const auto& note : notes) {
+            std::string message = note.message;
+            for (size_t at = message.find("*/"); at != std::string::npos; at = message.find("*/", at)) message.replace(at, 2, "* /");
+            head += " * " + (note.line > 0 ? "line " + std::to_string(note.line) + ": " : std::string()) + message + "\n";
+        }
+        head += " */\n\n";
+    }
+    CreateDirectoryW(dir.c_str(), nullptr);
+    std::wstring name = stem, target = dir + L"\\" + stem + L".css";
+    for (int n = 2; GetFileAttributesW(target.c_str()) != INVALID_FILE_ATTRIBUTES; ++n) {
+        name = stem + L" " + std::to_wstring(n);
+        target = dir + L"\\" + name + L".css";
+    }
+    {
+        std::ofstream out(target, std::ios::binary);
+        out << head << converted;
+        if (!out.good()) return failed();
+    }
+    // Its fonts beside it come along, at the same places under themes
+    {
+        std::vector<css::Diagnostic> ignored;
+        if (auto sheet = css::parse(text, toUtf8(source), css::Origin::Theme, imports, ignored)) {
+            for (const auto& face : css::fontFaces(*sheet)) {
+                for (const auto& file : face.sources) {
+                    if (file.rfind("local:", 0) == 0) continue;
+                    const std::wstring path = toWide(file);
+                    if (from.empty() || _wcsnicmp(path.c_str(), (from + L"\\").c_str(), from.size() + 1) != 0) continue;
+                    const std::wstring copy = dir + path.substr(from.size());
+                    for (size_t at = copy.find_first_of(L"\\/", dir.size() + 1); at != std::wstring::npos;
+                         at = copy.find_first_of(L"\\/", at + 1)) {
+                        CreateDirectoryW(copy.substr(0, at).c_str(), nullptr);
+                    }
+                    CopyFileW(path.c_str(), copy.c_str(), TRUE);
+                }
+            }
+        }
+    }
+    const LightAndDark chosen = lightAndDark(app);
+    loadCustomThemes();
+    findLightAndDark(app, chosen);
+    // The chooser's preview formats grow with the list
+    for (auto& pf : app.themePreviewFormats) {
+        if (pf.name) pf.name->Release();
+        if (pf.preview) pf.preview->Release();
+        if (pf.code) pf.code->Release();
+    }
+    app.themePreviewFormats.clear();
+    int index = -1;
+    for (int i = 0; i < themeCount(); i++) {
+        if (_wcsicmp(themeAt(i).name, name.c_str()) == 0 && themeSourcePath(i) == target) index = i;
+    }
+    if (index < 0) return failed();
+    applyTheme(app, index);
+    persistThemeChoice(app);
+    wchar_t message[200];
+    swprintf_s(message, _countof(message), tr(app, "toast.theme_imported"), name.c_str());
+    std::wstring detail;
+    for (const auto& note : notes) detail += toWide(note.message) + L"\n";
+    signalPush(app, notes.empty() ? SIG_SUCCESS : SIG_INFO, notes.empty() ? SIGI_CHECK : SIGI_INFO, message,
+               notes.empty() ? target : toWide(std::to_string(notes.size())) + L" \x2192 " + target, detail);
+    app.showSettings = false;
+    if (app.hwnd) InvalidateRect(app.hwnd, nullptr, FALSE);
+    return index;
+}
+
+static void importThemeFile(App& app) {
+    wchar_t chosen[MAX_PATH] = L"";
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = app.hwnd;
+    ofn.lpstrFilter = L"CSS (*.css)\0*.css\0";
+    ofn.lpstrFile = chosen;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (runOpenFileDialog(ofn)) importThemeFrom(app, chosen);
 }
 
 static void closeThemeEditor(App& app, bool backToSettings) {
@@ -720,9 +908,9 @@ static void settingsAction(App& app, HWND hwnd, int action) {
     if (action != SET_KEYS_DROPDOWN) app.settingsKeysOpen = false;
     switch (action) {
         case SET_CLOSE: closeSettings(app, hwnd); return;
-        case SET_SECTION_GENERAL: app.settingsSection = 0; break;
-        case SET_SECTION_APPEARANCE: app.settingsSection = 1; break;
-        case SET_SECTION_EDITOR: app.settingsSection = 2; app.frontmatterMenu = -1; break;
+        case SET_SECTION_GENERAL: app.settingsSection = 0; app.settingsScroll = 0.0f; break;
+        case SET_SECTION_APPEARANCE: app.settingsSection = 1; app.settingsScroll = 0.0f; break;
+        case SET_SECTION_EDITOR: app.settingsSection = 2; app.settingsScroll = 0.0f; app.frontmatterMenu = -1; break;
         case SET_SECTION_FRONTMATTER: app.settingsSection = 3; break;
         case SET_TOGGLE_FOLDERSEARCH:
             app.folderSearchEnabled = !app.folderSearchEnabled;
@@ -737,6 +925,12 @@ static void settingsAction(App& app, HWND hwnd, int action) {
             // closing required; also keeps older windows' exit saves
             // from clobbering it (they no longer write this flag)
             persistOpenInTabs(app);
+            break;
+        case SET_TOGGLE_REOPENTABS:
+            // Kept now: this window's close and the next launch both read
+            // it from settings.ini (#323)
+            app.reopenTabs = !app.reopenTabs;
+            persistReopenTabs(app);
             break;
         case SET_TOGGLE_NOTIFICATIONS: {
             // Persisted now and left as on disk at exit, like openInTabs:
@@ -773,6 +967,15 @@ static void settingsAction(App& app, HWND hwnd, int action) {
             app.closeKeepsDrafts = !app.closeKeepsDrafts;
             persistCloseKeepsDrafts(app);
             break;
+        case SET_OPEN_READING:
+        case SET_OPEN_LIVE:
+        case SET_OPEN_SOURCE:
+            // The view Markdown files open in (#322), from the next file
+            // opened on; kept now, for the next window to read
+            app.openMode = action == SET_OPEN_LIVE ? OPEN_LIVE
+                         : action == SET_OPEN_SOURCE ? OPEN_SOURCE : OPEN_READING;
+            persistOpenMode(app);
+            break;
         case SET_FOLD_OFF:
         case SET_FOLD_ON:
         case SET_FOLD_FOLDED:
@@ -786,6 +989,11 @@ static void settingsAction(App& app, HWND hwnd, int action) {
             app.headingRules = !app.headingRules;
             // Layout shifts (the rule adds height), so a repaint alone
             // is not enough
+            app.layoutDirty = true;
+            break;
+        case SET_TOGGLE_WRAPCODE:
+            // Long lines in code blocks (#324): the blocks change height
+            app.wrapCode = !app.wrapCode;
             app.layoutDirty = true;
             break;
         case SET_LOCATE_PANDOC: {
@@ -851,6 +1059,9 @@ static void settingsAction(App& app, HWND hwnd, int action) {
             break;
         case SET_EDIT_THEME:
             openThemeEditor(app, true);
+            break;
+        case SET_IMPORT_THEME:
+            importThemeFile(app);
             break;
         case SET_TOC_LEFT: app.tocOnLeft = true; break;
         case SET_LANG_DROPDOWN:
@@ -918,8 +1129,14 @@ void handleMouseWheel(App& app, HWND hwnd, WPARAM wParam, LPARAM) {
         return;
     }
 
+    if (app.showThemeChooser) {
+        themeChooserWheel(app, (float)GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA);
+        return;
+    }
+
     if (app.showSettings) {
-        frontmatterScroll(app, (float)GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA);
+        const float notches = (float)GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA;
+        if (!settingsWheel(app, notches)) frontmatterScroll(app, notches);
         return;
     }
 
@@ -1470,10 +1687,21 @@ void handleMouseMove(App& app, HWND hwnd, LPARAM lParam) {
     if (app.showSearch) {
         // Row hover in the results panel follows the pointer (#246)
         if (app.showSearchPanel && mouseMoved) InvalidateRect(hwnd, nullptr, FALSE);
-        if (!searchPanelSetCursor(app, (float)app.mouseX, (float)app.mouseY)) {
-            setSearchCursor(app, (float)app.mouseX, (float)app.mouseY);
+        // A selection being dragged out on the page goes on wherever the
+        // pointer is: every move ended here, so with the bar open no drag
+        // selected anything, in the editor or the reading view (#319)
+        const bool pageDrag = app.selecting || app.editorSelecting || app.draggingSeparator || liveDragging(app);
+        if (!pageDrag) {
+            if (searchPanelSetCursor(app, (float)app.mouseX, (float)app.mouseY)) return;
+            if (searchBarCursor(app, (float)app.mouseX, (float)app.mouseY)) return;
+            // Beside the bar the editor has its own pointer: the beam over
+            // the text, the rail's names, the seam. The reading view keeps
+            // the arrow while it finds
+            if (!app.editMode) {
+                SetCursor(cursorArrow);
+                return;
+            }
         }
-        return;
     }
 
     if (sidePanelResizeAt(app, static_cast<float>(app.mouseX), static_cast<float>(app.mouseY)) != SidePanel::None) {
@@ -1555,26 +1783,16 @@ void handleMouseMove(App& app, HWND hwnd, LPARAM lParam) {
             app.editRailHover = 0;
             InvalidateRect(hwnd, nullptr, FALSE);
         }
+        // The source's citation list lights the row under the pointer
+        if (editorCompletionMouseMove(app, hwnd, app.mouseX, app.mouseY)) {
+            SetCursor(cursorArrow);
+            return;
+        }
         if (liveMouseMove(app, hwnd, app.mouseX, app.mouseY)) return;
         handleEditorMouseMove(app, hwnd, app.mouseX, app.mouseY);
         if (app.editCtxOpen) return;
         // The Read button owns the pointer while it shows (#245)
         if (app.readButtonHover) return;
-        // Replace-bar controls override the pane cursor: hand over the
-        // buttons, text beam over the two input fields (#119 feedback)
-        if (app.showSearch && app.searchReplaceMode &&
-            !app.draggingSeparator && !app.editorSelecting && !app.editorTextDrag.armed) {
-            static HCURSOR replaceIBeam = LoadCursor(nullptr, IDC_IBEAM);
-            for (const auto& hit : app.searchReplaceHits) {
-                if ((float)app.mouseX >= hit.first.left &&
-                    (float)app.mouseX <= hit.first.right &&
-                    (float)app.mouseY >= hit.first.top &&
-                    (float)app.mouseY <= hit.first.bottom) {
-                    SetCursor(hit.second >= 3 ? cursorHand : replaceIBeam);
-                    return;
-                }
-            }
-        }
         // If mouse is in the preview pane and not dragging separator, fall through for link hover etc.
         if ((float)app.mouseX < documentViewportX(app) ||
             app.draggingSeparator || app.editorSelecting || app.editorTextDrag.armed) return;
@@ -2144,6 +2362,18 @@ void handleMouseDown(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
             app.swallowNextMouseUp = true;
             return;
         }
+        // The CSS inspector's card takes a press while it is open, and
+        // Ctrl+Alt+click opens it on what is under the pointer
+        if (inspectorMouseDown(app, hwnd, (float)mx, (float)my)) {
+            app.swallowNextMouseUp = true;
+            return;
+        }
+        if ((GetKeyState(VK_CONTROL) & 0x8000) && (GetKeyState(VK_MENU) & 0x8000) && !app.showLightbox &&
+            (!app.editMode || app.editorShowPreview) && inspectorOpen(app, (float)mx, (float)my)) {
+            app.swallowNextMouseUp = true;
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return;
+        }
     }
     // Signal chips ride above everything: presses on a chip, the bell,
     // or the open tray act; any other press parks the draining chips
@@ -2262,6 +2492,12 @@ void handleMouseDown(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
     // The editor menu can cross the pane boundary. Its action or dismissal
     // consumes both halves of the click, including over preview content.
     if (app.editMode && editCtxMouseDown(app, hwnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) {
+        app.swallowNextMouseUp = true;
+        return;
+    }
+    // So can the source's citation list: a row puts its key in, a press
+    // elsewhere puts the list away and goes on
+    if (app.editMode && editorCompletionMouseDown(app, hwnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) {
         app.swallowNextMouseUp = true;
         return;
     }
@@ -2559,7 +2795,9 @@ static std::wstring wikiLinkPath(const App& app, const std::string& target);
 static bool openWikiLink(App& app, const std::string& target) {
     if (app.editMode || app.currentFile.empty()) return false;
     std::wstring path = wikiLinkPath(app, target);
-    return !path.empty() && openDocumentInViewer(app, path);
+    if (path.empty() || !openDocumentInViewer(app, path)) return false;
+    applyOpenMode(app);  // the note opens as files do (#322)
+    return true;
 }
 
 // The note a wiki link names, beside the current file
@@ -2580,15 +2818,11 @@ static std::wstring wikiLinkPath(const App& app, const std::string& target) {
     if (found(dir / (wideTarget + L".md"))) return (dir / (wideTarget + L".md")).wstring();
     if (found(dir / (wideTarget + L".markdown"))) return (dir / (wideTarget + L".markdown")).wstring();
 
-    auto lower = [](std::wstring s) {
-        for (auto& c : s) c = (wchar_t)std::towlower(c);
-        return s;
-    };
-    std::wstring want = lower(wideTarget);
+    std::wstring want = toLower(wideTarget);
     for (const auto& entry : fs::directory_iterator(dir, ec)) {
         if (!entry.is_regular_file(ec)) continue;
-        std::wstring stem = lower(entry.path().stem().wstring());
-        std::wstring name = lower(entry.path().filename().wstring());
+        std::wstring stem = toLower(entry.path().stem().wstring());
+        std::wstring name = toLower(entry.path().filename().wstring());
         if (stem == want || name == want) return entry.path().wstring();
     }
     // Target doesn't exist: leave the document as-is (a viewer doesn't
@@ -2606,6 +2840,145 @@ static void navRecordJump(App& app, const std::string& fromPath,
     app.navForward.clear();
 }
 
+// --- What a document may have the shell open --------------------------------
+
+std::function<void(const std::wstring&)>& shellOpenHook() {
+    static std::function<void(const std::wstring&)> hook;
+    return hook;
+}
+
+LinkOpening pathOpening(const std::wstring& fullPath, const std::wstring& documentFolder) {
+    LinkOpening opening;
+    opening.kind = LinkKind::Path;
+    opening.target = fullPath;
+    opening.remote = !qmd::mayOpenFromDocument(fullPath, documentFolder);
+    // A program, a script, a shortcut: what Windows itself warns about
+    const std::wstring extension = std::filesystem::path(fullPath).extension().wstring();
+    opening.ask = opening.remote || (!extension.empty() && AssocIsDangerous(extension.c_str()));
+    return opening;
+}
+
+LinkOpening linkOpening(const std::string& written, const std::wstring& documentFolder) {
+    size_t from = 0, to = written.size();
+    while (from < to && (unsigned char)written[from] <= ' ') ++from;
+    while (to > from && (unsigned char)written[to - 1] <= ' ') --to;
+    const std::string address = written.substr(from, to - from);
+    LinkOpening opening;
+    if (address.empty()) return opening;
+    // A scheme is two letters or more before a colon; one letter is a drive
+    size_t colon = 0;
+    while (colon < address.size() && (isalnum((unsigned char)address[colon]) || address[colon] == '+' ||
+                                      address[colon] == '.' || address[colon] == '-')) {
+        ++colon;
+    }
+    const char back = (char)92;
+    std::string path;
+    if (colon >= 2 && colon < address.size() && address[colon] == ':' && isalpha((unsigned char)address[0])) {
+        std::string scheme = address.substr(0, colon);
+        for (char& c : scheme) c = (char)tolower((unsigned char)c);
+        if (scheme == "http" || scheme == "https" || scheme == "mailto") {
+            opening.kind = LinkKind::Web;
+            opening.target = toWide(address);
+            return opening;
+        }
+        if (scheme != "file") {
+            // Some program's own address: ms-settings:, vscode://, zotero://
+            // and whatever else is registered. The document picks the
+            // program and what it is told, so the user is shown it first
+            opening.kind = LinkKind::Address;
+            opening.target = toWide(address);
+            opening.ask = true;
+            return opening;
+        }
+        // file:///C:/a%20b is a path here, file://server/share one on a server
+        const std::string rest = address.substr(colon + 1, address.find('#', colon) == std::string::npos
+                                                                 ? std::string::npos
+                                                                 : address.find('#', colon) - colon - 1);
+        size_t slashes = 0;
+        while (slashes < rest.size() && (rest[slashes] == '/' || rest[slashes] == back)) ++slashes;
+        const std::string tail = qmd::decodeLinkComponent(rest.substr(slashes));
+        const bool drive = tail.size() >= 2 && isalpha((unsigned char)tail[0]) && tail[1] == ':';
+        if (drive) path = tail;
+        else if (slashes == 2 || slashes >= 4) path = std::string(2, back) + tail;
+        else path = std::string(1, back) + tail;
+    } else {
+        path = qmd::splitLinkTarget(address).path;
+    }
+    if (path.empty()) return opening;
+    std::filesystem::path target(toWide(path));
+    if (!target.is_absolute()) {
+        // A name alone is a file beside the document. The shell would look
+        // for it in its own folder and along PATH, and find notepad.exe
+        if (documentFolder.empty()) return opening;
+        target = std::filesystem::path(documentFolder) / target;
+    }
+    return pathOpening(target.lexically_normal().wstring(), documentFolder);
+}
+
+static void shellOpen(App& app, HWND hwnd, const std::wstring& what) {
+    if (shellOpenHook()) {
+        shellOpenHook()(what);
+        return;
+    }
+    SHELLEXECUTEINFOW info{};
+    info.cbSize = sizeof(info);
+    info.fMask = SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC;
+    info.hwnd = hwnd;
+    info.lpVerb = L"open";
+    info.lpFile = what.c_str();
+    info.nShow = SW_SHOWNORMAL;
+    if (!ShellExecuteExW(&info)) {
+        DWORD error = GetLastError();
+        const char* message = (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
+            ? "toast.file_missing" : error == ERROR_NO_ASSOCIATION
+            ? "toast.file_no_app" : "toast.file_open_failed";
+        signalPushKey(app, SIG_ERROR, SIGI_FILE, message, std::filesystem::path(what).filename().wstring(), what);
+    }
+}
+
+// Opens it, or asks first with the target in full
+static void openOrAsk(App& app, HWND hwnd, LinkOpening opening) {
+    if (opening.kind == LinkKind::None) return;
+    if (opening.kind == LinkKind::Path && !opening.remote) {
+        // A file on another server is not looked for before the user agrees:
+        // looking signs in to the server
+        const DWORD attributes = GetFileAttributesW(opening.target.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES) {
+            signalPushKey(app, SIG_ERROR, SIGI_FILE, "toast.file_missing",
+                          std::filesystem::path(opening.target).filename().wstring(), opening.target);
+            return;
+        }
+        if (attributes & FILE_ATTRIBUTE_DIRECTORY) opening.ask = false;  // a folder opens in Explorer
+    }
+    if (opening.ask) {
+        app.createRefPath = toUtf8(opening.target);
+        app.createRefOpens = true;
+        app.createRefPending = true;
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return;
+    }
+    shellOpen(app, hwnd, opening.target);
+}
+
+static bool openFileRefTarget(App& app, HWND hwnd, const std::string& url);
+
+void openFileFromDocument(App& app, HWND hwnd, const std::wstring& fullPath, const std::wstring& documentFolder) {
+    openOrAsk(app, hwnd, pathOpening(fullPath, documentFolder));
+}
+
+void openFromDocument(App& app, HWND hwnd, const std::string& address, const std::wstring& documentFolder) {
+    const LinkOpening opening = linkOpening(address, documentFolder);
+    std::error_code ignored;
+    // Markdown on this computer joins the window as a tab, as its links do
+    if (opening.kind == LinkKind::Path && !opening.remote && !sheetActive(app) &&
+        qmd::fileRefIsMarkdown(toUtf8(opening.target)) && std::filesystem::is_regular_file(opening.target, ignored)) {
+        const qmd::LinkTarget written = qmd::splitLinkTarget(address);
+        openFileRefTarget(app, hwnd, qmd::encodeLinkTarget({toUtf8(opening.target), written.fragment, written.hasFragment}));
+        return;
+    }
+    openOrAsk(app, hwnd, opening);
+}
+
 // A ghost reference: text files can be created on the spot; binary
 // documents need an existing file from their own application.
 static void offerCreateFileRef(App& app, const std::string& url) {
@@ -2617,6 +2990,7 @@ static void offerCreateFileRef(App& app, const std::string& url) {
         return;
     }
     app.createRefPath = std::move(path);
+    app.createRefOpens = false;
     app.createRefPending = true;
 }
 
@@ -2627,22 +3001,8 @@ static bool openFileRefTarget(App& app, HWND hwnd, const std::string& url) {
     const auto target = qmd::splitLinkTarget(url);
     const auto& path = target.path;
     if (!qmd::fileRefIsMarkdown(path)) {
-        const auto wide = toWide(path);
-        SHELLEXECUTEINFOW info{};
-        info.cbSize = sizeof(info);
-        info.fMask = SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC;
-        info.hwnd = hwnd;
-        info.lpVerb = L"open";
-        info.lpFile = wide.c_str();
-        info.nShow = SW_SHOWNORMAL;
-        if (!ShellExecuteExW(&info)) {
-            DWORD error = GetLastError();
-            const char* message = (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
-                ? "toast.file_missing" : error == ERROR_NO_ASSOCIATION
-                ? "toast.file_no_app" : "toast.file_open_failed";
-            signalPushKey(app, SIG_ERROR, SIGI_FILE, message,
-                          std::filesystem::path(wide).filename().wstring(), wide);
-        }
+        // Its own application opens it; a program or a script asks first
+        openFileFromDocument(app, hwnd, toWide(path), std::filesystem::path(toWide(app.currentFile)).parent_path().wstring());
         return false;
     }
     const auto fromPath = app.currentFile;
@@ -2726,7 +3086,7 @@ static void startPageInvoke(App& app, HWND hwnd, int id) {
                 tabOpenPath(app, hwnd, path);
                 for (int i = 0; i < (int)app.tabs.size(); i++) {
                     if (app.tabs[i].id == shellId) {
-                        tabCloseIndex(app, hwnd, i);
+                        tabCloseIndex(app, hwnd, i, TabClose::Internal);
                         break;
                     }
                 }
@@ -2744,25 +3104,43 @@ static void startPageInvoke(App& app, HWND hwnd, int id) {
 // typing in a fresh tab, 2 = cancel
 static void createRefAction(App& app, HWND hwnd, int action) {
     app.createRefPending = false;
+    if (app.createRefOpens) {
+        // The same dialog asked whether to open a link's target
+        const std::wstring target = toWide(app.createRefPath);
+        app.createRefOpens = false;
+        app.createRefPath.clear();
+        if (action == 1 && !target.empty()) shellOpen(app, hwnd, target);
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return;
+    }
     if (action == 1 && !app.createRefPath.empty()) {
         std::filesystem::path target(toWide(app.createRefPath));
         std::error_code ec;
         if (target.has_parent_path()) {
             std::filesystem::create_directories(target.parent_path(), ec);
         }
-        std::ofstream out(target, std::ios::binary);
-        if (out) {
-            out.close();
+        // The link read as missing when its page was laid out, and a path on
+        // another server is never looked for and always reads so. A file
+        // that is there by now is opened as it is: only CREATE_NEW makes a
+        // file without emptying one
+        HANDLE made = CreateFileW(target.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        const bool created = made != INVALID_HANDLE_VALUE;
+        const bool there = created || GetLastError() == ERROR_FILE_EXISTS;
+        if (created) CloseHandle(made);
+        if (there) {
             // The layout cached this path as missing; the ghost turns live
             app.fileRefCache.erase(app.createRefPath);
-            // A markdown target opens in a tab ready to type; other text
-            // files hand off to their registered application (#162)
-            if (openFileRefTarget(app, hwnd, qmd::encodeLinkTarget({app.createRefPath, {}, false}))) {
+            // A markdown target opens in a tab, a new one ready to type;
+            // other text files hand off to their registered application (#162)
+            // (the opening may ask in this dialog: its path is no longer this one's)
+            const std::string file = app.createRefPath;
+            app.createRefPath.clear();
+            if (openFileRefTarget(app, hwnd, qmd::encodeLinkTarget({file, {}, false})) && created) {
                 enterEditMode(app);
             }
         }
     }
-    app.createRefPath.clear();
+    if (!app.createRefPending) app.createRefPath.clear();
     InvalidateRect(hwnd, nullptr, FALSE);
 }
 
@@ -3032,7 +3410,7 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
     }
     // The release of a press the sheet took, before anything lets go of the
     // mouse: a lost capture puts a moved card back and drops a new arrow
-    if (sheetActive(app) && sheetMouseUp(app, hwnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) return;
+    if (sheetActive(app) && !app.createRefPending && sheetMouseUp(app, hwnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) return;
     // A tab drag ends on release (its press already consumed the click)
     // A dragged editor selection lands, or a click on it places the caret,
     // while the press still holds the mouse: losing it cancels the drag
@@ -3176,9 +3554,12 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
                 // so deriving from Abyss keeps its pinned heading face. A
                 // hand edit made since the themes loaded is read first, so
                 // the rewrite keeps it (#310)
+                const LightAndDark chosen = lightAndDark(app);
                 if (customThemesChangedOnDisk()) loadCustomThemes();
                 int idx = saveCustomTheme(app.themeEditorTheme, name, app.themeEditorFont,
                     app.themeEditorCodeFont, app.themeEditorHeadingFont);
+                // A new section stands before the CSS themes, which move one place on
+                findLightAndDark(app, chosen);
                 if (idx >= 0) {
                     // Preview format cache must grow for the chooser
                     for (auto& pf : app.themePreviewFormats) {
@@ -3253,6 +3634,13 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
         for (int i = 0; i < PRINT_MARGIN_COUNT; i++) {
             if (hit(app.printPreviewMarginBtn[i])) {
                 printPreviewSetMargin(app, PRINT_MARGINS_MM[i]);
+                return;
+            }
+        }
+        // Two columns, page numbers, running heads (paper export)
+        for (int i = 0; i < PRINT_OPTION_COUNT; i++) {
+            if (hit(app.printPreviewOptionBtn[i])) {
+                printPreviewToggle(app, i);
                 return;
             }
         }
@@ -3537,8 +3925,8 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
                     if (app.tabNewTabIntent || ctrlHeld) {
                         app.tabNewTabIntent = false;
                         tabOpenPath(app, hwnd, toUtf8(fullPath), true);
-                    } else {
-                        openDocumentInViewer(app, fullPath);
+                    } else if (openDocumentInViewer(app, fullPath)) {
+                        applyOpenMode(app);  // in the editor, if files open there (#322)
                     }
                 }
             }
@@ -3733,6 +4121,12 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
 
 void followDocumentLink(App& app, HWND hwnd, const std::string& url) {
     if (url.empty()) return;
+    // The page's tinta.css chip turns the folder sheet off for this document, or on
+    if (url == "tinta:folder-sheet") {
+        page::setFolderSheetOff(app, !page::folderSheetOff(app));
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return;
+    }
     if (url.rfind("wiki:", 0) == 0) {
         if (!app.editMode) {
             std::string fromPath = app.currentFile;
@@ -3757,9 +4151,11 @@ void followDocumentLink(App& app, HWND hwnd, const std::string& url) {
     if (url.find("://") == std::string::npos && url[0] != '#' && url.rfind("mailto:", 0) != 0 && !app.currentFile.empty()) {
         namespace fs = std::filesystem;
         std::error_code ec;
-        fs::path target = fs::path(toWide(app.currentFile)).parent_path() /
-                          toWide(qmd::decodeLinkComponent(qmd::splitLinkTarget(url).path));
-        if (fs::exists(target, ec) && !fs::is_directory(target, ec)) {
+        const fs::path folder = fs::path(toWide(app.currentFile)).parent_path();
+        fs::path target = folder / toWide(qmd::decodeLinkComponent(qmd::splitLinkTarget(url).path));
+        // (a file on another server is not looked for here: the click's own
+        // route asks before it does)
+        if (qmd::mayOpenFromDocument(target.wstring(), folder.wstring()) && fs::exists(target, ec) && !fs::is_directory(target, ec)) {
             openFileRefTarget(app, hwnd, toUtf8(target.wstring()));
             return;
         }
@@ -3796,6 +4192,8 @@ bool handleKeyDown(App& app, HWND hwnd, WPARAM wParam) {
     tabHoverCardDismiss(app, hwnd);
     // Ctrl+Alt+Up/Down add editor carets (#251) before the AltGr guard
     if (editorAltArrowKey(app, hwnd, wParam)) return true;
+    // Esc puts the CSS inspector's card away
+    if (inspectorKeyDown(app, hwnd, wParam)) return true;
     if (!shortcutModifiersAllowed(static_cast<unsigned>(wParam))) return false;
     if (app.appMenuPressed) {
         if (wParam == VK_ESCAPE) cancelAppMenuPress(app, hwnd);
@@ -4035,7 +4433,12 @@ bool handleKeyDown(App& app, HWND hwnd, WPARAM wParam) {
             // New tab = the start page (browser-style new-tab page); its
             // Open/Browse/recents land in this tab. The old open-into-a-
             // new-tab browser flow lives on as Ctrl+click in the browser.
-            tabOpenStartPage(app, hwnd);
+            // With Shift, the tab closed last comes back
+            if (shift) {
+                tabReopenClosed(app, hwnd);
+            } else {
+                tabOpenStartPage(app, hwnd);
+            }
             return false;
         }
         if (wParam >= '1' && wParam <= '9' && app.tabs.size() > 1) {
@@ -4111,7 +4514,7 @@ bool handleKeyDown(App& app, HWND hwnd, WPARAM wParam) {
     if (app.editMode) {
         // An open table cell editor owns the keyboard (#148)
         if (tableEditKeyDown(app, hwnd, wParam)) return false;
-        if (ctrl && wParam == 'C' && app.hasSelection &&
+        if (ctrl && (wParam == 'C' || wParam == VK_INSERT) && app.hasSelection &&
             app.selAnchor != app.selFocus) {
             bool held = false;
             if (!copySelectionRange(app, hwnd,
@@ -4130,11 +4533,15 @@ bool handleKeyDown(App& app, HWND hwnd, WPARAM wParam) {
             bool consumed = false;
             if (liveKeyDown(app, hwnd, wParam, consumed)) return consumed;
         }
+        // The source's citation list takes its keys first: Enter puts a
+        // key in, and no new line follows
+        if (!app.confirmExitPending && editorCompletionKeyDown(app, hwnd, wParam)) return true;
         const bool wasReading=app.editorReadingPreview;
         // A key the unsaved-changes dialog takes types nothing after it:
         // Keep mine leaves the editor open under it (#311)
         const bool asking = app.confirmExitPending;
         handleEditorKeyDown(app, hwnd, wParam);
+        editorCompletionFollow(app, false);
         // Save As runs a modal loop: Ctrl may already be released when it
         // returns. Do not translate its original S into newly typed text (#206).
         return asking || (ctrl && wParam == 'S') || (wasReading && !app.editorReadingPreview);
@@ -4144,7 +4551,8 @@ bool handleKeyDown(App& app, HWND hwnd, WPARAM wParam) {
     // (printable characters arrive separately via WM_CHAR)
     if (app.showFolderBrowser &&
         (app.folderBrowserEditingPath || app.folderBrowserNaming != 0)) {
-        if (ctrl && wParam == 'V') {
+        if ((ctrl && wParam == 'V') ||
+            clipboardKeyLetter(static_cast<unsigned>(wParam), ctrl, (GetKeyState(VK_SHIFT) & 0x8000) != 0) == 'V') {
             std::wstring pasted = clipboardLine(hwnd);
             if (!pasted.empty()) {
                 if (app.folderBrowserInputSelectAll) {
@@ -4241,6 +4649,7 @@ bool handleKeyDown(App& app, HWND hwnd, WPARAM wParam) {
                 }
                 break;
             }
+            case VK_INSERT:  // Ctrl+Insert copies as Ctrl+C does (#320)
             case 'C': {
                 // Copy - copy selected text or all text if select all was used
                 bool copied = false, held = false;
@@ -4645,6 +5054,7 @@ void handleCharInput(App& app, HWND hwnd, WPARAM wParam) {
             return;
         }
         handleEditorCharInput(app, hwnd, wParam);
+        editorCompletionFollow(app, true);  // a key typed after an @ opens the citation list
         return;
     }
 
@@ -4822,6 +5232,40 @@ void handleLinkPeekTimer(App& app, HWND hwnd) {
     InvalidateRect(hwnd, nullptr, FALSE);
 }
 
+void reportThemeProblems(App& app) {
+    // Once per set of problems: the file timer reads the sheet again only
+    // when it changes, and a fixed sheet clears the record
+    const std::vector<std::wstring> problems = themeProblems(app.currentThemeIndex);
+    std::wstring all;
+    for (const auto& problem : problems) all += problem + L"\n";
+    if (all == app.themeProblemsShown) return;
+    app.themeProblemsShown = all;
+    if (problems.empty()) return;
+    wchar_t text[160];
+    swprintf_s(text, _countof(text), tr(app, "toast.theme_problems"), (int)problems.size());
+    signalPush(app, SIG_WARN, SIGI_WARNING, text, problems.front(), all);
+}
+
+// The active document's bibliography or style file changed since it was
+// last looked at (docs/specs/scholar.md)
+static bool scholarFilesChanged(App& app) {
+    if (app.currentFile.empty() || !app.root) return false;
+    const std::wstring path = toWide(app.currentFile);
+    const size_t slash = path.find_last_of(L"\\/");
+    const std::wstring folder = slash == std::wstring::npos ? std::wstring() : path.substr(0, slash);
+    bool changed = false;
+    for (const auto& file : scholar::followedFiles(app.root, folder)) {
+        WIN32_FILE_ATTRIBUTE_DATA data{};
+        if (!GetFileAttributesExW(file.c_str(), GetFileExInfoStandard, &data)) continue;
+        auto seen = app.scholarFileTimes.emplace(file, data.ftLastWriteTime);
+        if (!seen.second && CompareFileTime(&seen.first->second, &data.ftLastWriteTime) != 0) {
+            seen.first->second = data.ftLastWriteTime;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
 void reloadThemesIniIfChanged(App& app, HWND hwnd) {
     // The theme editor holds a theme of its own; its save reads the file first
     if (app.showThemeEditor || !customThemesChangedOnDisk()) return;
@@ -4862,6 +5306,34 @@ void reloadThemesIniIfChanged(App& app, HWND hwnd) {
 
 void handleFileWatchTimer(App& app, HWND hwnd) {
     reloadThemesIniIfChanged(app, hwnd);
+    // A library saved by Zotero's auto-export, or an edited style, formats
+    // the citations again: the editor parses its buffer anew, the reader
+    // reads the document again below, keeping its place
+    if (scholarFilesChanged(app)) {
+        if (app.editMode) editorReparse(app);
+        else app.lastFileWriteTime = {};
+        InvalidateRect(hwnd, nullptr, FALSE);
+    }
+    // A folder's tinta.css restyles its documents when it is saved
+    if (!app.folderSheetPath.empty()) {
+        WIN32_FILE_ATTRIBUTE_DATA data{};
+        if (GetFileAttributesExW(app.folderSheetPath.c_str(), GetFileExInfoStandard, &data) &&
+            CompareFileTime(&data.ftLastWriteTime, &app.folderSheetTime) != 0) {
+            if (app.folderSheetTime.dwLowDateTime || app.folderSheetTime.dwHighDateTime) {
+                app.layoutDirty = true;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            app.folderSheetTime = data.ftLastWriteTime;
+        }
+    }
+    // A CSS theme follows its file as documents do (docs/specs/theming.md)
+    if (themeReloadIfChanged(app.currentThemeIndex)) {
+        applyTheme(app, app.currentThemeIndex);
+        reportThemeProblems(app);
+    } else if (app.themeProblemsIndex != app.currentThemeIndex) {
+        app.themeProblemsIndex = app.currentThemeIndex;
+        reportThemeProblems(app);
+    }
     // Refresh the deleted-on-disk flags driving the red-grey tab dots
     // (runs even when the active document is untitled or being edited)
     bool missingChanged = false;
@@ -4885,7 +5357,7 @@ void handleFileWatchTimer(App& app, HWND hwnd) {
         for (size_t i = 0; i < app.tabs.size(); i++) {
             bool isActive = (int)i == app.activeTab;
             bool dirty = isActive
-                             ? (app.editMode && app.editorDirty)
+                             ? app.unsavedNow()
                              : (app.tabs[i].editMode && app.tabs[i].editorDirty);
             const std::string& path =
                 isActive ? app.currentFile : app.tabs[i].path;
@@ -4902,6 +5374,8 @@ void handleFileWatchTimer(App& app, HWND hwnd) {
                 isActive ? app.lastFileWriteTime : app.tabs[i].lastWrite;
             if (CompareFileTime(&current, &stored) != 0) {
                 stored = current;  // one prompt per external change
+                // The prompt asks over the document, not over a print preview of it
+                if (app.showPrintPreview) closePrintPreview(app, hwnd);
                 if (!isActive) {
                     tabActivate(app, hwnd, (int)i);
                     app.lastFileWriteTime = current;

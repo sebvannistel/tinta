@@ -13,6 +13,16 @@ void tabsInit(App& app);                       // adopt the startup document
 void tabsSetKeepDeleted(App& app, bool enabled);
 // Rebuild the row from last session's paths (startup doc becomes active)
 void tabsSeedSession(App& app, const std::vector<std::string>& paths);
+
+// The session (#323): the tabs a launch brings back, and the tabs a
+// closing window leaves for the next one. With "Reopen tabs from last
+// time" off both are the pinned tabs only
+struct SessionTabs {
+    std::vector<std::string> paths;
+    int active = 0;
+};
+SessionTabs sessionToReopen(const Settings& settings);
+void sessionKeep(Settings& settings, const App& app);
 // Pinned tabs (#312) lead the row: how many, pinning or unpinning one (it
 // moves to the end of the pinned ones), and a session's pinned paths again
 int tabsPinnedCount(const App& app);
@@ -25,7 +35,21 @@ void tabOpenPath(App& app, HWND hwnd, const std::string& utf8Path,
 int tabDropInsertionIndex(const App& app, POINT clientPoint);
 bool tabReceiveCopyData(App& app, HWND hwnd, const COPYDATASTRUCT& data);
 bool tabSendDrop(HWND target, const std::string& utf8Path, POINT screenPoint);
-void tabCloseIndex(App& app, HWND hwnd, int index);
+// The user's closes are remembered for Ctrl+Shift+T; the ones Tinta makes
+// itself (an empty start page giving way, a tab dragged to another
+// window) are not
+enum class TabClose { User, Internal };
+void tabCloseIndex(App& app, HWND hwnd, int index, TabClose how = TabClose::User);
+// Ctrl+Shift+T: reopens app.closedTabs[entry], or with -1 the newest close
+// and the rest of its sweep, where they stood. False when none could open
+bool tabReopenClosed(App& app, HWND hwnd, int entry = -1);
+// "Don't save" in the unsaved-changes dialog keeps the buffer it throws
+// away for the tab close it answers
+void tabKeepDiscardedEdit(App& app);
+// The window is asked to close. An unsaved buffer, the active one or one
+// parked in a tab, gets the unsaved-changes dialog first: true when it
+// asks, and the window stays
+bool windowCloseAsks(App& app, HWND hwnd);
 void tabCycle(App& app, HWND hwnd, int direction);
 
 // Title-bar geometry shared by rendering and non-client hit testing
@@ -65,6 +89,11 @@ void renderTabHoverCard(App& app);
 
 // Right-click tab context menu (NPP-style close operations)
 int tabContextMenuIndexAt(const App& app, float x, float y);
+// The colour of the line under the tab row, of the chosen tab's edge and of
+// the window's own border, and the line every name, the + and the window's
+// buttons are centred on
+D2D1_COLOR_F tabStripEdge(const App& app);
+float tabRowCentre(const App& app);
 void openTabMenu(App& app, int tabIndex, float x, float y);
 void closeTabMenu(App& app);
 int tabMenuItemAt(const App& app, float x, float y);

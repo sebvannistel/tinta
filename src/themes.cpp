@@ -1,248 +1,93 @@
 #include "app.h"
 
-// 10 Distinctive Themes - 5 Light, 5 Dark
-const D2DTheme THEMES[] = {
-    // ═══════════════════════════════════════════════════════════
-    // LIGHT THEMES
-    // ═══════════════════════════════════════════════════════════
+#include "themes_css.h"
 
-    // 1. Paper - Warm sepia, literary manuscript feel
-    {
-        L"Paper", L"Segoe UI", nullptr, L"Consolas", false,
-        hexColor(0xF5F1E8),    // background - warm cream
-        hexColor(0x3D3329),    // text - deep brown
-        hexColor(0x2A1F16),    // heading - dark brown
-        hexColor(0xB85A3C),    // link - terracotta
-        hexColor(0x6B5344),    // code - brown
-        hexColor(0xEDE6DA),    // codeBackground - parchment
-        hexColor(0xC4B8A8),    // blockquoteBorder
-        hexColor(0xB85A3C),    // accent
-        // Syntax colors (2026-08 tuning pass: warm family)
-        hexColor(0x8B4513),    // syntaxKeyword - saddle brown
-        hexColor(0x3E7D5A),    // syntaxString - warm forest
-        hexColor(0x9A8F80),    // syntaxComment - warm gray
-        hexColor(0xB8860B),    // syntaxNumber - dark goldenrod
-        hexColor(0x3B5BA5),    // syntaxFunction - softened indigo
-        hexColor(0x8A63A8),    // syntaxType - muted plum
-        hexColor(0x7D4CA0)     // syntaxControlFlow - grape
-    },
+#include <mutex>
 
-    // 2. Sakura - Japanese cherry blossom, soft pink elegance
-    {
-        L"Sakura", L"Segoe UI", nullptr, L"Consolas", false,
-        hexColor(0xFDF8F8),    // background - soft blush white
-        hexColor(0x404040),    // text - soft charcoal
-        hexColor(0xC44569),    // heading - deep rose
-        hexColor(0xD25980),    // link - rose (contrast-fixed)
-        hexColor(0x8B5570),    // code - plum
-        hexColor(0xF8ECF0),    // codeBackground - blush
-        hexColor(0xE8B4C0),    // blockquoteBorder
-        hexColor(0xC44569),    // accent
-        // Syntax colors (2026-08 tuning pass: blossom family)
-        hexColor(0xC44569),    // syntaxKeyword - rose
-        hexColor(0x4E9B6F),    // syntaxString - soft leaf
-        hexColor(0xA8969C),    // syntaxComment - pink-tinted gray
-        hexColor(0xD25980),    // syntaxNumber - rose
-        hexColor(0x6455B8),    // syntaxFunction - deepened slate blue
-        hexColor(0x8B5570),    // syntaxType - plum
-        hexColor(0x9D5BC8)     // syntaxControlFlow - orchid
-    },
-
-    // 3. Arctic - Nordic ice blues, crisp and clean
-    {
-        L"Arctic", L"Segoe UI", nullptr, L"Cascadia Code", false,
-        hexColor(0xF7FAFC),    // background - ice white
-        hexColor(0x2D3748),    // text - deep slate
-        hexColor(0x1A365D),    // heading - navy
-        hexColor(0x2B6CB0),    // link - deepened blue
-        hexColor(0x285E61),    // code - teal
-        hexColor(0xEBF8FF),    // codeBackground - light blue
-        hexColor(0xA0C4E8),    // blockquoteBorder
-        hexColor(0x2B6CB0),    // accent - deepened blue
-        // Syntax colors (2026-08 tuning pass: ice family)
-        hexColor(0x2B6CB0),    // syntaxKeyword - aligned with accent
-        hexColor(0x38795B),    // syntaxString - cool pine
-        hexColor(0x8295A8),    // syntaxComment - ice gray
-        hexColor(0xC05621),    // syntaxNumber - burnt
-        hexColor(0x2C7A7B),    // syntaxFunction - teal, echoes code
-        hexColor(0x6B5B95),    // syntaxType - purple
-        hexColor(0x805AD5)     // syntaxControlFlow - violet
-    },
-
-    // 4. Meadow - Fresh organic greens, nature-inspired
-    {
-        L"Meadow", L"Segoe UI", nullptr, L"Consolas", false,
-        hexColor(0xF7FAF7),    // background - soft white-green
-        hexColor(0x1A2F1A),    // text - forest
-        hexColor(0x1C4532),    // heading - deep green
-        hexColor(0x2F855A),    // link - deepened green
-        hexColor(0x4A5568),    // code - slate
-        hexColor(0xE6FFED),    // codeBackground - mint
-        hexColor(0x9AE6B4),    // blockquoteBorder
-        hexColor(0x2F855A),    // accent - deepened green
-        // Syntax colors (2026-08 tuning pass: organic family)
-        hexColor(0x2F6B4F),    // syntaxKeyword - pine (off the heading)
-        hexColor(0xA0742C),    // syntaxString - straw gold
-        hexColor(0x7E8B7E),    // syntaxComment - sage gray
-        hexColor(0xC05621),    // syntaxNumber - burnt
-        hexColor(0x38A169),    // syntaxFunction - the old accent green
-        hexColor(0x6B5B95),    // syntaxType - purple
-        hexColor(0x7D5BA6)     // syntaxControlFlow - heather
-    },
-
-    // 5. Dusk - Golden hour warmth, sunset tones
-    {
-        L"Dusk", L"Segoe UI", nullptr, L"Consolas", false,
-        hexColor(0xFFFBF5),    // background - warm white
-        hexColor(0x553C10),    // text - deep amber
-        hexColor(0x9C4221),    // heading - burnt orange
-        hexColor(0xA66A12),    // link - deepened gold
-        hexColor(0x5F5030),    // code - olive
-        hexColor(0xFEF5E7),    // codeBackground - cream
-        hexColor(0xE8C48D),    // blockquoteBorder
-        hexColor(0xA66A12),    // accent - deepened gold (chip-ink fix)
-        // Syntax colors (2026-08 tuning pass: sunset family)
-        hexColor(0x9C4221),    // syntaxKeyword - burnt orange
-        hexColor(0x4E8A5A),    // syntaxString - evening leaf
-        hexColor(0x9C8D77),    // syntaxComment - sand gray
-        hexColor(0xA66A12),    // syntaxNumber - gold, follows accent
-        hexColor(0x5B5EA6),    // syntaxFunction - dusk-sky indigo
-        hexColor(0x8B4513),    // syntaxType - saddle brown
-        hexColor(0x8A4E9E)     // syntaxControlFlow - twilight purple
-    },
-
-    // ═══════════════════════════════════════════════════════════
-    // DARK THEMES
-    // ═══════════════════════════════════════════════════════════
-
-    // 6. Midnight - Deep space, cosmic tranquility
-    {
-        L"Midnight", L"Segoe UI", nullptr, L"Cascadia Code", true,
-        hexColor(0x0D1B2A),    // background - deep navy
-        hexColor(0xE0E1DD),    // text - soft blue-white
-        hexColor(0xF0F4F8),    // heading - moonlight
-        hexColor(0x38C6E4),    // link - lifted electric blue
-        hexColor(0x90E0EF),    // code - cyan
-        hexColor(0x1B263B),    // codeBackground - deep blue
-        hexColor(0x415A77),    // blockquoteBorder
-        hexColor(0x38C6E4),    // accent - lifted off the ink boundary
-        // Syntax colors (2026-08 tuning pass: cosmic family)
-        hexColor(0x38C6E4),    // syntaxKeyword - follows accent
-        hexColor(0x9ADBA4),    // syntaxString - softened green
-        hexColor(0x6C7A89),    // syntaxComment - gray-blue
-        hexColor(0xF2CE6B),    // syntaxNumber - softened gold
-        hexColor(0x90E0EF),    // syntaxFunction - cyan
-        hexColor(0xC9A6DE),    // syntaxType - softened plum
-        hexColor(0xD793CF)     // syntaxControlFlow - softened orchid
-    },
-
-    // 7. Dracula - Classic dark, purples and pinks
-    {
-        L"Dracula", L"Segoe UI", nullptr, L"Consolas", true,
-        hexColor(0x282A36),    // background - deep purple-gray
-        hexColor(0xF8F8F2),    // text - light gray
-        hexColor(0xFF79C6),    // heading - pink
-        hexColor(0x8BE9FD),    // link - cyan
-        hexColor(0x50FA7B),    // code - green
-        hexColor(0x21222C),    // codeBackground - darker
-        hexColor(0x6272A4),    // blockquoteBorder
-        hexColor(0xBD93F9),    // accent - purple
-        // Syntax colors (Dracula palette)
-        hexColor(0xFF79C6),    // syntaxKeyword - pink
-        hexColor(0xF1FA8C),    // syntaxString - yellow
-        hexColor(0x6272A4),    // syntaxComment - gray
-        hexColor(0xBD93F9),    // syntaxNumber - purple
-        hexColor(0x50FA7B),    // syntaxFunction - green
-        hexColor(0x8BE9FD),    // syntaxType - cyan
-        hexColor(0xBD93F9)     // syntaxControlFlow - purple
-    },
-
-    // 8. Forest - Deep mystical greens
-    {
-        L"Forest", L"Segoe UI", nullptr, L"Consolas", true,
-        hexColor(0x0D1512),    // background - deep green-black
-        hexColor(0xB8C5B2),    // text - sage
-        hexColor(0x9AE6B4),    // heading - bright green
-        hexColor(0x68D391),    // link - lime
-        hexColor(0x81E6D9),    // code - mint
-        hexColor(0x1A2A23),    // codeBackground - dark green
-        hexColor(0x4A6E5A),    // blockquoteBorder
-        hexColor(0x68D391),    // accent
-        // Syntax colors (2026-08 tuning pass: woodland family)
-        hexColor(0x9AE6B4),    // syntaxKeyword - bright green
-        hexColor(0xD9CB7E),    // syntaxString - moss straw
-        hexColor(0x5F7A6A),    // syntaxComment - muted green
-        hexColor(0xE8A85C),    // syntaxNumber - ember orange
-        hexColor(0x68D391),    // syntaxFunction - lime
-        hexColor(0x81E6D9),    // syntaxType - mint
-        hexColor(0xC99BE8)     // syntaxControlFlow - softened lavender
-    },
-
-    // 9. Ember - Warm charcoal with fire accents
-    {
-        L"Ember", L"Segoe UI", nullptr, L"Consolas", true,
-        hexColor(0x1A1614),    // background - warm black
-        hexColor(0xD4C5B9),    // text - warm gray
-        hexColor(0xF6AD55),    // heading - amber
-        hexColor(0xF1975A),    // link - lifted orange
-        hexColor(0xFC8181),    // code - coral
-        hexColor(0x252019),    // codeBackground - dark warm
-        hexColor(0x5C4A3A),    // blockquoteBorder
-        hexColor(0xF1975A),    // accent - lifted off the ink boundary
-        // Syntax colors (2026-08 tuning pass: fire family)
-        hexColor(0xF6AD55),    // syntaxKeyword - amber
-        hexColor(0xA8C98A),    // syntaxString - warm olive
-        hexColor(0x6B5B4F),    // syntaxComment - warm gray
-        hexColor(0xD9A662),    // syntaxNumber - brass
-        hexColor(0xED8936),    // syntaxFunction - the old accent orange
-        hexColor(0xC9A0C9),    // syntaxType - softened plum
-        hexColor(0xE08BB0)     // syntaxControlFlow - warm rose
-    },
-
-    // 10. Abyss - True black, neon accents (OLED-friendly)
-    {
-        L"Abyss", L"Segoe UI Light", L"Segoe UI", L"Cascadia Mono", true,
-        hexColor(0x000000),    // background - pure black
-        hexColor(0xEDEDED),    // text - off-white (OLED halation)
-        hexColor(0x2EE6CF),    // heading - cyan, off the RGB rail
-        hexColor(0xFF4DD8),    // link - softened magenta
-        hexColor(0xB8F53C),    // code - lime, off the RGB rail
-        hexColor(0x0F0F0F),    // codeBackground - visible on black
-        hexColor(0x333333),    // blockquoteBorder
-        hexColor(0x2EE6CF),    // accent - cyan, off the RGB rail
-        // Syntax colors (2026-08 tuning pass: neon tamed, not removed)
-        hexColor(0xFF4DD8),    // syntaxKeyword - softened magenta
-        hexColor(0xB8F53C),    // syntaxString - lime
-        hexColor(0x5C6660),    // syntaxComment - green-tinted gray
-        hexColor(0xFF8A3D),    // syntaxNumber - softened orange
-        hexColor(0x2EE6CF),    // syntaxFunction - cyan
-        hexColor(0xF5E663),    // syntaxType - softened yellow
-        hexColor(0xC77DFF)     // syntaxControlFlow - violet (no longer keyword)
-    },
-
-    // 11. White - plain black on pure white. Appended so saved theme
-    // indices keep pointing at the same themes.
-    {
-        L"White", L"Segoe UI", nullptr, L"Consolas", false,
-        hexColor(0xFFFFFF),    // background - pure white
-        hexColor(0x000000),    // text - pure black
-        hexColor(0x000000),    // heading - black
-        hexColor(0x0B57D0),    // link - plain blue
-        hexColor(0x000000),    // code - black
-        hexColor(0xF2F2F2),    // codeBackground - light gray, visible on white
-        hexColor(0xBDBDBD),    // blockquoteBorder
-        hexColor(0x0B57D0),    // accent
-        hexColor(0x0000FF),    // syntaxKeyword - blue
-        hexColor(0xA31515),    // syntaxString - dark red
-        hexColor(0x008000),    // syntaxComment - green
-        hexColor(0x098658),    // syntaxNumber - teal green
-        hexColor(0x795E26),    // syntaxFunction - brown
-        hexColor(0x267F99),    // syntaxType - steel blue
-        hexColor(0xAF00DB)     // syntaxControlFlow - purple
-    }
+// The ten built-in themes, five light and five dark. Each is a CSS file
+// under resources/themes, compiled into the executable as text
+// (CMakeLists.txt) and read into the theme Tinta draws with when it is
+// first asked for: a sheet read from nothing, so all a built-in theme is
+// stands in its file
+namespace {
+struct BuiltinSheet {
+    const wchar_t* name;
+    const char* css;
 };
+const BuiltinSheet kBuiltinSheets[] = {
+#include "builtin_themes.inc"
+};
+}  // namespace
 
-const int THEME_COUNT = sizeof(THEMES) / sizeof(THEMES[0]);
+const int THEME_COUNT = (int)(sizeof(kBuiltinSheets) / sizeof(kBuiltinSheets[0]));
+
+namespace {
+struct BuiltinMade {
+    std::once_flag once;
+    CustomTheme theme;
+    std::shared_ptr<const css::Sheet> sheet;  // its rules for single elements, for the page (page_style.h)
+};
+BuiltinMade& builtinMade(int index) {
+    static BuiltinMade made[sizeof(kBuiltinSheets) / sizeof(kBuiltinSheets[0])];
+    return made[index < 0 || index >= THEME_COUNT ? 0 : index];
+}
+}  // namespace
+
+const D2DTheme& builtinTheme(int index) {
+    BuiltinMade& m = builtinMade(index);
+    if (index < 0 || index >= THEME_COUNT) index = 0;
+    std::call_once(m.once, [&] {
+        const D2DTheme blank{};
+        const css::ImportSource none = [](std::string_view, std::string_view, std::string&, std::string&) { return false; };
+        m.sheet = compileCssTheme(kBuiltinSheets[index].css, std::string(), false, none, m.theme, &blank).sheet;
+        m.theme.name = kBuiltinSheets[index].name;
+        D2DTheme& t = m.theme.theme;
+        t.name = m.theme.name.c_str();
+        t.fontFamily = m.theme.fontFamily.c_str();
+        // None of its own inherits the main font (themeHeadingFont)
+        t.headingFontFamily = m.theme.headingFontFamily.empty() ? nullptr : m.theme.headingFontFamily.c_str();
+        t.codeFontFamily = m.theme.codeFontFamily.c_str();
+        t.design = 1;  // a theme made from it in Settings takes its design along
+    });
+    return m.theme.theme;
+}
+
+// A built-in theme's sheet as written, for a theme that starts from it
+// with @import "Paper"; null for a name that is none of them
+const char* builtinThemeCss(const std::wstring& name) {
+    for (const BuiltinSheet& sheet : kBuiltinSheets) {
+        if (_wcsicmp(sheet.name, name.c_str()) == 0) return sheet.css;
+    }
+    return nullptr;
+}
+
+// ---- The window's colours (--ui-*, docs/specs/theming.md) ----
+
+D2D1_COLOR_F themeUiText(const D2DTheme& theme) { return theme.uiText.value_or(theme.text); }
+D2D1_COLOR_F themeUiAccent(const D2DTheme& theme) { return theme.uiAccent.value_or(theme.accent); }
+D2D1_COLOR_F themeUiHeading(const D2DTheme& theme) { return theme.uiText.value_or(theme.heading); }
+
+D2D1_COLOR_F themeUiPanel(const D2DTheme& theme, D2D1_COLOR_F own) {
+    if (!theme.uiPanel) return own;
+    D2D1_COLOR_F color = *theme.uiPanel;
+    color.a *= own.a;
+    return color;
+}
+
+D2D1_COLOR_F themeUiBorder(const D2DTheme& theme, D2D1_COLOR_F own, float fade) {
+    if (!theme.uiBorder) return own;
+    D2D1_COLOR_F color = *theme.uiBorder;
+    color.a *= fade;
+    return color;
+}
+
+bool themeColorIsDark(const D2D1_COLOR_F& c) {
+    return 0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b < 0.5f;
+}
+
+bool themeUiDark(const D2DTheme& theme) {
+    return theme.uiPanel ? themeColorIsDark(*theme.uiPanel) : theme.isDark;
+}
 
 // ---- Dynamic theme registry (#82) ----
 //
@@ -265,8 +110,10 @@ const int THEME_COUNT = sizeof(THEMES) / sizeof(THEMES[0]);
 //   ...
 
 #include "settings.h"
+#include "themes_css.h"
 
 #include <shlobj.h>
+#include <algorithm>
 #include <cctype>
 #include <fstream>
 #include <memory>
@@ -276,6 +123,38 @@ const int THEME_COUNT = sizeof(THEMES) / sizeof(THEMES[0]);
 namespace {
 
 std::vector<std::unique_ptr<CustomTheme>> g_customThemes;
+
+// What a themes.ini section leaves unsaid: Paper's colours and faces as
+// they were while themes.ini was the only way to write a theme (4.0.3).
+// The built-in Paper has type sizes, rules and faces of its own since,
+// which a section has no keys for and must not take over
+const D2DTheme& iniBaseTheme() {
+    static const D2DTheme base = [] {
+        D2DTheme t{};
+        t.name = L"Paper";
+        t.fontFamily = L"Segoe UI";
+        t.headingFontFamily = nullptr;
+        t.codeFontFamily = L"Consolas";
+        t.isDark = false;
+        t.background = hexColor(0xF5F1E8);
+        t.text = hexColor(0x3D3329);
+        t.heading = hexColor(0x2A1F16);
+        t.link = hexColor(0xB85A3C);
+        t.code = hexColor(0x6B5344);
+        t.codeBackground = hexColor(0xEDE6DA);
+        t.blockquoteBorder = hexColor(0xC4B8A8);
+        t.accent = hexColor(0xB85A3C);
+        t.syntaxKeyword = hexColor(0x8B4513);
+        t.syntaxString = hexColor(0x3E7D5A);
+        t.syntaxComment = hexColor(0x9A8F80);
+        t.syntaxNumber = hexColor(0xB8860B);
+        t.syntaxFunction = hexColor(0x3B5BA5);
+        t.syntaxType = hexColor(0x8A63A8);
+        t.syntaxControlFlow = hexColor(0x7D4CA0);
+        return t;
+    }();
+    return base;
+}
 
 std::wstring themesIniPath() {
     // Follows the config home: portable beside the exe, else %APPDATA%
@@ -380,6 +259,7 @@ void applyThemeKey(CustomTheme& ct, const std::string& key, const std::string& v
     else if (key == "headingfont") ct.headingFontFamily = utf8ToWideTheme(value);
     else if (key == "codefont") ct.codeFontFamily = utf8ToWideTheme(value);
     else if (key == "dark") t.isDark = (value == "1");
+    else if (key == "design") t.design = atoi(value.c_str()) >= 1 ? 1 : 0;
     else if (key == "background") parseHexColor(value, t.background);
     else if (key == "text") parseHexColor(value, t.text);
     else if (key == "heading") parseHexColor(value, t.heading);
@@ -438,11 +318,17 @@ void writeThemesIni() {
     file << "; Optional bold, italic and bolditalic colour emphasised text;\n";
     file << "; selection tints the selection and hr colours horizontal rules.\n";
     file << "; An empty headingfont= sets headings in font=.\n";
+    file << "; design=1 gives a theme the built-in themes' look (their type sizes,\n";
+    file << "; hairlines and round code blocks) in its own colours; without it a\n";
+    file << "; theme keeps the look themes had up to 4.0.3.\n";
+    file << "; Each theme is also written as themes/<name>.css, which follows its\n";
+    file << "; section here until that file is changed by hand (docs/css-themes.md).\n";
     for (const auto& ct : g_customThemes) {
         const D2DTheme& t = ct->theme;
         file << "\n[theme]\n";
         file << "name=" << wideToUtf8Theme(ct->name) << "\n";
         file << "dark=" << (t.isDark ? 1 : 0) << "\n";
+        if (t.design) file << "design=" << t.design << "\n";
         file << "font=" << wideToUtf8Theme(ct->fontFamily) << "\n";
         // Always written, empty while headings use font=, so the key is
         // there to fill in by hand (#256)
@@ -459,7 +345,10 @@ void writeThemesIni() {
         if (t.italicText) file << "italic=" << colorToHex(*t.italicText) << "\n";
         if (t.boldItalicText) file << "bolditalic=" << colorToHex(*t.boldItalicText) << "\n";
         if (t.selection) file << "selection=" << colorToHex(*t.selection) << "\n";
-        if (t.rule) file << "hr=" << colorToHex(*t.rule) << "\n";
+        // (not one the design worked out: it is worked out again)
+        if (t.rule && !(t.design == 1 && colorToHex(*t.rule) == colorToHex(themeDesignLine(t)))) {
+            file << "hr=" << colorToHex(*t.rule) << "\n";
+        }
         file << "link=" << colorToHex(t.link) << "\n";
         file << "code=" << colorToHex(t.code) << "\n";
         if (t.inlineCode) file << "inlinecode=" << colorToHex(*t.inlineCode) << "\n";
@@ -498,6 +387,7 @@ const char* themesIniTemplate() {
            "; [theme]\n"
            "; name=My theme\n"
            "; dark=0\n"
+           "; design=1                 (the built-in themes' look; leave out for the old)\n"
            "; font=Segoe UI\n"
            "; headingfont=Georgia      (empty: headings use font=)\n"
            "; codefont=Cascadia Mono\n"
@@ -519,20 +409,429 @@ const char* themesIniTemplate() {
            "; syntaxfunction=, syntaxtype=, syntaxcontrolflow= color code blocks\n";
 }
 
+// ---- CSS themes (docs/specs/theming.md) ----
+
+namespace {
+
+struct CssEntry {
+    std::wstring path;
+    // The sheet and the files it imports, with their times as read
+    std::vector<std::pair<std::wstring, FILETIME>> files;
+    std::unique_ptr<CustomTheme> light, dark;  // dark: a sheet that follows Windows
+    std::shared_ptr<const css::Sheet> sheet;
+    std::vector<css::Diagnostic> diagnostics;
+    // The file of a themes.ini section (below): the theme has the section's
+    // name, whatever the file's, and starts from Paper as the section does
+    std::wstring name;
+    bool fromIni = false;
+    int design = 0;  // its section's design=, which a theme made from this one takes along
+};
+std::vector<std::unique_ptr<CssEntry>> g_cssThemes;
+// Themes a reload replaced: copies of a D2DTheme may still point into
+// their strings (print, the chooser's previews), so they stay for the run
+std::vector<std::unique_ptr<CustomTheme>> g_retiredThemes;
+bool g_systemDark = false;
+
+bool fileTime(const std::wstring& path, FILETIME& time) {
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data)) return false;
+    time = data.ftLastWriteTime;
+    return true;
+}
+
+bool readUtf8(const std::wstring& path, std::string& text) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return false;
+    std::stringstream buffer;
+    buffer << file.rdbuf();
+    text = buffer.str();
+    if (text.compare(0, 3, "\xEF\xBB\xBF") == 0) text.erase(0, 3);
+    return true;
+}
+
+CssEntry* cssEntryAt(int index) {
+    const int css = index - THEME_COUNT - (int)g_customThemes.size();
+    return css >= 0 && css < (int)g_cssThemes.size() ? g_cssThemes[css].get() : nullptr;
+}
+
+// Reads the entry's sheet into its light theme, and its dark one when the
+// sheet follows Windows. @import "Paper" or the name of a themes.ini theme
+// starts from that theme; any other import is a file beside the sheet
+void readCssTheme(CssEntry& entry) {
+    entry.files.clear();
+    std::string text;
+    FILETIME time{};
+    fileTime(entry.path, time);
+    entry.files.push_back({entry.path, time});
+    const bool readable = readUtf8(entry.path, text);
+    const css::ImportSource imports = [&](std::string_view name, std::string_view from, std::string& out,
+                                          std::string& file) {
+        const std::wstring wanted = utf8ToWideTheme(std::string(name));
+        if (const char* builtin = builtinThemeCss(wanted)) {
+            out = builtin;
+            file = std::string(name);
+            return true;
+        }
+        for (const auto& custom : g_customThemes) {
+            if (_wcsicmp(custom->name.c_str(), wanted.c_str()) == 0) {
+                out = themeToCss(custom->theme, custom->theme.design == 1);
+                file = std::string(name);
+                return true;
+            }
+        }
+        std::wstring base = utf8ToWideTheme(std::string(from));
+        size_t slash = base.find_last_of(L"\\/");
+        std::wstring path = slash == std::wstring::npos ? wanted : base.substr(0, slash + 1) + wanted;
+        if (!readUtf8(path, out)) return false;
+        FILETIME imported{};
+        fileTime(path, imported);
+        entry.files.push_back({path, imported});
+        file = wideToUtf8Theme(path);
+        return true;
+    };
+    std::wstring name = entry.path.substr(entry.path.find_last_of(L"\\/") + 1);
+    if (name.size() > 4) name.resize(name.size() - 4);  // .css
+    if (!entry.name.empty()) name = entry.name;
+    const D2DTheme* base = entry.fromIni ? &iniBaseTheme() : nullptr;
+    auto light = std::make_unique<CustomTheme>();
+    light->name = name;
+    CssTheme compiled = compileCssTheme(readable ? text : std::string(), wideToUtf8Theme(entry.path), false,
+                                        imports, *light, base);
+    light->sourcePath = entry.path;
+    bindStrings(*light);
+    light->theme.sourcePath = light->sourcePath.c_str();
+    if (entry.fromIni) light->theme.design = entry.design;
+    std::unique_ptr<CustomTheme> dark;
+    if (compiled.lightDark) {
+        dark = std::make_unique<CustomTheme>();
+        dark->name = name;
+        compileCssTheme(text, wideToUtf8Theme(entry.path), true, imports, *dark, base);
+        dark->sourcePath = entry.path;
+        bindStrings(*dark);
+        dark->theme.sourcePath = dark->sourcePath.c_str();
+        if (entry.fromIni) dark->theme.design = entry.design;
+    }
+    if (entry.light) g_retiredThemes.push_back(std::move(entry.light));
+    if (entry.dark) g_retiredThemes.push_back(std::move(entry.dark));
+    entry.light = std::move(light);
+    entry.dark = std::move(dark);
+    entry.sheet = compiled.sheet;
+    entry.diagnostics = std::move(compiled.diagnostics);
+    if (!readable) entry.diagnostics.push_back({css::Diagnostic::Error, wideToUtf8Theme(entry.path), 0, 0, "the file cannot be read"});
+}
+
+// ---- themes.ini sections as CSS files ----
+//
+// Every theme is to be a CSS file. Until themes.ini is read no more, each
+// of its sections is written as <config>\themes\<name>.css and the page is
+// styled from that sheet, as a built-in theme's is from its own. The theme
+// keeps its name and its place in the list.
+//
+// The file follows its section for as long as it stays as Tinta wrote it:
+// a hand edit of themes.ini (#310) or a save from the theme editor writes
+// it again. Its first comment carries a sum of what follows; once the two
+// disagree the file was changed by its owner, and from then on it is the
+// theme: read as any CSS theme is, the section left alone. A sheet of the
+// same name without the comment is somebody's own, and both stay listed.
+// A section taken out of themes.ini takes its unchanged file with it.
+
+const char kIniMark[] = "tinta-themes-ini: ";
+bool g_iniBecomesCss = true;
+
+struct Converted {
+    std::unique_ptr<CssEntry> entry;  // null: the section is drawn without a sheet
+    bool pristine = false;            // the file is as written: the section is the theme
+};
+std::vector<Converted> g_converted;   // one for each of g_customThemes
+
+unsigned sumOf(const std::string& text) {
+    unsigned h = 2166136261u;
+    for (unsigned char c : text) h = (h ^ c) * 16777619u;
+    return h;
+}
+
+// A theme's name as a file's: what a file name cannot hold becomes _
+std::wstring fileSafe(const std::wstring& name) {
+    std::wstring safe;
+    for (wchar_t c : name) safe += c < 32 || wcschr(L"<>:\"/\\|?*", c) ? L'_' : c;
+    while (!safe.empty() && (safe.back() == L' ' || safe.back() == L'.')) safe.pop_back();
+    while (!safe.empty() && safe.front() == L' ') safe.erase(0, 1);
+    return safe.empty() ? L"theme" : safe;
+}
+
+std::string convertedText(const CustomTheme& ct) {
+    const std::string body = themeToCssFile(ct.theme, ct.theme.design == 1);
+    std::string name = wideToUtf8Theme(ct.name);
+    for (size_t at = name.find("*/"); at != std::string::npos; at = name.find("*/", at)) name.replace(at, 2, "* /");
+    char sum[16];
+    snprintf(sum, sizeof(sum), "%08x", sumOf(body));
+    return "/* " + name + "\n"
+           "   Written by Tinta from this theme's section in themes.ini, which it\n"
+           "   follows while it stays as written: change the section, or the theme in\n"
+           "   Settings, and this file is written again. Change anything below and the\n"
+           "   theme is this file: Tinta leaves it alone from then on and reads its\n"
+           "   section no more. What CSS a theme can hold: docs/css-themes.md\n"
+           "   " + kIniMark + sum + " */\n" + body;
+}
+
+// 0: not written by Tinta. 1: written by it and changed since. 2: as written
+int convertedState(const std::string& text) {
+    if (text.compare(0, 2, "/*") != 0) return 0;
+    const size_t end = text.find("*/");
+    const size_t mark = text.find(kIniMark);
+    if (end == std::string::npos || mark == std::string::npos || mark > end) return 0;
+    const std::string sum = text.substr(mark + sizeof(kIniMark) - 1, 8);
+    const size_t body = end + 2 < text.size() && text[end + 2] == '\n' ? end + 3 : end + 2;
+    char now[16];
+    snprintf(now, sizeof(now), "%08x", sumOf(text.substr(body)));
+    return sum == now ? 2 : 1;
+}
+
+bool writeUtf8(const std::wstring& path, const std::string& text) {
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    file << text;
+    file.close();
+    return file.good();
+}
+
+void retire(std::unique_ptr<CssEntry>& entry) {
+    if (!entry) return;
+    if (entry->light) g_retiredThemes.push_back(std::move(entry->light));
+    if (entry->dark) g_retiredThemes.push_back(std::move(entry->dark));
+    entry.reset();
+}
+
+// Writes the files that are missing or follow a changed section, and reads
+// each section's sheet
+void convertIniThemes() {
+    for (auto& converted : g_converted) retire(converted.entry);
+    g_converted.clear();
+    g_converted.resize(g_customThemes.size());
+    const std::wstring config = tintaConfigDir();
+    if (config.empty() || !g_iniBecomesCss) return;
+    const std::wstring dir = config + L"\\themes";
+    std::vector<std::wstring> taken;
+    for (size_t i = 0; i < g_customThemes.size(); ++i) {
+        const CustomTheme& ct = *g_customThemes[i];
+        const std::wstring stem = fileSafe(ct.name);
+        // Two sections that come to one file's name: the first has it
+        bool twice = false;
+        for (const auto& name : taken) twice = twice || _wcsicmp(name.c_str(), stem.c_str()) == 0;
+        if (twice) continue;
+        taken.push_back(stem);
+        const std::wstring path = dir + L"\\" + stem + L".css";
+        const std::string wanted = convertedText(ct);
+        std::string have;
+        int state = 2;
+        if (!readUtf8(path, have)) {
+            CreateDirectoryW(dir.c_str(), nullptr);
+            if (!writeUtf8(path, wanted)) continue;  // nowhere to write: as before, without a sheet
+        } else {
+            state = convertedState(have);
+            if (state == 0) continue;
+            if (state == 2 && have != wanted) writeUtf8(path, wanted);
+        }
+        auto entry = std::make_unique<CssEntry>();
+        entry->path = path;
+        entry->name = ct.name;
+        entry->fromIni = true;
+        entry->design = ct.theme.design;
+        if (state == 2) {
+            // The section is the theme, as it always was; its sheet is for
+            // the page. One in the built-in themes' design starts from theirs
+            const css::ImportSource builtins = [](std::string_view name, std::string_view, std::string& out, std::string& file) {
+                const char* sheet = builtinThemeCss(utf8ToWideTheme(std::string(name)));
+                if (!sheet) return false;
+                out = sheet;
+                file = std::string(name);
+                return true;
+            };
+            CustomTheme unused;
+            entry->sheet = compileCssTheme(wanted, wideToUtf8Theme(path), false, builtins, unused, &iniBaseTheme()).sheet;
+            FILETIME time{};
+            fileTime(path, time);
+            entry->files.push_back({path, time});
+        } else {
+            readCssTheme(*entry);
+        }
+        g_converted[i].pristine = state == 2;
+        g_converted[i].entry = std::move(entry);
+    }
+}
+
+// The sheet of a themes.ini section, when it has one
+Converted* convertedAt(int index) {
+    const int custom = index - THEME_COUNT;
+    if (custom < 0 || custom >= (int)g_converted.size() || !g_converted[custom].entry) return nullptr;
+    return &g_converted[custom];
+}
+
+// A theme that is its file: a CSS theme, or a section's file changed by hand
+CssEntry* fileThemeAt(int index) {
+    if (Converted* converted = convertedAt(index)) return converted->pristine ? nullptr : converted->entry.get();
+    return cssEntryAt(index);
+}
+
+bool isSectionFile(const std::wstring& path) {
+    for (const auto& converted : g_converted) {
+        if (converted.entry && _wcsicmp(converted.entry->path.c_str(), path.c_str()) == 0) return true;
+    }
+    return false;
+}
+
+void loadCssThemes() {
+    g_cssThemes.clear();
+    const std::wstring dir = tintaConfigDir();
+    if (dir.empty()) return;
+    WIN32_FIND_DATAW found{};
+    HANDLE search = FindFirstFileW((dir + L"\\themes\\*.css").c_str(), &found);
+    if (search == INVALID_HANDLE_VALUE) return;
+    std::vector<std::wstring> paths;
+    do {
+        if (!(found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) paths.push_back(dir + L"\\themes\\" + found.cFileName);
+    } while (FindNextFileW(search, &found));
+    FindClose(search);
+    std::sort(paths.begin(), paths.end(), [](const std::wstring& a, const std::wstring& b) { return _wcsicmp(a.c_str(), b.c_str()) < 0; });
+    const std::wstring ini = themesIniPath();
+    const bool iniThere = !ini.empty() && GetFileAttributesW(ini.c_str()) != INVALID_FILE_ATTRIBUTES;
+    for (const auto& path : paths) {
+        if (isSectionFile(path)) continue;  // listed where its section stands
+        // A section's file, still as Tinta wrote it, whose section has gone
+        // from themes.ini (taken out, or given another name): it goes with
+        // it, as the theme did before. With no themes.ini at all the files
+        // are the themes; and one its owner changed is always kept
+        std::string text;
+        if (iniThere && g_iniBecomesCss && readUtf8(path, text) && convertedState(text) == 2) {
+            DeleteFileW(path.c_str());
+            continue;
+        }
+        auto entry = std::make_unique<CssEntry>();
+        entry->path = path;
+        readCssTheme(*entry);
+        g_cssThemes.push_back(std::move(entry));
+    }
+}
+
+}  // namespace
+
+void themesSetSystemDark(bool dark) { g_systemDark = dark; }
+
+bool& themesIniBecomesCss() { return g_iniBecomesCss; }
+
+bool themeFollowsSystem(int index) {
+    const CssEntry* entry = fileThemeAt(index);
+    return entry && entry->dark;
+}
+
+std::wstring themeSourcePath(int index) {
+    const CssEntry* entry = fileThemeAt(index);
+    return entry ? entry->path : std::wstring();
+}
+
+bool themeReloadIfChanged(int index) {
+    Converted* converted = convertedAt(index);
+    CssEntry* entry = converted ? converted->entry.get() : cssEntryAt(index);
+    if (!entry) return false;
+    bool changed = false;
+    for (const auto& file : entry->files) {
+        FILETIME now{};
+        if (!fileTime(file.first, now) || CompareFileTime(&now, &file.second) != 0) changed = true;
+    }
+    if (!changed) return false;
+    if (converted) {
+        // A section's file: changed by hand it is the theme from now on,
+        // and one taken away is written again
+        convertIniThemes();
+        loadCssThemes();
+    } else {
+        readCssTheme(*entry);
+    }
+    return true;
+}
+
+std::vector<std::wstring> themeProblems(int index) {
+    std::vector<std::wstring> problems;
+    const CssEntry* entry = fileThemeAt(index);
+    if (!entry) return problems;
+    for (const auto& d : entry->diagnostics) {
+        std::wstring file = utf8ToWideTheme(d.file);
+        size_t slash = file.find_last_of(L"\\/");
+        if (slash != std::wstring::npos) file = file.substr(slash + 1);
+        std::wstring line = file;
+        if (d.line > 0) line += L", line " + std::to_wstring(d.line);
+        problems.push_back(line + L": " + utf8ToWideTheme(d.message));
+    }
+    return problems;
+}
+
+std::shared_ptr<const css::Sheet> themeSheet(int index) {
+    // A built-in theme's rules reach the page as a sheet of one's own does
+    if (index >= 0 && index < THEME_COUNT) {
+        builtinTheme(index);
+        return builtinMade(index).sheet;
+    }
+    if (const Converted* converted = convertedAt(index)) return converted->entry->sheet;
+    const CssEntry* entry = cssEntryAt(index);
+    return entry ? entry->sheet : nullptr;
+}
+
+std::string themeSheetCss(int index) {
+    const std::shared_ptr<const css::Sheet> sheet = themeSheet(index);
+    return sheet ? css::serialize(*sheet) : std::string();
+}
+
 int themeCount() {
-    return THEME_COUNT + (int)g_customThemes.size();
+    return THEME_COUNT + (int)g_customThemes.size() + (int)g_cssThemes.size();
 }
 
 const D2DTheme& themeAt(int index) {
     if (index >= 0 && index < THEME_COUNT) return THEMES[index];
     int custom = index - THEME_COUNT;
     if (custom >= 0 && custom < (int)g_customThemes.size()) {
-        return g_customThemes[custom]->theme;
+        // Its file, once that was changed by hand; else the section itself
+        const Converted* converted = convertedAt(index);
+        if (!converted || converted->pristine) return g_customThemes[custom]->theme;
+    }
+    if (const CssEntry* entry = fileThemeAt(index)) {
+        return g_systemDark && entry->dark ? entry->dark->theme : entry->light->theme;
     }
     return THEMES[0];
 }
 
+D2DTheme themeAsBase(int index) {
+    D2DTheme t = themeAt(index);
+    // A hairline that is only what the design works out from the page and
+    // the ink is no choice of the theme's: left out, it is worked out again
+    // from the colours the new theme is saved with
+    if (t.design == 1 && t.rule && colorToHex(*t.rule) == colorToHex(themeDesignLine(t))) t.rule.reset();
+    return t;
+}
+
+int themeIndexNamed(const std::string& name, int index) {
+    if (name.empty()) return index;
+    const std::wstring wanted = utf8ToWideTheme(name);
+    if (index >= 0 && index < themeCount() && _wcsicmp(themeAt(index).name, wanted.c_str()) == 0) return index;
+    for (int i = 0; i < themeCount(); ++i) {
+        if (_wcsicmp(themeAt(i).name, wanted.c_str()) == 0) return i;
+    }
+    return -1;
+}
+
+std::string themeNameAt(int index) {
+    return index >= 0 && index < themeCount() ? wideToUtf8Theme(themeAt(index).name) : std::string();
+}
+
+static void loadCustomThemesIni();
+
 void loadCustomThemes() {
+    loadCustomThemesIni();
+    convertIniThemes();
+    loadCssThemes();
+}
+
+static void loadCustomThemesIni() {
+    // Copies of a theme in use still point into these themes' strings
+    for (auto& old : g_customThemes) g_retiredThemes.push_back(std::move(old));
     g_customThemes.clear();
     g_themesIniTime = themesIniTimeNow();
     std::wstring path = themesIniPath();
@@ -543,6 +842,23 @@ void loadCustomThemes() {
     std::unique_ptr<CustomTheme> current;
     auto finalize = [&]() {
         if (current && !current->name.empty()) {
+            if (current->theme.design == 1) {
+                // The built-in themes' design: their type sizes, the same in
+                // all ten. Its rules are in the section's file (convertedText)
+                const D2DTheme& paper = builtinTheme(0);
+                D2DTheme& t = current->theme;
+                t.bodySize = paper.bodySize;
+                t.codeSize = paper.codeSize;
+                t.lineHeight = paper.lineHeight;
+                for (int i = 0; i < 6; ++i) {
+                    t.headingSize[i] = paper.headingSize[i];
+                    t.headingWeight[i] = paper.headingWeight[i];
+                    t.headingItalic[i] = paper.headingItalic[i];
+                }
+                // Its hairline, where it names none: worked out from its page
+                // and ink, for what draws from the theme and not the sheet
+                if (!t.rule) t.rule = themeDesignLine(t);
+            }
             bindStrings(*current);
             g_customThemes.push_back(std::move(current));
         }
@@ -557,7 +873,7 @@ void loadCustomThemes() {
         if (line[0] == '[') {
             finalize();
             current = std::make_unique<CustomTheme>();
-            current->theme = THEMES[0];  // colors default to Paper
+            current->theme = iniBaseTheme();  // what it leaves unsaid is Paper's, as of old
             current->fontFamily = L"Segoe UI";
             current->codeFontFamily = L"Consolas";
             continue;
@@ -589,14 +905,31 @@ int saveCustomTheme(const D2DTheme& t, const std::wstring& name,
     if (!slot) {
         g_customThemes.push_back(std::make_unique<CustomTheme>());
         slot = g_customThemes.back().get();
-        index = themeCount() - 1;
+        index = THEME_COUNT + (int)g_customThemes.size() - 1;  // CSS themes stand after the sections
     }
     slot->name = name;
     slot->fontFamily = fontFamily.empty() ? L"Segoe UI" : fontFamily;
     slot->headingFontFamily = headingFontFamily;  // empty inherits font
     slot->codeFontFamily = codeFontFamily.empty() ? L"Consolas" : codeFontFamily;
     slot->theme = t;
+    // A section's colours are RRGGBB: a mark's translucent ground (a dark
+    // built-in theme's) is kept as what it comes to on the page
+    if (auto& mark = slot->theme.highlightBackground; mark && mark->a < 1.0f) {
+        const D2D1_COLOR_F page = t.background;
+        mark = D2D1::ColorF(page.r + (mark->r - page.r) * mark->a, page.g + (mark->g - page.g) * mark->a,
+                            page.b + (mark->b - page.b) * mark->a, 1.0f);
+    }
     bindStrings(*slot);
     writeThemesIni();
+    // Read back, so that the theme is what its section holds: a built-in
+    // theme it was made from has type sizes and rules that no key keeps.
+    // Its CSS file follows, and a sheet of that name is listed where the
+    // section stands
+    loadCustomThemesIni();
+    convertIniThemes();
+    loadCssThemes();
+    for (size_t i = 0; i < g_customThemes.size(); i++) {
+        if (_wcsicmp(g_customThemes[i]->name.c_str(), name.c_str()) == 0) return THEME_COUNT + (int)i;
+    }
     return index;
 }
