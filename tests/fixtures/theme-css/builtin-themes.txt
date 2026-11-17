@@ -60,7 +60,7 @@
   sizes 0 0 0 ui - - - - - src -
 10 White font=Segoe UI heading=Segoe UI Variable Display code=Consolas dark=0
   FFFFFF/1.000 000000/1.000 000000/1.000 0B57D0/1.000 000000/1.000 F2F2F2/1.000 BDBDBD/1.000 0B57D0/1.000
-  0000FF/1.000 A31515/1.000 008000/1.000 098658/1.000 795E26/1.000 267F99/1.000 AF00DB/1.000
+  0000FF/1.000 A31515/1.000 008000/1.000 087A50/1.000 795E26/1.000 227489/1.000 AF00DB/1.000
   inline - - mark - - bold - - - sel - rule E0E0E0/1.000 caret -
   h -:34:0:0 -:25:600:0 -:20:600:0 -:17:600:0 -:15:600:0 -:13:600:0
   sizes 0 0 0 ui - - - - - src -

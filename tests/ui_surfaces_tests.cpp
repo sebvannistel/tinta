@@ -119,38 +119,38 @@ void themeChooser(App& app) {
     using namespace uiscale;
     const float s = app.contentScale;
 
-    // The ten built-in themes: five and five, nothing to scroll
+    // The eleven built-in themes (Personal: White is a sixth light one): nothing to scroll
     applyTheme(app, 0);
     Frame builtin = chooser(app, 1050, 800, true);
-    check(themeCount() == 10 && themeChooserRows() == 5, "ten built-in themes are five rows of cards");
+    check(themeCount() == 11 && themeChooserRows() == 6, "eleven built-in themes are six rows of cards");
     chooserStructure(app, "built-in themes");
     check(app.themeChooserScrollMax == 0.0f && app.themeChooserScroll == 0.0f &&
-              about(height(app.themeChooserPanel), (sp24 * 2 + 44.0f + 24.0f + 5 * 72.0f + 4 * sp8 + 32.0f) * s),
-          "with ten themes the dialog is as tall as its five rows and does not scroll");
+              about(height(app.themeChooserPanel), (sp24 * 2 + 44.0f + 24.0f + 6 * 72.0f + 5 * sp8 + 32.0f) * s),
+          "with eleven themes the dialog is as tall as its six rows and does not scroll");
     int shown = 0;
     for (const auto& hit : app.themeChooserHits) shown += hit.second >= 0;
-    check(shown == 10, "all ten cards are in reach");
+    check(shown == 11, "all eleven cards are in reach");
     shot(app, builtin, "chooser-builtin");
     wheel(app, -1, 500, 400);
     check(app.themeChooserScroll == 0.0f, "the wheel moves nothing when all cards fit");
-    // The same ten in a short window scroll
+    // The same eleven in a short window scroll
     chooser(app, 1050, 460);
     chooserStructure(app, "built-in themes in a short window");
-    check(app.themeChooserScrollMax > 0.0f, "in a short window the ten cards scroll");
+    check(app.themeChooserScrollMax > 0.0f, "in a short window the eleven cards scroll");
 
-    // Eighteen more themes: twenty light ones in one column
+    // Eighteen more themes: twenty-one light ones in one column
     std::error_code ec;
     fs::copy_file(g_frames.parent_path() / "fixture-themes.ini", g_frames.parent_path() / "themes.ini",
                   fs::copy_options::overwrite_existing, ec);
     loadCustomThemes();
     updateOverlayFormats(app);  // the cards' specimens are made anew
-    check(themeCount() == 28 && themeChooserRows() == 20, "the fixture's themes make twenty rows of light cards");
+    check(themeCount() == 29 && themeChooserRows() == 21, "the fixture's themes make twenty-one rows of light cards");
     applyTheme(app, 0);
     Frame many = chooser(app, 1050, 800, true);
-    chooserStructure(app, "28 themes");
+    chooserStructure(app, "29 themes");
     const D2D1_RECT_F view = app.themeChooserViewport;
     check(app.themeChooserScrollMax > 500.0f * s && app.themeChooserScroll == 0.0f,
-          "with twenty rows the columns have more than fits, and open at the top with the first theme in use");
+          "with twenty-one rows the columns have more than fits, and open at the top with the first theme in use");
     check(chooserHit(app, 0) && about(height(*chooserHit(app, 0)), 72.0f * s) && !chooserHit(app, themeCount() - 4),
           "the first card is whole and the last light one out of reach");
     shot(app, many, "chooser-many");
@@ -166,7 +166,7 @@ void themeChooser(App& app) {
           "the header, the columns' labels and the footer stay where they are");
     for (int i = 0; i < 60; i++) wheel(app, -1, view.left + 40, view.top + 40);
     Frame end = chooser(app, 1050, 800);
-    chooserStructure(app, "28 themes scrolled to the end");
+    chooserStructure(app, "29 themes scrolled to the end");
     int lastLight = -1;
     for (int i = 0; i < themeCount(); i++)
         if (!themeAt(i).isDark) lastLight = i;
