@@ -100,6 +100,7 @@ void saveSettings(const Settings& settings) {
     file << "zenWidthPct=" << settings.zenWidthPct << "\n";
     file << "headingRules=" << (settings.headingRules ? 1 : 0) << "\n";
     file << "wrapCode=" << (settings.wrapCode ? 1 : 0) << "\n";
+    file << "middleClickScroll=" << (settings.middleClickScroll ? 1 : 0) << "\n";
     file << "foldSections=" << (settings.foldSections ? 1 : 0) << "\n";
     file << "foldOnOpen=" << (settings.foldOnOpen ? 1 : 0) << "\n";
     file << "openMode=" << openModeName(settings.openMode) << "\n";
@@ -375,6 +376,8 @@ Settings loadSettings() {
             settings.headingRules = (value == "1");
         } else if (key == "wrapCode") {
             settings.wrapCode = (value != "0");
+        } else if (key == "middleClickScroll") {
+            settings.middleClickScroll = (value != "0");
         } else if (key == "foldSections") {
             settings.foldSections = (value == "1");
         } else if (key == "foldOnOpen") {

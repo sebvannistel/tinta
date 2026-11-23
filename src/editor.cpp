@@ -37,6 +37,19 @@
 
 #define TIMER_EDITOR_REPARSE 2
 
+// Keep counts, not DirectWrite layouts, for the previous source revision.
+// A key normally changes one line; the unchanged prefix and suffix keep
+// their counts even when inserting/deleting a newline moves their offsets.
+// Retaining the COM objects also prevents a released format's address
+// being reused and mistaken for the format that produced these counts.
+struct EditorRowMetrics {
+    std::wstring text;
+    std::vector<size_t> starts, rows;
+    Microsoft::WRL::ComPtr<IDWriteTextFormat> format;
+    Microsoft::WRL::ComPtr<IDWriteFontFallback> fallback;
+    float width = -1, charWidth = 0;
+};
+
 // Markdown assists (defined near the char handler)
 static void editorToggleInlineMark(App& app, HWND hwnd,
                                    const std::wstring& mark);
@@ -280,7 +293,10 @@ static void rebuildEditorRowMetrics(App& app) {
     app.editorRowStarts.clear();
     app.editorTotalRows = 0;
     app.editorRowMetricsWidth = -1.0f;
-    if (!editorWrapOn(app) || !app.editMode || editorLiveOn(app)) return;
+    if (!editorWrapOn(app) || !app.editMode || editorLiveOn(app)) {
+        app.editorRowMetrics.reset();
+        return;
+    }
 
     float maxTextWidth = editorTextMaxWidth(app);
     app.editorRowMetricsWidth = maxTextWidth;
@@ -288,6 +304,24 @@ static void rebuildEditorRowMetrics(App& app) {
         : (app.editorTextFormat ? app.editorTextFormat->GetFontSize() * 0.6f : 10.0f);
 
     size_t lineCount = app.editorLineStarts.size();
+    if (!app.editorRowMetrics) app.editorRowMetrics = std::make_shared<EditorRowMetrics>();
+    EditorRowMetrics& previous = *app.editorRowMetrics;
+    const size_t oldCount = previous.starts.size();
+    size_t prefix = 0, suffix = 0;
+    if (previous.width == maxTextWidth && previous.charWidth == charWidth &&
+        previous.format.Get() == app.editorTextFormat && previous.fallback.Get() == app.fontFallback) {
+        auto sameLine = [&](size_t now, size_t old) {
+            const size_t start = previous.starts[old];
+            const size_t end = old + 1 < oldCount ? previous.starts[old + 1] - 1 : previous.text.size();
+            return std::wstring_view(app.editorText.data() + app.editorLineStarts[now], getLineLength(app, now)) ==
+                   std::wstring_view(previous.text.data() + start, end - start);
+        };
+        while (prefix < lineCount && prefix < oldCount && sameLine(prefix, prefix)) ++prefix;
+        while (suffix < lineCount - prefix && suffix < oldCount - prefix &&
+               sameLine(lineCount - suffix - 1, oldCount - suffix - 1)) ++suffix;
+    }
+    std::vector<size_t> rowCounts(lineCount, 1);
+    bool measured = true;
     app.editorRowStarts.reserve(lineCount + 1);
     app.editorRowStarts.push_back(0);
     for (size_t i = 0; i < lineCount; i++) {
@@ -296,20 +330,39 @@ static void rebuildEditorRowMetrics(App& app) {
         // full-width glyph advances (2x the ASCII cell) — skip the layout
         // for the common short line.
         size_t rows = 1;
-        if (lineLen > 0 && (float)lineLen * charWidth * 2.0f > maxTextWidth) {
+        if (i < prefix) {
+            rows = previous.rows[i];
+        } else if (i >= lineCount - suffix) {
+            rows = previous.rows[oldCount - (lineCount - i)];
+        } else if (lineLen > 0 && (float)lineLen * charWidth * 2.0f > maxTextWidth) {
             IDWriteTextLayout* layout =
                 createEditorLineLayout(app, app.editorLineStarts[i], lineLen);
             if (layout) {
                 DWRITE_TEXT_METRICS tm{};
                 if (SUCCEEDED(layout->GetMetrics(&tm)) && tm.lineCount > 0) {
                     rows = tm.lineCount;
+                } else {
+                    measured = false;
                 }
                 layout->Release();
+            } else {
+                measured = false;
             }
         }
+        rowCounts[i] = rows;
         app.editorRowStarts.push_back(app.editorRowStarts.back() + rows);
     }
     app.editorTotalRows = app.editorRowStarts.back();
+    previous.text = app.editorText;
+    previous.starts = app.editorLineStarts;
+    previous.rows = std::move(rowCounts);
+    previous.width = maxTextWidth;
+    previous.charWidth = charWidth;
+    previous.format = app.editorTextFormat;
+    previous.fallback = app.fontFallback;
+    // A failed layout's one-row fallback is only for this pass. Retry it
+    // next time rather than treating it as a successful cached measure.
+    if (!measured) app.editorRowMetrics.reset();
 }
 
 // Rebuild row metrics if the wrap width changed (resize, zoom, splitter,
@@ -1020,6 +1073,76 @@ static void editorEditAtCarets(App& app, const std::function<void(size_t)>& edit
         }
     }
     editorStoreCarets(app, std::move(carets), primary);
+}
+
+// Ctrl+Backspace and Ctrl+Delete take a word (#330): the spaces and ASCII
+// punctuation beside the caret, then the run a double click would select, a
+// word of letters or a run of Chinese apart. No further than the caret's own
+// line or the next caret; at a line's edge the line break alone. A selection
+// goes as Backspace takes it.
+static size_t editorDeleteWordStart(const App& app, size_t pos, size_t floor) {
+    while (pos > floor && editorCharClass(app.editorText[pos - 1]) == 0) --pos;
+    if (pos > floor) {
+        const int kind = editorCharClass(app.editorText[pos - 1]);
+        while (pos > floor && editorCharClass(app.editorText[pos - 1]) == kind) --pos;
+    }
+    return pos;
+}
+
+static size_t editorDeleteWordEnd(const App& app, size_t pos, size_t ceiling) {
+    while (pos < ceiling && editorCharClass(app.editorText[pos]) == 0) ++pos;
+    if (pos < ceiling) {
+        const int kind = editorCharClass(app.editorText[pos]);
+        while (pos < ceiling && editorCharClass(app.editorText[pos]) == kind) ++pos;
+    }
+    return pos;
+}
+
+static void editorDeleteWord(App& app, bool forward) {
+    std::vector<App::EditorCaret> carets;
+    if (!app.editorExtraCarets.empty()) {
+        // The carets as the round below meets them, in the document's order
+        editorStoreCarets(app, editorAllCarets(app), app.editorExtraCarets.size());
+        carets = editorAllCarets(app);
+        std::sort(carets.begin(), carets.end(), [](const App::EditorCaret& a, const App::EditorCaret& b) {
+            return caretStart(a) < caretStart(b);
+        });
+    }
+    editorEditAtCarets(app, [&](size_t rank) {
+        app.editorDesiredCol = -1;
+        if (app.editorHasSelection) {
+            editorDeleteSelection(app);
+            return;
+        }
+        const size_t at = app.editorCursorPos;
+        size_t from = at, to = at;
+        if (forward) {
+            if (at >= app.editorText.size()) return;
+            if (app.editorText[at] == L'\n') {
+                to = at + 1;
+            } else {
+                size_t ceiling = std::min(app.editorText.find(L'\n', at), app.editorText.size());
+                if (rank + 1 < carets.size()) ceiling = std::min(ceiling, caretStart(carets[rank + 1]));
+                to = editorDeleteWordEnd(app, at, ceiling);
+            }
+        } else {
+            if (at == 0) return;
+            if (app.editorText[at - 1] == L'\n') {
+                from = at - 1;
+            } else {
+                const size_t lineBreak = app.editorText.rfind(L'\n', at - 1);
+                size_t floor = lineBreak == std::wstring::npos ? 0 : lineBreak + 1;
+                if (rank > 0 && rank < carets.size()) floor = std::max(floor, caretEnd(carets[rank - 1]));
+                from = editorDeleteWordStart(app, at, floor);
+            }
+        }
+        if (from >= to) return;
+        const std::wstring deleted = app.editorText.substr(from, to - from);
+        app.editorText.erase(from, to - from);
+        app.editorCursorPos = from;
+        pushUndo(app, App::EditAction::Delete, from, deleted, at, from);
+        rebuildLineStarts(app);
+    });
 }
 
 // Moves every caret with a one-caret motion, then merges those that meet
@@ -1909,6 +2032,7 @@ void exitEditMode(App& app) {
     app.clearEditorLineLayoutCache();
     app.editorText.clear();
     app.editorLineStarts.clear();
+    app.editorRowMetrics.reset();
     ++app.editorTextRevision;
     app.editorExtraCarets.clear();
     app.undoStack.clear();
@@ -3054,6 +3178,18 @@ void handleEditorKeyDown(App& app, HWND hwnd, WPARAM wParam) {
         return;
     }
 
+    // Ctrl+Backspace and Ctrl+Delete take the word before and after the
+    // caret. The source knew neither: Ctrl+Delete did nothing, and
+    // Ctrl+Backspace typed the character Windows makes of it, a DEL nobody
+    // sees, into the file (#330)
+    if (ctrl && (wParam == VK_BACK || wParam == VK_DELETE)) {
+        editorDeleteWord(app, wParam == VK_DELETE);
+        scheduleReparse(app);
+        editorEnsureCursorVisible(app);
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return;
+    }
+
     if (ctrl) {
         switch (wParam) {
             case 'S':
@@ -3976,6 +4112,8 @@ static void editorCharInputAtCaret(App& app, HWND hwnd, WPARAM wParam) {
 
     if (ch == 27) return; // ESC handled in KeyDown
     if (ch < 32 && ch != L'\n') return; // Ignore other control chars
+    // Ctrl+Backspace's character: the key-down took the word (#330)
+    if (ch == 0x7F) return;
 
     // A quote, bracket or Markdown marker typed over a selection wraps it
     // (#251); the assists switch turns this off with the other helpers
