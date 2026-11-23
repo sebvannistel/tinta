@@ -55,16 +55,19 @@ jobs:
             - Portable: download `tinta.exe` below and run it (SmartScreen may ask: "More info", then "Run anyway")
             - Optionally run `tinta.exe /register` to register Markdown, Mermaid and PlantUML files
 
-            A fix release for 4.1.0, with one new setting. For citations, papers and themes in CSS, new in 4.1, see the [v4.1.0 notes](https://github.com/oipoistar/tinta/releases/tag/v4.1.0).
+            Middle-click autoscroll, F3 and Ctrl+PgDn for the next match and the next tab, font names in the interface's language, a faster start, and a fix for Ctrl+Backspace in Source. For citations, papers and themes in CSS, new in 4.1, see the [v4.1.0 notes](https://github.com/oipoistar/tinta/releases/tag/v4.1.0).
 
             ### Added
-            - Settings > Editor > Open Markdown files in: Reading, Live or Source. With Live or Source a Markdown file comes up in the editor however it is opened, at the place it was left at; `Esc` still returns to the reading view. Kept as `openMode=` in `settings.ini`. Requested by @Scawer132 (#322)
+            - Middle-click autoscroll: click the mouse wheel on the page or on the editor's text and the view scrolls towards the pointer, faster the further away it is, until a click or a key; or hold the wheel and drag. `middleClickScroll=0` in `settings.ini` turns it off. Suggested by @fengctm (#331)
+            - F3 and Shift+F3 go to the next and the previous search match; with the find bar closed, F3 opens it on the word searched last. Requested by @stmuecke (#335)
+            - Ctrl+PgDn and Ctrl+PgUp go to the next and the previous tab. Requested by @stmuecke (#334)
+
+            ### Changed
+            - The theme editor's font list names fonts in the interface's language, as Windows' own font lists do: Chinese fonts by their Chinese names in a Chinese interface. Reported by @evitca (#332)
+            - Tinta starts faster: a small file's first frame is drawn about 15% sooner, and a file with a 10,000-line code block in half the time. (#329)
 
             ### Fixed
-            - Ctrl+Insert, Shift+Insert and Shift+Delete copy, paste and cut wherever Ctrl+C, Ctrl+V and Ctrl+X do. Shift+Insert pasted nothing outside Live, and Shift+Delete deleted without keeping the text. Reported by @tferi99 (#320)
-            - A word typed into the find bar stands on the bar's line whatever font draws it; Chinese in a face set with `cjkFont=` stood low and cut off. Reported by @TiegenFang (#319)
-            - With the find bar open, a drag on the page selects text in Source, Live and the reading view. Reported by @TiegenFang (#319)
-            - In Live the find bar stands over the middle of the page, not as a sliver beside the tool rail.
+            - In Source, Ctrl+Backspace typed an invisible character into the file instead of deleting a word. Ctrl+Backspace and Ctrl+Delete now delete the word before and after the caret. Reported by @Fallgrim (#330)
 
             ### What's included
             - Export as HTML, DOCX, or PDF, plus optional Pandoc formats

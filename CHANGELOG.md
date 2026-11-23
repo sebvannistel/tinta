@@ -1,5 +1,37 @@
 # Changelog
 
+## [v4.1.3] - 2026-11-21
+
+### Added
+- Middle-click autoscroll: a click of the mouse wheel on the page or on the editor's text leaves a mark, and the view scrolls towards the pointer, faster the further the pointer is from the mark and not at all while it rests on it. A page wider than its window goes sideways the same way. Any click, any key or the wheel ends it; with the wheel kept down and dragged, it ends where the button is let go. It works in the reading view, on the page beside the editor, in Live and on the source's text; a tab still closes with a middle click and a sheet still pans. `middleClickScroll=0` in `settings.ini` turns it off. Suggested by @fengctm (#331)
+- F3 and Shift+F3 go to the next and the previous search match, from the find bar or from the text beside it. With the bar closed, F3 opens it again on the word searched last, at the match after the one it was closed on. A command bound to F3 in a Custom shortcut profile keeps the key. Requested by @stmuecke (#335)
+- Ctrl+PgDn and Ctrl+PgUp go to the next and the previous tab, as Ctrl+Tab and Ctrl+Shift+Tab do, from the reading view and from the editor. Requested by @stmuecke (#334)
+
+### Changed
+- The theme editor's font list names each family in the interface's language where the font has such a name, as Windows' own font lists do: 微软雅黑 for Microsoft YaHei in a Chinese interface, and likewise in Japanese and Korean. The list is sorted as that language sorts. A theme still keeps the family's English name, and one written by hand may use either. Reported by @evitca (#332)
+- Tinta starts faster: the first frame of a small file is drawn in 54 ms where it took 64, and a file with a 10,000-line code block in 224 ms where it took 455. The software renderer is set up beside the window, four system libraries load when they are first needed, and equal pieces of a code block share one layout. (#329)
+
+### Fixed
+- In Source, Ctrl+Backspace deleted nothing and typed an invisible character into the text and, with the next save, into the file: the count of characters went up with every press. Ctrl+Backspace and Ctrl+Delete now delete the word before and after the caret, at every caret, and no further than the caret's line. A note on the page had the same fault. Files the key was used in before may still hold those characters. Reported by @Fallgrim (#330)
+
+## [v4.1.2] - 2026-11-19
+
+### Added
+- Tables written in HTML are drawn as tables: `<table>`, `<thead>`, `<tbody>`, `<tfoot>`, `<tr>`, `<th>`, `<td>` and `<caption>`, with `rowspan` and `colspan`, rows left without a `</tr>` and `<br>` in a cell. Their tags were dropped, so the cells' text ran together and lay over the paragraph after it. The HTML export keeps the joined cells and Word gets them as merged cells. A cell holds inline content, as a pipe table's does, and such a table is not edited in place. Reported by @suhail-enosis (#325)
+- Long lines in code blocks wrap at the block's edge, at a space or inside a word that has none, and keep their colours over the rows. Selecting, copying and searching see one line. A block grew as wide as its longest line and the page scrolled sideways with it. Print and PDF wrap too, where a block with a long line was shrunk whole to fit the paper, and the HTML export's `pre` wraps. Settings > Appearance > Wrap long lines in code blocks turns it off; `settings.ini` keeps it as `wrapCode=`. Reported by @TiegenFang (#324)
+- Settings > General > Reopen tabs from last time. Off, a file opened from Explorer opens alone and a launch with no file shows the start page; pinned tabs still come back, and files opened afterwards join the window as tabs as before. `settings.ini` keeps it as `reopenTabs=`, and on is how it was. Requested by @aweib888 (#323)
+
+### Changed
+- Typing in Source with word wrap on is about twenty times faster in a long document: 30,000 wrapped lines took 142 ms a key and take 6. Only the lines a key changes are measured again. (#328)
+- A document with many centred or right-aligned table cells is laid out faster, 10,000 small tables in 0.8 s where they took 2.3 s. (#328)
+
+### Fixed
+- A flowchart subgraph is laid out along its own `direction`: in a `flowchart LR` the steps of a group with `direction TB` ran left to right. As in Mermaid, a subgraph with a node linked to the outside takes its parent's direction. The boxes of neighbouring groups no longer run into each other. Reported by @JiangHe12 (#326)
+- In `bash`, `sh`, `zsh` and `python` code blocks `//` and `/*` do not start a comment: a URL, a path, a glob or a floor division coloured the rest of its line as one, and `ls /opt/*` the lines after it. By @sudowardo (#327)
+- A code block over a page break printed the row at the break twice, at the foot of its page and again over the top margin of the next. Print, the PDF export and the preview all showed it.
+- A printed page is clipped to its text: a code block's card, a table's bands, a quote's bar and a diagram cut by a page break ran on through the margins to the paper's edge. A break no longer leaves a box's top edge or a table band alone on a page.
+- In an HTML block, runs of spaces and line breaks read as one space, so a `<div>` or `<p>` written over several lines is one paragraph, and `&lt;`, `&gt;`, `&amp;`, `&quot;`, `&apos;`, `&nbsp;` and numbered references are the characters they name.
+
 ## [v4.1.1] - 2026-11-14
 
 ### Added

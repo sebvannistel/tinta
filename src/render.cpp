@@ -318,6 +318,33 @@ static void rollbackTo(App& app, const LayoutSnapshot& s) {
     app.scrollAnchors.resize(s.scrollAnchors);
 }
 
+// Horizontal alignment only changes rectangles added since the snapshot.
+// Buckets are sorted by top, but cells can insert lines before a preceding
+// cell's wrapped lines. Bound the search by the new rectangles' actual tops
+// rather than assuming their buckets form a suffix of the document.
+static void refreshBuckets(App& app, const LayoutSnapshot& from) {
+    if (from.textRects >= app.textRects.size()) return;
+    float low = std::numeric_limits<float>::max();
+    float high = std::numeric_limits<float>::lowest();
+    for (size_t i = from.textRects; i < app.textRects.size(); ++i) {
+        low = std::min(low, app.textRects[i].rect.top);
+        high = std::max(high, app.textRects[i].rect.top);
+    }
+    auto& buckets = app.lineBuckets;
+    auto at = std::lower_bound(buckets.begin(), buckets.end(), low - kLineBucketTolerance, bucketAbove);
+    for (; at != buckets.end() && at->top <= high + kLineBucketTolerance; ++at) {
+        auto& bucket = *at;
+        // Indices are appended to each bucket in increasing order.
+        if (bucket.textRectIndices.empty() || bucket.textRectIndices.back() < from.textRects) continue;
+        bucket.minX = std::numeric_limits<float>::max();
+        bucket.maxX = std::numeric_limits<float>::lowest();
+        for (size_t idx : bucket.textRectIndices) {
+            bucket.minX = std::min(bucket.minX, app.textRects[idx].rect.left);
+            bucket.maxX = std::max(bucket.maxX, app.textRects[idx].rect.right);
+        }
+    }
+}
+
 static void shiftLayoutItems(App& app, const LayoutSnapshot& from, float dx) {
     if (dx == 0.0f) return;
     for (size_t i = from.textRuns; i < app.layoutTextRuns.size(); i++) {
@@ -369,24 +396,7 @@ static void shiftLayoutItems(App& app, const LayoutSnapshot& from, float dx) {
 
     // A cell can share a line bucket with content laid out before it. Rebuild
     // the affected bucket extents from their rectangles after the shift.
-    for (auto& bucket : app.lineBuckets) {
-        bool affected = false;
-        for (size_t idx : bucket.textRectIndices) {
-            if (idx >= from.textRects) {
-                affected = true;
-                break;
-            }
-        }
-        if (!affected) continue;
-
-        bucket.minX = std::numeric_limits<float>::max();
-        bucket.maxX = std::numeric_limits<float>::lowest();
-        for (size_t idx : bucket.textRectIndices) {
-            const auto& rect = app.textRects[idx].rect;
-            bucket.minX = std::min(bucket.minX, rect.left);
-            bucket.maxX = std::max(bucket.maxX, rect.right);
-        }
-    }
+    refreshBuckets(app, from);
 }
 
 static float getSpaceWidth(App& app, IDWriteTextFormat* format) {
@@ -395,21 +405,6 @@ static float getSpaceWidth(App& app, IDWriteTextFormat* format) {
     if (format == app.italicFormat) return app.spaceWidthItalic;
     if (format == app.codeFormat) return app.spaceWidthCode;
     return measureText(app, L" ", format);
-}
-
-// The bucket extents of the text rects laid out since `from`, after a move
-static void refreshBuckets(App& app, const LayoutSnapshot& from) {
-    for (auto& bucket : app.lineBuckets) {
-        bool affected = false;
-        for (size_t idx : bucket.textRectIndices) affected = affected || idx >= from.textRects;
-        if (!affected) continue;
-        bucket.minX = std::numeric_limits<float>::max();
-        bucket.maxX = std::numeric_limits<float>::lowest();
-        for (size_t idx : bucket.textRectIndices) {
-            bucket.minX = std::min(bucket.minX, app.textRects[idx].rect.left);
-            bucket.maxX = std::max(bucket.maxX, app.textRects[idx].rect.right);
-        }
-    }
 }
 
 // A CSS theme's text-align (page_style.h) for text laid out since `from`
@@ -1924,11 +1919,11 @@ static bool layoutMermaidDiagram(App& app, const std::string& source,
         float width = 0.0f;
         float height = 0.0f;
     };
-    bool vertical = diagram.direction == mermaid::Direction::TopToBottom ||
-                    diagram.direction == mermaid::Direction::BottomToTop;
     float labelPaddingX = 6.0f * scale;
     float labelPaddingY = 4.0f * scale;
-    float rankGap = 78.0f * scale;
+    // The layout widens a rank gap to the labels that sit in it
+    mermaid::LayoutOptions layoutOptions = mermaid::drawingOptions(scale);
+    layoutOptions.edgeLabels.resize(diagram.edges.size());
     std::vector<MeasuredMermaidEdgeLabel> edgeLabels(diagram.edges.size());
     for (size_t i = 0; i < diagram.edges.size(); i++) {
         if (diagram.edges[i].label.empty()) continue;
@@ -1937,11 +1932,15 @@ static bool layoutMermaidDiagram(App& app, const std::string& source,
         edgeLabel.text = toWide(diagram.edges[i].label);
         // A pixel of slack: laid out again at exactly its measured width, a
         // label could wrap its last letter onto a line of its own (#281)
-        edgeLabel.width = std::min(
-            180.0f * scale,
-            std::max(60.0f * scale,
-                     std::ceil(measureText(app, edgeLabel.text, app.textFormat)) + 1.0f +
-                         labelPaddingX * 2.0f));
+        // Each value by name, not nested in std::min(std::max()): MSVC 19.52
+        // at /O2 made 0 of the nested form, and a label of no width has no
+        // text (v4.1.3's first release run)
+        const float labelNatural =
+            std::ceil(measureText(app, edgeLabel.text, app.textFormat)) + 1.0f + labelPaddingX * 2.0f;
+        const float labelLeast = 60.0f * scale;
+        const float labelMost = 180.0f * scale;
+        edgeLabel.width = labelNatural < labelLeast ? labelLeast
+                        : labelNatural > labelMost ? labelMost : labelNatural;
         LayoutInfo measured = createWrappedLayout(
             app, edgeLabel.text, app.textFormat,
             edgeLabel.width - labelPaddingX * 2.0f, measureHeight);
@@ -1962,13 +1961,21 @@ static bool layoutMermaidDiagram(App& app, const std::string& source,
         edgeLabel.height = std::max(
             28.0f * scale, measured.height + labelPaddingY * 2.0f);
         if (measured.layout) measured.layout->Release();
-
-        float labelExtent = vertical ? edgeLabel.height : edgeLabel.width;
-        rankGap = std::max(rankGap, labelExtent + 20.0f * scale);
+        layoutOptions.edgeLabels[i] = {edgeLabel.width, edgeLabel.height};
     }
 
-    mermaid::Layout graphLayout = mermaid::layout(
-        diagram, nodeSizes, 32.0f * scale, rankGap);
+    // A block (a subgraph laid out along its own direction) is as wide as
+    // its title at least; a title that wrapped would sit on the nodes
+    layoutOptions.groupTitles.reserve(diagram.subgraphs.size());
+    for (const auto& subgraph : diagram.subgraphs) {
+        float titleWidth =
+            std::ceil(measureText(app, toWide(subgraph.label), app.textFormat)) + 1.0f;
+        layoutOptions.groupTitles.push_back(
+            std::min(titleWidth, 360.0f * scale) + 16.0f * scale);
+    }
+
+    mermaid::Layout graphLayout =
+        mermaid::layout(diagram, nodeSizes, layoutOptions);
     if (graphLayout.nodes.size() != diagram.nodes.size()) return false;
 
     float baseX = indent;
@@ -1979,21 +1986,35 @@ static bool layoutMermaidDiagram(App& app, const std::string& source,
     if (!diagram.subgraphs.empty()) {
         // Group boxes extend above their topmost node by pad + title
         // height; reserve that room so they stay inside the block
-        baseY += 30.0f * scale;
+        float reserve = 30.0f * scale;
+        // A subgraph laid out on its own (#326) has its box inside the
+        // layout, not above it: with such a subgraph, the room is what the
+        // boxes do reach above the layout
+        if (std::find(graphLayout.blocks.begin(), graphLayout.blocks.end(), true) !=
+            graphLayout.blocks.end()) {
+            reserve = 0.0f;
+            for (const auto& box : graphLayout.groups) {
+                if (!mermaid::isEmpty(box)) reserve = std::max(reserve, -box.top);
+            }
+        }
+        baseY += reserve;
     }
     float diagramLeft = baseX;
     float diagramTop = baseY;
     float diagramRight = baseX + graphLayout.width;
     float diagramBottom = baseY + graphLayout.height;
 
+    // Nodes, group boxes and edges where they are drawn. A subgraph with a
+    // direction of its own is laid out along it (#326), so an edge runs
+    // along the direction of the layout its nodes are part of
+    const mermaid::Placement placed =
+        mermaid::place(diagram, graphLayout, layoutOptions, baseX, baseY);
+    if (placed.nodes.size() != diagram.nodes.size()) return false;
     std::vector<D2D1_RECT_F> nodeRects;
-    nodeRects.reserve(graphLayout.nodes.size());
-    for (const auto& rect : graphLayout.nodes) {
-        nodeRects.push_back(D2D1::RectF(
-            baseX + rect.left,
-            baseY + rect.top,
-            baseX + rect.right,
-            baseY + rect.bottom));
+    nodeRects.reserve(placed.nodes.size());
+    for (const auto& rect : placed.nodes) {
+        nodeRects.push_back(
+            D2D1::RectF(rect.left, rect.top, rect.right, rect.bottom));
     }
 
     struct MermaidTextItem {
@@ -2009,42 +2030,20 @@ static bool layoutMermaidDiagram(App& app, const std::string& source,
 
     // Subgraph group boxes: fill goes through layoutRects (drawn before the
     // connectors), the border rides with the node shapes, the title with the
-    // node labels. Children were declared after their parents, so a reverse
-    // pass finalizes leaves first and parents grow around them.
+    // node labels.
     if (!diagram.subgraphs.empty()) {
-        float boxPad = 10.0f * scale;
-        float titleHeight = 20.0f * scale;
-        constexpr float kEmpty = std::numeric_limits<float>::max();
-        std::vector<D2D1_RECT_F> boxes(
-            diagram.subgraphs.size(),
-            D2D1::RectF(kEmpty, kEmpty, -kEmpty, -kEmpty));
-        auto grow = [](D2D1_RECT_F& box, const D2D1_RECT_F& rect) {
-            box.left = std::min(box.left, rect.left);
-            box.top = std::min(box.top, rect.top);
-            box.right = std::max(box.right, rect.right);
-            box.bottom = std::max(box.bottom, rect.bottom);
-        };
-        for (size_t s = diagram.subgraphs.size(); s-- > 0;) {
-            for (size_t node : diagram.subgraphs[s].nodes) {
-                if (node < nodeRects.size()) grow(boxes[s], nodeRects[node]);
-            }
-            for (size_t c = s + 1; c < diagram.subgraphs.size(); c++) {
-                if (diagram.subgraphs[c].parent == s &&
-                    boxes[c].left != kEmpty) {
-                    grow(boxes[s], boxes[c]);
-                }
-            }
-            if (boxes[s].left == kEmpty) continue;
-            boxes[s].left -= boxPad;
-            boxes[s].top -= boxPad + titleHeight;
-            boxes[s].right += boxPad;
-            boxes[s].bottom += boxPad;
+        float titleHeight = layoutOptions.groupTitle;
+        std::vector<D2D1_RECT_F> boxes;
+        boxes.reserve(placed.groups.size());
+        for (const auto& box : placed.groups) {
+            boxes.push_back(
+                D2D1::RectF(box.left, box.top, box.right, box.bottom));
         }
         D2D1_COLOR_F groupFill = colors.clusterFill;
         D2D1_COLOR_F groupBorder = colors.clusterBorder;
         D2D1_COLOR_F groupTitle = colors.clusterText;
         for (size_t s = 0; s < diagram.subgraphs.size(); s++) {
-            if (boxes[s].left == kEmpty) continue;
+            if (mermaid::isEmpty(placed.groups[s])) continue;
             app.layoutRects.push_back({boxes[s], groupFill});
             app.layoutShapes.push_back({
                 App::LayoutShapeType::Rectangle,
@@ -2069,21 +2068,11 @@ static bool layoutMermaidDiagram(App& app, const std::string& source,
 
     app.layoutConnectors.reserve(
         app.layoutConnectors.size() + diagram.edges.size());
-    // A node's left side at mid-height, where a notch has its tip
-    auto leftSide = [&](size_t node) {
-        const auto& rect = nodeRects[node];
-        return rect.left + mermaid::leftNotch(diagram.nodes[node].shape,
-                                              rect.bottom - rect.top);
-    };
-    size_t exteriorLane = 0;
-    std::vector<D2D1_RECT_F> placedLabelRects;
-    placedLabelRects.reserve(diagram.edges.size());
     for (size_t edgeIndex = 0; edgeIndex < diagram.edges.size(); edgeIndex++) {
         const auto& edge = diagram.edges[edgeIndex];
         if (edge.from >= nodeRects.size() || edge.to >= nodeRects.size()) continue;
 
-        const auto& from = nodeRects[edge.from];
-        const auto& to = nodeRects[edge.to];
+        const mermaid::EdgeRoute& route = placed.edges[edgeIndex];
         App::LayoutConnector connector;
         connector.color = connectorColor;
         connector.stroke = 1.4f * scale * edge.strokeScale;
@@ -2091,109 +2080,12 @@ static bool layoutMermaidDiagram(App& app, const std::string& source,
         connector.directed = edge.directed;
         connector.dashed = edge.dashed;
 
-        float fromCenterX = (from.left + from.right) * 0.5f;
-        float fromCenterY = (from.top + from.bottom) * 0.5f;
-        float toCenterX = (to.left + to.right) * 0.5f;
-        float toCenterY = (to.top + to.bottom) * 0.5f;
-        bool selfLoop = edge.from == edge.to;
-
-        // Edges that skip over intermediate ranks would cut straight through
-        // the nodes between them (and drop their label onto whatever edge
-        // happens to sit at the midpoint) — route those through an exterior
-        // lane like back-edges instead
-        bool skipsRanks = false;
-        if (edge.from < graphLayout.ranks.size() &&
-            edge.to < graphLayout.ranks.size()) {
-            size_t fromRank = graphLayout.ranks[edge.from];
-            size_t toRank = graphLayout.ranks[edge.to];
-            skipsRanks = (fromRank < toRank ? toRank - fromRank
-                                            : fromRank - toRank) > 1;
-        }
-
-        if (vertical) {
-            bool topToBottom =
-                diagram.direction == mermaid::Direction::TopToBottom;
-            bool forward = !selfLoop && !skipsRanks &&
-                (topToBottom ? toCenterY > fromCenterY : toCenterY < fromCenterY);
-            if (selfLoop) {
-                float lane = (36.0f + exteriorLane++ * 14.0f) * scale;
-                D2D1_POINT_2F start = D2D1::Point2F(from.right, fromCenterY);
-                D2D1_POINT_2F end = D2D1::Point2F(fromCenterX, from.bottom);
-                float laneX = from.right + lane;
-                float laneY = from.bottom + lane;
-                connector.points = {
-                    start,
-                    D2D1::Point2F(laneX, start.y),
-                    D2D1::Point2F(laneX, laneY),
-                    D2D1::Point2F(end.x, laneY),
-                    end,
-                };
-            } else if (forward) {
-                D2D1_POINT_2F start = D2D1::Point2F(
-                    fromCenterX, topToBottom ? from.bottom : from.top);
-                D2D1_POINT_2F end = D2D1::Point2F(
-                    toCenterX, topToBottom ? to.top : to.bottom);
-                float middleY = (start.y + end.y) * 0.5f;
-                connector.points = {
-                    start,
-                    D2D1::Point2F(start.x, middleY),
-                    D2D1::Point2F(end.x, middleY),
-                    end,
-                };
-            } else {
-                float lane = (36.0f + exteriorLane++ * 14.0f) * scale;
-                D2D1_POINT_2F start = D2D1::Point2F(from.right, fromCenterY);
-                D2D1_POINT_2F end = D2D1::Point2F(to.right, toCenterY);
-                float laneX = std::max(from.right, to.right) + lane;
-                connector.points = {
-                    start,
-                    D2D1::Point2F(laneX, start.y),
-                    D2D1::Point2F(laneX, end.y),
-                    end,
-                };
-            }
-        } else {
-            bool leftToRight =
-                diagram.direction == mermaid::Direction::LeftToRight;
-            bool forward = !selfLoop && !skipsRanks &&
-                (leftToRight ? toCenterX > fromCenterX : toCenterX < fromCenterX);
-            if (selfLoop) {
-                float lane = (36.0f + exteriorLane++ * 14.0f) * scale;
-                D2D1_POINT_2F start = D2D1::Point2F(fromCenterX, from.bottom);
-                D2D1_POINT_2F end = D2D1::Point2F(from.right, fromCenterY);
-                float laneX = from.right + lane;
-                float laneY = from.bottom + lane;
-                connector.points = {
-                    start,
-                    D2D1::Point2F(start.x, laneY),
-                    D2D1::Point2F(laneX, laneY),
-                    D2D1::Point2F(laneX, end.y),
-                    end,
-                };
-            } else if (forward) {
-                D2D1_POINT_2F start = D2D1::Point2F(
-                    leftToRight ? from.right : leftSide(edge.from), fromCenterY);
-                D2D1_POINT_2F end = D2D1::Point2F(
-                    leftToRight ? leftSide(edge.to) : to.right, toCenterY);
-                float middleX = (start.x + end.x) * 0.5f;
-                connector.points = {
-                    start,
-                    D2D1::Point2F(middleX, start.y),
-                    D2D1::Point2F(middleX, end.y),
-                    end,
-                };
-            } else {
-                float lane = (36.0f + exteriorLane++ * 14.0f) * scale;
-                D2D1_POINT_2F start = D2D1::Point2F(fromCenterX, from.bottom);
-                D2D1_POINT_2F end = D2D1::Point2F(toCenterX, to.bottom);
-                float laneY = std::max(from.bottom, to.bottom) + lane;
-                connector.points = {
-                    start,
-                    D2D1::Point2F(start.x, laneY),
-                    D2D1::Point2F(end.x, laneY),
-                    end,
-                };
-            }
+        // Routed by the layout: straight to the next rank, or along a lane
+        // beside the nodes for an edge that turns back, skips a rank or
+        // returns to its own node
+        connector.points.reserve(route.points.size());
+        for (const auto& point : route.points) {
+            connector.points.push_back(D2D1::Point2F(point.x, point.y));
         }
 
         connector.bounds = D2D1::RectF(
@@ -2217,46 +2109,13 @@ static bool layoutMermaidDiagram(App& app, const std::string& source,
         diagramBottom = std::max(diagramBottom, connector.bounds.bottom);
         app.layoutConnectors.push_back(std::move(connector));
 
-        if (!edge.label.empty()) {
+        if (route.hasLabel) {
             const auto& edgeLabel = edgeLabels[edgeIndex];
-            const auto& points = app.layoutConnectors.back().points;
-            size_t middle = points.size() / 2;
-            const auto& middleStart = points[middle - 1];
-            const auto& middleEnd = points[middle];
-            float centerX = (middleStart.x + middleEnd.x) * 0.5f;
-            float centerY = (middleStart.y + middleEnd.y) * 0.5f;
-            auto chipAt = [&](float cx, float cy) {
-                return D2D1::RectF(
-                    cx - edgeLabel.width * 0.5f,
-                    cy - edgeLabel.height * 0.5f,
-                    cx + edgeLabel.width * 0.5f,
-                    cy + edgeLabel.height * 0.5f);
-            };
-            D2D1_RECT_F labelRect = chipAt(centerX, centerY);
-
-            // Parallel exterior lanes sit only a few pixels apart, so their
-            // midpoint chips stack on top of each other — slide an
-            // overlapping chip along its own segment until it finds space
-            bool segVertical = std::abs(middleEnd.x - middleStart.x) <
-                               std::abs(middleEnd.y - middleStart.y);
-            float stepX = segVertical ? 0.0f : edgeLabel.width + 8.0f * scale;
-            float stepY = segVertical ? edgeLabel.height + 8.0f * scale : 0.0f;
-            auto overlapsPlaced = [&](const D2D1_RECT_F& rect) {
-                for (const auto& placed : placedLabelRects) {
-                    if (rect.left < placed.right && rect.right > placed.left &&
-                        rect.top < placed.bottom && rect.bottom > placed.top) {
-                        return true;
-                    }
-                }
-                return false;
-            };
-            for (int attempt = 1; attempt <= 8 && overlapsPlaced(labelRect); attempt++) {
-                float direction = (attempt % 2 == 1) ? 1.0f : -1.0f;
-                float magnitude = (float)((attempt + 1) / 2);
-                labelRect = chipAt(centerX + stepX * direction * magnitude,
-                                   centerY + stepY * direction * magnitude);
-            }
-            placedLabelRects.push_back(labelRect);
+            // Set on the middle of the edge by the layout, and slid along
+            // it where the label of another edge sat there already
+            D2D1_RECT_F labelRect = D2D1::RectF(
+                route.label.left, route.label.top,
+                route.label.right, route.label.bottom);
             // Draw the label as a visible chip on the edge — an invisible
             // background-colored pill erases the line under it, which makes
             // edges look disconnected and labels look like floating text
@@ -3214,6 +3073,37 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
     std::vector<Piece> pieces;
     std::vector<CodeRow> rows;
 
+    // Code repeats keywords, punctuation and indentation. These layouts
+    // are immutable: colour and position live on the drawing run, and the
+    // format, typography, fallback and line height are fixed for this block.
+    // Keep a bounded set of short fragments; every returned reference is
+    // owned by its caller just like a freshly created layout. The cache is
+    // local so a new block, theme, font, zoom or render target starts fresh.
+    struct CachedPiece {
+        Microsoft::WRL::ComPtr<IDWriteTextLayout> layout;
+        float width, height;
+    };
+    std::map<std::wstring, CachedPiece, std::less<>> pieceCache;
+    auto layoutPiece = [&](std::wstring_view text) {
+        const bool cacheable = text.size() <= 128;
+        if (cacheable) {
+            auto found = pieceCache.find(text);
+            if (found != pieceCache.end()) {
+                found->second.layout->AddRef();
+                return LayoutInfo{found->second.layout.Get(), found->second.width, found->second.height};
+            }
+        }
+        LayoutInfo info = createLayout(app, text, app.codeFormat, lineHeight, app.codeTypography);
+        if (cacheable && info.layout && pieceCache.size() < 256) {
+            CachedPiece cached;
+            cached.layout = info.layout;
+            cached.width = info.width;
+            cached.height = info.height;
+            pieceCache.emplace(std::wstring(text), std::move(cached));
+        }
+        return info;
+    };
+
     while (lineStart < wcode.length()) {
         size_t lineEnd = wcode.find(L'\n', lineStart);
         if (lineEnd == std::wstring::npos) lineEnd = wcode.length();
@@ -3269,8 +3159,7 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
         // The line as it is: most lines fit their block and are done
         float lineWidth = 0.0f;
         for (Piece& piece : pieces) {
-            piece.info = createLayout(app, lineView.substr(piece.start, piece.length), app.codeFormat, lineHeight,
-                                      app.codeTypography);
+            piece.info = layoutPiece(lineView.substr(piece.start, piece.length));
             lineWidth += piece.info.width;
         }
 
@@ -3290,8 +3179,7 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
                     info = piece.info;
                     piece.info = {};
                 } else {
-                    info = createLayout(app, lineView.substr(a, b - a), app.codeFormat, lineHeight,
-                                        app.codeTypography);
+                    info = layoutPiece(lineView.substr(a, b - a));
                 }
                 const float runWidth = info.width;
                 D2D1_POINT_2F pos = D2D1::Point2F(x, textY);
@@ -4136,27 +4024,32 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
     float lineHeight = fontSize * themeLineHeight(app.theme);
     float minColWidth = 40.0f * scale;
 
-    // Collect rows
-    std::vector<Element*> rows;
-    for (const auto& child : elem->children) {
-        if (child->type == ElementType::TableRow) {
-            rows.push_back(child.get());
-        }
-    }
-    if (rows.empty()) return;
-
-    // Determine column count
-    int colCount = elem->col_count;
-    if (colCount <= 0 && !rows.empty()) {
-        colCount = (int)rows[0]->children.size();
-    }
-    if (colCount <= 0) return;
+    // Where the cells sit: a pipe table's plain grid under its header row,
+    // or the header rows and the joined cells of a table written in HTML
+    // (#325), which may have no header and whose cells may cover several
+    // columns or rows
+    const TableGrid grid = tableGrid(*elem);
+    const std::vector<const Element*>& rows = grid.rows;
+    const std::vector<TableGrid::Cell>& cells = grid.cells;
+    const int colCount = grid.colCount;
+    const size_t headRows = (size_t)grid.headerRows;
+    if (rows.empty() || colCount <= 0 || cells.empty()) return;
+    // Row r's cells are cells[rowFirst[r]] up to cells[rowFirst[r + 1]]
+    std::vector<size_t> rowFirst(rows.size() + 1, cells.size());
+    for (size_t i = cells.size(); i-- > 0;) rowFirst[(size_t)cells[i].row] = i;
+    for (size_t r = rows.size(); r-- > 0;) rowFirst[r] = std::min(rowFirst[r], rowFirst[r + 1]);
+    bool joined = false;  // some cell covers more than its own slot
+    for (const TableGrid::Cell& at : cells) joined = joined || at.colSpan > 1 || at.rowSpan > 1;
+    // The first cell of the body, which speaks for the grid; the header's
+    // first where there is no body
+    size_t bodyCell = headRows < rows.size() ? rowFirst[headRows] : 0;
+    if (bodyCell >= cells.size()) bodyCell = 0;
 
     // A CSS theme's table (page_style.h), named as the export writes it:
     // thead > tr > th for the header, tbody > tr > td for the rest
     const page::Style& tableCss = page::current(app);
     std::vector<page::Style> rowCss(rows.size());
-    std::vector<std::vector<page::Style>> cellCss(rows.size(), std::vector<page::Style>((size_t)colCount));
+    std::vector<page::Style> cellCss(cells.size());
     if (tableCss) {
         auto named = [](const char* tag, int index, int count) {
             css::Element e;
@@ -4165,64 +4058,91 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
             e.count = e.typeCount = count;
             return e;
         };
-        const int parts = rows.size() > 1 ? 2 : 1;
-        const css::Element head = named("thead", 1, parts), body = named("tbody", 2, parts);
-        const page::Style headCss = page::child(app, tableCss, head);
-        const page::Style bodyCss = page::child(app, tableCss, body, &head, 1);
-        std::vector<css::Element> trs;
-        for (size_t r = 1; r < rows.size(); r++) trs.push_back(named("tr", (int)r, (int)rows.size() - 1));
-        const css::Element headRow = named("tr", 1, 1);
-        std::vector<css::Element> heads, cells;
-        for (int c = 0; c < colCount; c++) {
-            heads.push_back(named("th", c + 1, colCount));
-            cells.push_back(named("td", c + 1, colCount));
-        }
+        const size_t bodyRows = rows.size() - headRows;
+        const int parts = (headRows > 0 ? 1 : 0) + (bodyRows > 0 ? 1 : 0);
+        const css::Element head = named("thead", 1, parts), body = named("tbody", headRows > 0 ? 2 : 1, parts);
+        page::Style headCss, bodyCss;
+        if (headRows > 0) headCss = page::child(app, tableCss, head);
+        if (bodyRows > 0) bodyCss = page::child(app, tableCss, body, headRows > 0 ? &head : nullptr, headRows > 0 ? 1 : 0);
+        std::vector<css::Element> headTrs, bodyTrs;
+        for (size_t r = 0; r < headRows; r++) headTrs.push_back(named("tr", (int)r + 1, (int)headRows));
+        for (size_t r = 0; r < bodyRows; r++) bodyTrs.push_back(named("tr", (int)r + 1, (int)bodyRows));
+        // A row's cells: all th or all td in most rows, named once for
+        // every row of as many cells
+        std::vector<css::Element> uniform[2], mixed;
         for (size_t r = 0; r < rows.size(); r++) {
-            rowCss[r] = r == 0 ? page::child(app, headCss, headRow)
-                               : page::child(app, bodyCss, trs[r - 1], trs.data(), r - 1);
-            const std::vector<css::Element>& kind = r == 0 ? heads : cells;
-            for (int c = 0; c < colCount; c++)
-                cellCss[r][(size_t)c] = page::child(app, rowCss[r], kind[(size_t)c], kind.data(), (size_t)c);
+            rowCss[r] = r < headRows ? page::child(app, headCss, headTrs[r], headTrs.data(), r)
+                                     : page::child(app, bodyCss, bodyTrs[r - headRows], bodyTrs.data(), r - headRows);
+            const size_t first = rowFirst[r], count = rowFirst[r + 1] - first;
+            if (count == 0) continue;
+            int ths = 0;
+            for (size_t k = 0; k < count; k++) ths += cells[first + k].header ? 1 : 0;
+            const std::vector<css::Element>* kind = &mixed;
+            if (ths == 0 || ths == (int)count) {
+                std::vector<css::Element>& same = uniform[ths > 0 ? 1 : 0];
+                if (same.size() != count) {
+                    same.clear();
+                    for (size_t k = 0; k < count; k++) same.push_back(named(ths > 0 ? "th" : "td", (int)k + 1, (int)count));
+                }
+                kind = &same;
+            } else {
+                mixed.clear();
+                int th = 0, td = 0;
+                for (size_t k = 0; k < count; k++) {
+                    const bool header = cells[first + k].header;
+                    css::Element e = named(header ? "th" : "td", (int)k + 1, (int)count);
+                    e.typeIndex = header ? ++th : ++td;
+                    e.typeCount = header ? ths : (int)count - ths;
+                    mixed.push_back(e);
+                }
+            }
+            for (size_t k = 0; k < count; k++)
+                cellCss[first + k] = page::child(app, rowCss[r], (*kind)[k], kind->data(), k);
         }
     }
     // One padding for the grid, the body cells' (or the header's)
     float padX = cellPadding, padY = cellPadding;
     {
-        const page::Style& cell = cellCss[rows.size() > 1 ? 1 : 0][0];
+        const page::Style& cell = cellCss[bodyCell];
         if (cell.has(Prop::PaddingLeft) || cell.has(Prop::PaddingRight))
             padX = page::px(app, std::max(cell->padding[3], cell->padding[1]));
         if (cell.has(Prop::PaddingTop) || cell.has(Prop::PaddingBottom))
             padY = page::px(app, std::max(cell->padding[0], cell->padding[2]));
     }
-    auto cellFormat = [&](size_t r, size_t c) {
-        return page::format(app, cellCss[r][c], r == 0 ? app.boldFormat : app.textFormat);
+    auto cellFormat = [&](size_t i) {
+        return page::format(app, cellCss[i], cells[i].header ? app.boldFormat : app.textFormat);
     };
-    auto cellColor = [&](size_t r, size_t c) {
-        return page::textColor(cellCss[r][c], r == 0 ? app.theme.heading : app.theme.text);
+    auto cellColor = [&](size_t i) {
+        return page::textColor(cellCss[i], cells[i].header ? app.theme.heading : app.theme.text);
     };
     y += page::before(app, 0);
+    // A <caption> stands over its table
+    for (const auto& child : elem->children) {
+        if (child->type == ElementType::Caption) layoutElement(app, child, y, indent, maxWidth);
+    }
 
     // Pass 1: Measure natural widths using plain text extraction (cheap, approximate)
     std::vector<float> colWidths(colCount, minColWidth);
     std::vector<float> rowHeights(rows.size(), lineHeight + padY * 2);
-    std::vector<std::vector<int>> cellAligns(rows.size(), std::vector<int>(colCount, 0));
+    std::vector<int> cellAligns(cells.size(), 0);
     // Per-cell natural width + plain-text flag: a simple cell that fits its
     // final column is exactly one line tall, so the height-measuring trial
     // layout in pass 1b can be skipped for it entirely
-    std::vector<std::vector<float>> cellNatural(rows.size(), std::vector<float>(colCount, 0.0f));
-    std::vector<std::vector<uint8_t>> cellSimple(rows.size(), std::vector<uint8_t>(colCount, 0));
+    std::vector<float> cellNatural(cells.size(), 0.0f);
+    std::vector<uint8_t> cellSimple(cells.size(), 0);
 
     std::wstring tsv;  // per-cell plain text doubles as the copy payload
     for (size_t r = 0; r < rows.size(); r++) {
-        const auto& row = rows[r];
         if (r > 0) tsv += L"\n";
-        for (size_t c = 0; c < row->children.size() && c < (size_t)colCount; c++) {
-            const auto& cell = row->children[c];
-            cellAligns[r][c] = cell->align;
+        int tsvCol = 0;
+        for (size_t i = rowFirst[r]; i < rowFirst[r + 1]; i++) {
+            const TableGrid::Cell& at = cells[i];
+            const Element* cell = at.cell;
+            cellAligns[i] = cell->align;
             // A column's own alignment stands; the theme's fills the rest
-            if (!cell->align && cellCss[r][c].has(Prop::TextAlign)) {
-                const css::TextAlign a = cellCss[r][c]->textAlign;
-                cellAligns[r][c] = a == css::TextAlign::Center ? 2 : a == css::TextAlign::Right ? 3 : 0;
+            if (!cell->align && cellCss[i].has(Prop::TextAlign)) {
+                const css::TextAlign a = cellCss[i]->textAlign;
+                cellAligns[i] = a == css::TextAlign::Center ? 2 : a == css::TextAlign::Right ? 3 : 0;
             }
 
             // Extract plain text for width estimation
@@ -4230,11 +4150,14 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
             std::function<void(const ElementPtr&)> extract = [&](const ElementPtr& e) {
                 if (!e) return;
                 if (e->type == ElementType::Text) text += toWide(e->text);
+                else if (e->type == ElementType::HardBreak) text += L' ';  // a <br>: the words stay apart
                 else for (const auto& ch : e->children) extract(ch);
             };
             for (const auto& ch : cell->children) extract(ch);
 
-            if (c > 0) tsv += L"\t";
+            // A cell's text goes in the column it starts in: the slots a
+            // joined cell covers stay empty in the copy
+            for (; tsvCol < at.col; tsvCol++) tsv += L"\t";
             std::wstring tsvCell = text;
             for (wchar_t& ch : tsvCell) {
                 if (ch == L'\t' || ch == L'\n' || ch == L'\r') ch = L' ';
@@ -4246,7 +4169,7 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
             // layout here picked a different CJK font than the renderer,
             // whose slightly wider advances then wrapped a "fitting" cell
             // one line past its measured row height (#148)
-            IDWriteTextFormat* fmt = cellFormat(r, c);
+            IDWriteTextFormat* fmt = cellFormat(i);
             bool plainCell = cell->children.size() == 1 &&
                              cell->children[0]->type == ElementType::Text;
             float textWidth = 0;
@@ -4268,31 +4191,42 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
                     MeasuringOnly measuring(app);
                     layoutInlineContent(app, cell->children, 0.0f, cy,
                                         kHugeWidth, fmt, app.theme.text, {},
-                                        lineHeight, -1.0f, &cellCss[r][c]);
+                                        lineHeight, -1.0f, &cellCss[i]);
                 }
                 float maxRight = 0.0f;
-                for (size_t i = snap.textRuns; i < app.layoutTextRuns.size();
-                     i++) {
+                for (size_t k = snap.textRuns; k < app.layoutTextRuns.size();
+                     k++) {
                     maxRight = std::max(maxRight,
-                                        app.layoutTextRuns[i].bounds.right);
+                                        app.layoutTextRuns[k].bounds.right);
                 }
-                for (size_t i = snap.rects; i < app.layoutRects.size(); i++) {
+                for (size_t k = snap.rects; k < app.layoutRects.size(); k++) {
                     maxRight = std::max(maxRight,
-                                        app.layoutRects[i].rect.right);
+                                        app.layoutRects[k].rect.right);
                 }
-                for (size_t i = snap.bitmaps; i < app.layoutBitmaps.size(); i++) {
+                for (size_t k = snap.bitmaps; k < app.layoutBitmaps.size(); k++) {
                     maxRight = std::max(maxRight,
-                                        app.layoutBitmaps[i].destRect.right);
+                                        app.layoutBitmaps[k].destRect.right);
                 }
                 rollbackTo(app, snap);
                 textWidth = maxRight;
             }
             float needed = textWidth + padX * 2 + 6.0f * scale;
-            if (needed > colWidths[c]) colWidths[c] = needed;
-            cellNatural[r][c] = needed;
-            cellSimple[r][c] = cell->children.size() == 1 &&
-                               cell->children[0]->type == ElementType::Text;
+            if (at.colSpan == 1 && needed > colWidths[at.col]) colWidths[at.col] = needed;
+            cellNatural[i] = needed;
+            cellSimple[i] = plainCell;
         }
+    }
+    // A cell over several columns widens them by equal shares when it
+    // needs more room than they have between them
+    auto spanWidth = [&](const TableGrid::Cell& at) {
+        float width = 0.0f;
+        for (int k = 0; k < at.colSpan; k++) width += colWidths[at.col + k];
+        return width;
+    };
+    for (size_t i = 0; joined && i < cells.size(); i++) {
+        if (cells[i].colSpan < 2) continue;
+        const float more = cellNatural[i] - spanWidth(cells[i]);
+        for (int k = 0; more > 0.0f && k < cells[i].colSpan; k++) colWidths[cells[i].col + k] += more / cells[i].colSpan;
     }
 
     // Distribute widths like a browser's auto table layout: columns whose
@@ -4366,38 +4300,43 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
     }
 
     // Pass 1b: Measure row heights via layoutInlineContent with snapshot-rollback
-    for (size_t r = 0; r < rows.size(); r++) {
-        float maxRowH = lineHeight + padY * 2;
-        const auto& row = rows[r];
-
-        for (size_t c = 0; c < row->children.size() && c < (size_t)colCount; c++) {
-            const auto& cell = row->children[c];
-            if (cell->children.empty()) continue;
-
-            // A plain-text cell whose natural width fits the column is one
-            // line tall — no trial layout needed (the common case)
-            if (cellSimple[r][c] && cellNatural[r][c] <= colWidths[c]) continue;
-
-            float cellW = colWidths[c] - padX * 2;
+    std::vector<std::pair<size_t, float>> tall;  // the cells over several rows, and their heights
+    for (size_t i = 0; i < cells.size(); i++) {
+        const TableGrid::Cell& at = cells[i];
+        float h = lineHeight + padY * 2;
+        // A plain-text cell whose natural width fits the column is one
+        // line tall — no trial layout needed (the common case)
+        const float width = spanWidth(at);
+        if (!at.cell->children.empty() && !(cellSimple[i] && cellNatural[i] <= width)) {
+            float cellW = width - padX * 2;
             LayoutSnapshot snap = takeSnapshot(app);
             float cellY = 0.0f;
             {
                 MeasuringOnly measuring(app);
-                layoutInlineContent(app, cell->children, 0.0f, cellY, cellW,
-                                    cellFormat(r, c), cellColor(r, c), {}, lineHeight, -1.0f, &cellCss[r][c]);
+                layoutInlineContent(app, at.cell->children, 0.0f, cellY, cellW,
+                                    cellFormat(i), cellColor(i), {}, lineHeight, -1.0f, &cellCss[i]);
             }
             rollbackTo(app, snap);
-
-            float h = cellY + padY * 2;
-            if (h > maxRowH) maxRowH = h;
+            h = std::max(h, cellY + padY * 2);
         }
-        rowHeights[r] = maxRowH;
+        if (at.rowSpan > 1) tall.push_back({i, h});
+        else if (h > rowHeights[(size_t)at.row]) rowHeights[(size_t)at.row] = h;
+    }
+    // A cell over several rows that needs more than they have between
+    // them lengthens the last of them
+    for (const auto& [i, h] : tall) {
+        const TableGrid::Cell& at = cells[i];
+        float have = 0.0f;
+        for (int k = 0; k < at.rowSpan; k++) have += rowHeights[(size_t)(at.row + k)];
+        if (h > have) rowHeights[(size_t)(at.row + at.rowSpan - 1)] += h - have;
     }
 
     // The Table element itself never receives a sourceOffset (the parser
     // stamps the deepest element at text time), so the table's source
     // anchor is its first text-bearing descendant - the same convention
-    // the in-place cell editor's source parser assumes (#148)
+    // the in-place cell editor's source parser assumes (#148). Nothing in a
+    // table written in HTML has a place in the source: it has no anchor,
+    // and so no cell to edit in place and no row or column to add (#325)
     size_t tableSrc = SIZE_MAX;
     {
         std::function<void(const ElementPtr&)> firstSrc =
@@ -4426,7 +4365,7 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
     std::optional<D2D1_COLOR_F> headerColor;
     bool themedRows = false;
     {
-        const page::Style& cell = cellCss[rows.size() > 1 ? 1 : 0][0];
+        const page::Style& cell = cellCss[bodyCell];
         auto side = [&](int s, float& width, D2D1_COLOR_F& color) {
             const Prop w = (Prop)((int)Prop::BorderTopWidth + s * 3);
             if (!cell.has(w) && !cell.has((Prop)((int)w + 1))) return false;
@@ -4444,8 +4383,8 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
         // leaves out is no line at all, as in a browser
         if (themedAcross && !themedDown) down = 0.0f;
         if (themedDown && !themedAcross) across = headerRule = 0.0f;
-        const page::Style& head = cellCss[0][0];
-        if (head.has(Prop::BorderBottomWidth) || head.has(Prop::BorderBottomStyle)) {
+        const page::Style& head = cellCss[0];
+        if (headRows > 0 && (head.has(Prop::BorderBottomWidth) || head.has(Prop::BorderBottomStyle))) {
             headerRule = head->border[2].style == css::LineStyle::None ? 0.0f : page::px(app, head->border[2].width);
             if (head.has(Prop::BorderBottomColor)) headerColor = page::color(head->border[2].color);
         }
@@ -4454,67 +4393,105 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
         if (head.has(Prop::BorderTopWidth) || head.has(Prop::BorderTopStyle)) {
             topRule = head->border[0].style == css::LineStyle::None ? 0.0f : page::px(app, head->border[0].width);
         }
-        for (size_t r = 1; r < rows.size(); r++) {
-            themedRows = themedRows || rowCss[r].has(Prop::BackgroundColor) || cellCss[r][0].has(Prop::BackgroundColor);
+        for (size_t r = headRows; r < rows.size(); r++) {
+            themedRows = themedRows || rowCss[r].has(Prop::BackgroundColor) ||
+                         (rowFirst[r] < rowFirst[r + 1] && cellCss[rowFirst[r]].has(Prop::BackgroundColor));
         }
     }
 
+    // The columns' left edges and the rows' tops, and one past the last of each
+    std::vector<float> colX((size_t)colCount + 1, indent), rowY(rows.size() + 1, y);
+    for (int c = 0; c < colCount; c++) colX[(size_t)c + 1] = colX[(size_t)c] + colWidths[c];
+    for (size_t r = 0; r < rows.size(); r++) rowY[r + 1] = rowY[r] + rowHeights[r];
+    // The table's right edge is its width from its left one, as its rows' bands and lines have it
+    auto edge = [&](int c) { return c >= colCount ? indent + totalWidth : colX[(size_t)c]; };
+    // The slot is its own row's: no cell from a row above covers it
+    auto ownSlot = [&](size_t r, int c) {
+        const int slot = grid.at((int)r, c);
+        return slot < 0 || cells[(size_t)slot].row == (int)r;
+    };
+
     for (size_t r = 0; r < rows.size(); r++) {
-        float cellX = indent;
-        bool isHeader = (r == 0);
-        const auto& row = rows[r];
+        bool isHeader = r < headRows;
+        y = rowY[r];
+        const size_t first = rowFirst[r], end = rowFirst[r + 1];
 
         // Header row background
-        const page::Style& rowBack = cellCss[r][0].has(Prop::BackgroundColor) ? cellCss[r][0] : rowCss[r];
+        const page::Style& rowBack = first < end && cellCss[first].has(Prop::BackgroundColor) ? cellCss[first] : rowCss[r];
+        std::optional<D2D1_COLOR_F> band;
         if (rowBack.has(Prop::BackgroundColor)) {
             const D2D1_COLOR_F back = page::color(rowBack->backgroundColor);
-            if (back.a > 0.0f) {
-                app.layoutRects.push_back({D2D1::RectF(indent, y, indent + totalWidth, y + rowHeights[r]), back});
-            }
+            if (back.a > 0.0f) band = back;
         } else if (isHeader) {
             D2D1_COLOR_F headerBg = app.theme.codeBackground;
             headerBg.a = 0.5f;
-            app.layoutRects.push_back({D2D1::RectF(indent, y, indent + totalWidth, y + rowHeights[r]), headerBg});
-        } else if (r % 2 == 0 && !themedRows) {
+            band = headerBg;
+        } else if ((r - headRows) % 2 == 1 && !themedRows) {
             // Subtle alternating row background
             D2D1_COLOR_F altBg = app.theme.codeBackground;
             altBg.a = 0.15f;
-            app.layoutRects.push_back({D2D1::RectF(indent, y, indent + totalWidth, y + rowHeights[r]), altBg});
+            band = altBg;
+        }
+        if (band && !joined) {
+            app.layoutRects.push_back({D2D1::RectF(indent, y, indent + totalWidth, y + rowHeights[r]), *band});
+        } else if (band) {
+            // The band stops at the cells that come down from the rows
+            // above, and goes down with the cells of this row that cover
+            // the rows below
+            for (int c = 0; c < colCount;) {
+                if (!ownSlot(r, c)) {
+                    c++;
+                    continue;
+                }
+                const int slot = grid.at((int)r, c);
+                const int from = c;
+                float bottom = rowY[r + 1];
+                if (slot >= 0 && cells[(size_t)slot].rowSpan > 1) {
+                    c += cells[(size_t)slot].colSpan;
+                    bottom = rowY[r + (size_t)cells[(size_t)slot].rowSpan];
+                } else {
+                    while (c < colCount && ownSlot(r, c) && (grid.at((int)r, c) < 0 || cells[(size_t)grid.at((int)r, c)].rowSpan == 1)) c++;
+                }
+                app.layoutRects.push_back({D2D1::RectF(colX[(size_t)from], y, edge(c), bottom), *band});
+            }
         }
 
-        for (size_t c = 0; c < row->children.size() && c < (size_t)colCount; c++) {
-            const auto& cell = row->children[c];
-            IDWriteTextFormat* fmt = cellFormat(r, c);
-            D2D1_COLOR_F textColor = cellColor(r, c);
+        for (size_t i = first; i < end; i++) {
+            const TableGrid::Cell& at = cells[i];
+            const Element* cell = at.cell;
+            IDWriteTextFormat* fmt = cellFormat(i);
+            D2D1_COLOR_F textColor = cellColor(i);
+            const float cellX = colX[(size_t)at.col];
+            const float cellWidth = spanWidth(at);
 
             // In-place editing (#148): the preview records every cell's
             // rect keyed by the table's source anchor plus row/col
             if (app.editMode && tableSrc != SIZE_MAX) {
                 app.tableCellRects.push_back(
-                    {tableSrc, (int)r, (int)c,
-                     D2D1::RectF(cellX, y, cellX + colWidths[c],
+                    {tableSrc, (int)r, at.col,
+                     D2D1::RectF(cellX, y, cellX + cellWidth,
                                  y + rowHeights[r])});
             }
 
             if (!cell->children.empty()) {
-                float cellW = colWidths[c] - padX * 2;
+                float cellW = cellWidth - padX * 2;
                 float textX = cellX + padX;
                 float textY = y + padY;
 
-                int align = cellAligns[r][c];
+                int align = cellAligns[i];
                 LayoutSnapshot cellSnap = takeSnapshot(app);
 
                 layoutInlineContent(app, cell->children, textX, textY, cellW,
-                                    fmt, textColor, {}, lineHeight, -1.0f, &cellCss[r][c]);
+                                    fmt, textColor, {}, lineHeight, -1.0f, &cellCss[i]);
 
                 // Apply center/right alignment by shifting all new items
                 if (align == 2 || align == 3) {
                     float maxRight = 0.0f;
-                    for (size_t i = cellSnap.textRuns; i < app.layoutTextRuns.size(); i++) {
-                        maxRight = std::max(maxRight, app.layoutTextRuns[i].bounds.right);
+                    for (size_t k = cellSnap.textRuns; k < app.layoutTextRuns.size(); k++) {
+                        maxRight = std::max(maxRight, app.layoutTextRuns[k].bounds.right);
                     }
-                    for (size_t i = cellSnap.bitmaps; i < app.layoutBitmaps.size(); i++) {
-                        maxRight = std::max(maxRight, app.layoutBitmaps[i].destRect.right);
+                    for (size_t k = cellSnap.bitmaps; k < app.layoutBitmaps.size(); k++) {
+                        maxRight = std::max(maxRight, app.layoutBitmaps[k].destRect.right);
                     }
                     float contentW = maxRight - textX;
                     float dx = 0.0f;
@@ -4533,38 +4510,65 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
             // double-click takes one cell's word instead of gluing on its
             // neighbours ("DeltaEchoFoxtrot"), and a copied row pastes into
             // a spreadsheet as columns (#246, spotted by @Lex987)
-            if (c + 1 < row->children.size() && c + 1 < (size_t)colCount) {
+            if (i + 1 < end) {
                 app.docText += L"\t";
             }
-            cellX += colWidths[c];
         }
         app.docText += L"\n";
-        y += rowHeights[r];
     }
+    y = rowY[rows.size()];
 
-    // Grid lines: horizontal
+    // Grid lines: horizontal. A cell over several rows has no line across it
     for (size_t r = 0; r <= rows.size(); r++) {
-        float lineY = tableStartY;
-        for (size_t i = 0; i < r; i++) lineY += rowHeights[i];
-        float stroke = r == 0 ? topRule : r == 1 ? headerRule : across; // thicker after header
+        float lineY = rowY[r];
+        float stroke = r == 0 ? topRule : r == headRows ? headerRule : across; // thicker after header
         if (stroke <= 0.0f) continue;
-        app.layoutLines.push_back({D2D1::Point2F(indent, lineY),
-                                   D2D1::Point2F(indent + totalWidth, lineY),
-                                   r == 1 && headerColor ? *headerColor : acrossColor, stroke});
+        const D2D1_COLOR_F color = r > 0 && r == headRows && headerColor ? *headerColor : acrossColor;
+        if (!joined || r == 0 || r == rows.size()) {
+            app.layoutLines.push_back({D2D1::Point2F(indent, lineY),
+                                       D2D1::Point2F(indent + totalWidth, lineY),
+                                       color, stroke});
+            continue;
+        }
+        for (int c = 0; c < colCount;) {
+            auto parted = [&](int col) {
+                const int above = grid.at((int)r - 1, col);
+                return above < 0 || above != grid.at((int)r, col);
+            };
+            if (!parted(c)) {
+                c++;
+                continue;
+            }
+            const int from = c;
+            while (c < colCount && parted(c)) c++;
+            app.layoutLines.push_back({D2D1::Point2F(colX[(size_t)from], lineY), D2D1::Point2F(edge(c), lineY), color, stroke});
+        }
     }
 
-    // Grid lines: vertical
+    // Grid lines: vertical. A cell over several columns has no line down it
     {
-        float tableEndY = tableStartY;
-        for (size_t r = 0; r < rows.size(); r++) tableEndY += rowHeights[r];
-        float vx = indent;
-        for (int c = 0; c <= colCount; c++) {
-            if (down > 0.0f) {
+        float tableEndY = rowY[rows.size()];
+        for (int c = 0; c <= colCount && down > 0.0f; c++) {
+            const float vx = colX[(size_t)c];
+            if (!joined || c == 0 || c == colCount) {
                 app.layoutLines.push_back({D2D1::Point2F(vx, tableStartY),
                                            D2D1::Point2F(vx, tableEndY),
                                            downColor, down});
+                continue;
             }
-            if (c < colCount) vx += colWidths[c];
+            for (size_t r = 0; r < rows.size();) {
+                auto parted = [&](size_t row) {
+                    const int left = grid.at((int)row, c - 1);
+                    return left < 0 || left != grid.at((int)row, c);
+                };
+                if (!parted(r)) {
+                    r++;
+                    continue;
+                }
+                const size_t from = r;
+                while (r < rows.size() && parted(r)) r++;
+                app.layoutLines.push_back({D2D1::Point2F(vx, rowY[from]), D2D1::Point2F(vx, rowY[r]), downColor, down});
+            }
         }
 
         // Copy-as-TSV hover button hit region
@@ -4799,7 +4803,7 @@ static void layoutElement(App& app, const ElementPtr& elem, float& y, float inde
                                 child->type == ElementType::List ||
                                 child->type == ElementType::HorizontalRule ||
                                 child->type == ElementType::HtmlBlock ||
-                                child->type == ElementType::Table);
+                                child->type == ElementType::Table);  // one written in HTML (#325)
                 if (isBlock) {
                     layoutInlineRun(app, inlineBuffer, y, indent, maxWidth);
                     layoutElement(app, child, y, indent, maxWidth);

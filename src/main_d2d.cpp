@@ -46,6 +46,7 @@
 #include "input.h"
 #include "live_editor.h"
 #include "touch.h"
+#include "autoscroll.h"
 #include "editor.h"
 #include "print.h"
 #include "export.h"
@@ -58,6 +59,42 @@
 #pragma comment(lib, "dbghelp.lib")
 
 static App* g_app = nullptr;
+
+// Software target creation initializes a process-wide rasterizer. Do that
+// alongside settings/window/font setup, on a private factory: neither the
+// app's single-threaded factory nor any of its resources cross threads.
+// Join on every exit, including a file forwarded to another window. An
+// unavailable worker is harmless; normal target creation still does all
+// initialization itself.
+class SoftwareRenderWarmup {
+    std::thread worker;
+    bool started = false;
+public:
+    void start() noexcept {
+        if (started) return;
+        started = true;
+        try {
+            worker = std::thread([] {
+                const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+                if (FAILED(com)) return;
+                {
+                    Microsoft::WRL::ComPtr<ID2D1Factory> factory;
+                    if (SUCCEEDED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, factory.GetAddressOf()))) {
+                        const auto props = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+                            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+                        Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> target;
+                        factory->CreateDCRenderTarget(&props, target.GetAddressOf());
+                    }
+                }
+                CoUninitialize();
+            });
+        } catch (...) {
+            // Thread creation is optional; it must not prevent opening a file.
+        }
+    }
+    void wait() { if (worker.joinable()) worker.join(); }
+    ~SoftwareRenderWarmup() { wait(); }
+};
 
 // Initializes the GPU driver on a worker thread after the first (software)
 // frame is on screen. D3D device creation costs ~200 ms dominated by
@@ -1063,6 +1100,9 @@ render_document:
 // Everything above the page or the sheet: prompts, chips, the tab strip,
 // overlays and dialogs, then the end of the frame
 static void renderChromeAndEnd(App& app) {
+    // Middle-click autoscroll's mark, where the click fell (#331)
+    renderAutoScrollMark(app);
+
     // The source's citation list under its caret, over the page beside it
     if (app.editMode) renderEditorCompletion(app);
 
@@ -1203,6 +1243,10 @@ static void updateCheckWorker(HWND hwnd) {
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     App* app = g_app;
+
+    // Middle-click autoscroll takes the pointer and every click while it
+    // is on (#331)
+    if (app && autoScrollMessage(*app, hwnd, msg, wParam, lParam)) return 0;
 
     switch (msg) {
         case WM_NCCALCSIZE: {
@@ -1359,6 +1403,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
                 // A sheet pans with the middle button held
                 if (sheetMiddleDown(*app, hwnd, mx, my)) return 0;
+                // The page and the editor's text scroll towards the pointer (#331)
+                if (autoScrollStart(*app, hwnd, POINT{mx, my}, touchClockMs())) return 0;
             }
             break;
 
@@ -1910,6 +1956,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 settings.zenWidthPct = app->zenWidthPct;
                 settings.headingRules = app->headingRules;
                 settings.wrapCode = app->wrapCode;
+                settings.middleClickScroll = app->middleClickScroll;
                 settings.foldSections = app->foldSections;
                 settings.foldOnOpen = app->foldOnOpen;
                 settings.tocOnLeft = app->tocOnLeft;
@@ -1979,6 +2026,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     auto startupStart = Clock::now();
 
+    SoftwareRenderWarmup softwareWarmup;
+    // Most launches with an existing window only hand it a file. Leave
+    // those alone; start below if this launch actually needs its own window.
+    if (!FindWindowW(L"Tinta", nullptr)) softwareWarmup.start();
+
     App app;
     auto t0 = startupStart;
     g_app = &app;
@@ -2035,6 +2087,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     app.zenWidthPct = savedSettings.zenWidthPct;
     app.headingRules = savedSettings.headingRules;
     app.wrapCode = savedSettings.wrapCode;
+    app.middleClickScroll = savedSettings.middleClickScroll;
     app.foldSections = savedSettings.foldSections;
     app.foldOnOpen = savedSettings.foldOnOpen;
     app.openMode = savedSettings.openMode;
@@ -2185,6 +2238,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     askAndRegisterFileAssociation(savedSettings);
     offerBorrowedFileIcon(savedSettings, chooseFileIcon);
 
+    softwareWarmup.start();
+
     if (lightMode) {
         app.currentThemeIndex = 0;  // Paper (first light theme)
         app.theme = THEMES[0];
@@ -2289,6 +2344,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
     // Create render target
     t0 = Clock::now();
+    softwareWarmup.wait();
     if (!createRenderTarget(app)) {
         MessageBoxW(nullptr, tr(app, "error.render_target_failed"),
                    tr(app, "error.title"), MB_OK);
